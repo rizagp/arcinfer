@@ -349,15 +349,15 @@ class Engine {
       reset();
       return false;
     }
-    std::vector<int> t(32, tok);
-    forward(t.data(), 32);
+    std::vector<int> t(std::max(1, std::min(32, ctx - 12)), tok);
+    forward(t.data(), (int)t.size());
     forward(&tok, 1);
     if (has_mtp && !gemma_mtp_) {
       for (int round = 0; round < (dfl_ ? 2 : 1); ++round) {
-        dfl_ema_ = round == 0 ? 4.0 : 0.0;  // (round 0 with DFlash2: its drafts; round 1: the MTP block's)
-        dfl_wait_ = 0;
-        dfl_gap_ = 1 << 16;
         for (int k = 1; k <= max_drafts() && pos + k + 2 < ctx; ++k) {
+          dfl_ema_ = round == 0 ? 4.0 : 0.0;  // (round 0 with DFlash2: its drafts; round 1: the MTP block's)
+          dfl_wait_ = 0;
+          dfl_gap_ = 1 << 16;
           mtp_draft(tok, k);
           verify(tok, std::vector<int>(k, tok));
           verify_done(0);
@@ -3491,7 +3491,7 @@ class Engine {
     const bool gemm_ok = moe_group_ > 0 && Fp == F && moe_gemm_layer_ok(L);
     const bool rg_ok = !no_rg && hp.moe_std && tm == 16 && T >= rg_min && F % 64 == 0 && moe_rg_layer_ok(L);
     const bool use_rg = rg_ok && gemm_ok && T < rg_max, rg_down = rg_ok && (T < rg_max || !gemm_ok);
-    const bool use_gemm = !use_rg && moe_group_ > 0 && tm == 16 && T >= gemm_min && moe_gemm_layer_ok(L);
+    const bool use_gemm = !use_rg && gemm_ok && tm == 16 && T >= gemm_min;
     const std::string xdef = xc_ ? " -DXCACHE" : "";
     // standard expert types, per tile (kernels/decode.cl moe_gateup_q / moe_down_q): the tiles in `tiles`
     auto gateup_q = [&](cl_mem tiles) {

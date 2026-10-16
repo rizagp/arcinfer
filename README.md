@@ -348,10 +348,10 @@ Qwen3.8 Flash Next.
 
   | Model, text | plain | MTP alone | DFlash2 + MTP |
   |---|---|---|---|
-  | Qwen3.8 27B, Python code | 4.90 tok/s | 15.2 | 16.9 |
-  | Qwen3.8 27B, Indonesian prose | 4.46 | 6.8 | 6.1 |
-  | Qwen3.6 35B-A3B, Python code | 20.8 | 37.7 | 47.5 (99 % of drafts accepted) |
-  | Qwen3.6 35B-A3B, Indonesian prose | 20.7 | 22.2 | 22.2 |
+  | Qwen3.8 27B, Python code | 4.91 tok/s | 15.5 | 18.1 |
+  | Qwen3.8 27B, Indonesian prose | 4.88 | 7.0 | 6.8 |
+  | Qwen3.6 35B-A3B, Python code | 21.2 | 39.3 | 49.8 (99 % of drafts accepted) |
+  | Qwen3.6 35B-A3B, Indonesian prose | 21.0 | 22.7 | 22.7 |
 
   The drafters are trained mostly on English and code; on other text the MTP block does most of the work.
 - Images (`image_url` content parts, data URLs) and audio (`input_audio`, `/v1/audio/transcriptions`) when the
