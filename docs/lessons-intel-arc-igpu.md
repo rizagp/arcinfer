@@ -63,7 +63,7 @@ Generation is memory-bound: the goal is reading the weights at close to 75 GB/s,
 
 | Change | Effect |
 |---|---|
-| **DFlash2 block drafter** (27B: 8 rows per draft pass, 7 drafts verified at once; switches to the MTP block when its drafts are rejected) | Python code 4.85 -> 11.5 tok/s (89 % of drafts taken); Indonesian prose ~MTP (the drafter is weak outside English / code) |
+| **DFlash2 block drafter** (8 rows per draft pass, 7 drafts verified at once; switches to the MTP block when its drafts are rejected) | 27B Python code 4.85 -> 11.5 tok/s (MTP alone ~8.9; 89 % of drafts taken); 35B code 15.7 -> 44.4 (MTP 31.5; 98 % taken); Indonesian prose ~MTP (27B 5.6, 35B 22.5: the drafters are weak outside English / code) |
 | GEMVs straight on the raw GGUF blocks (no decode pass), block reads, codebooks in local memory | 11–49 -> 57–77 GB/s |
 | Raw blocks regrouped once at load for aligned vector loads (Q8_0 scales first; IQ2/IQ3 scale moved last) | Q8_0 GEMV 37 -> 77 GB/s, IQ2_XXS 27 -> 60, IQ3_XXS 41 -> 62 |
 | IQ4_XS: lanes vector-load their own bytes; 16-entry table pre-shifted per byte | E4B attention q 44 -> 67 GB/s, output head 48 -> 69; E4B 17 -> 21 tok/s |
@@ -83,6 +83,7 @@ IQ4_XS / Q4_K reach ±62 in the same profile; codebook types need more arithmeti
 | Change | Effect |
 |---|---|
 | **MoE expert streaming from the SSD** (Level Zero): only the experts in use stay in a GPU cache (LRU, prefetch while the GPU works) | Qwen3.6 35B-A3B at the full 262K context together with images and MTP (the all-resident engine fit ~40K), Windows keeps 14 GB of RAM |
+| Expert cache with one pool of the largest record size when a model mixes more than two record sizes (Qwen3.8 Flash Next: 512 experts, 5 type mixes) | separate pools each needed a whole layer and ran out of GPU memory; one pool runs it with a 7.9 GiB cache (12 % of a 56 GB expert file), ~4 tok/s |
 | Prompt chunks of 4,096 with the experts of a chunk streamed through a separate buffer | a long prompt does not sweep the cache that generation uses |
 | Automatic context from the GPU memory the driver currently offers | the budget changes with other apps; computing it per start avoids out-of-memory crashes |
 | Prefix cache (system prompt state on disk per project), session cache (whole conversations to disk), a snapshot at the start of the last assistant turn | a new message in a long Pi session: 5.2 s instead of 16.8 s (9B); a new session reuses the system prompt in ~5 s instead of ~40 s (27B) |

@@ -31,6 +31,7 @@ Target hardware it was built and tuned on: Intel Core Ultra 5 125H (Arc iGPU, 7 
 | `qwen35` | Qwen3.5 (0.8B–27B dense), Qwen3.6, Qwen3.8 27B | hybrid Gated DeltaNet + gated attention; MTP speculative decoding; image input with a Qwen3-VL `mmproj` next to the model (encoded on the GPU; Qwen3.5 4B and 9B) |
 | `qwen35moe` | Qwen3.6-35B-A3B: standard GGUFs (e.g. Unsloth UD-Q3_K_M / UD-Q3_K_S) or ISTA-DASLab GSQ 2-bit | mixture of experts (256 experts, 8 active); standard GGUF experts (IQ / Q3_K / Q4_K / Q5_K / Q6_K / Q8_0 / Q4_0) load as they are; GSQ converted from the safetensors checkpoint with `tools/convert_gsq.py`; Unsloth's MTP repository adds speculative decoding and its `mmproj` image input (arcinferzero: both together at 262K context) |
 | `gemma4` | Gemma 4 12B, Gemma 4 E4B (Google's QAT Q4_0 GGUFs) | sliding-window + global attention, per-layer embeddings (E4B); image and audio input (`mmproj`: 12B gemma4uv / gemma4ua, E4B gemma4v ViT and gemma4a conformer on the GPU); speculative decoding with the Gemma 4 assistant drafters (`mtp-*.gguf`) |
+| `qwen4exp` | Qwen3.8 Flash Next (ISTA-DASLab GSQ-RCO IQ3_S, GGUF in 2 parts) | **arcinferzero only**; 4 hyper-connection streams, Gated DeltaNet + gated attention with QSA sparse attention, 512 experts (10 active) streamed from the SSD, PLE n-gram table read from part 2 per token; no MTP block, no image input; long-context QSA not validated yet |
 
 Weight types: `Q4_0`, `Q8_0`, `Q2_K`, `Q4_K`, `Q5_K`, `Q6_K`, `IQ1_M`, `IQ2_XXS`, `IQ2_XS`, `IQ2_S`, `IQ3_XXS`, `IQ3_S`,
 `IQ4_XS` (mixed per tensor, e.g. Unsloth dynamic or ISTA-DASLab GSQ-RCO quants), plus `F32/F16/BF16` small matrices;
@@ -143,6 +144,8 @@ in the same folder as the model: download them from the same repository in the s
 | `g12` | Gemma 4 12B QAT (Google, Q4_0) + image projector; drafter from Unsloth, copied into the model's snapshot folder | `hf download google/gemma-4-12B-it-qat-q4_0-gguf` and `hf download unsloth/gemma-4-12B-it-qat-GGUF mtp-gemma-4-12B-it.gguf` | 7.0 + 0.2 + 0.3 GB |
 | `e4b` | Gemma 4 E4B QAT (Google, Q4_0); drafter from Unsloth, copied into the model's snapshot folder | `hf download google/gemma-4-E4B-it-qat-q4_0-gguf gemma-4-E4B_q4_0-it.gguf` and `hf download unsloth/gemma-4-E4B-it-qat-GGUF mtp-gemma-4-E4B-it.gguf` | 5.2 + 0.1 GB |
 | `35b` | Qwen3.6 35B-A3B, 2-bit GSQ | see step 7 (download 12.6 GB, then convert) | 11.7 GB |
+| | Qwen3.8 Flash Next (arcinferzero only, no short alias) | `hf download ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF --include "IQ3_S/*"` | 54.8 + 28.8 GB |
+| | DFlash2 drafters (optional, see `--dflash` below) | `hf download z-lab/Qwen3.8-27B-DFlash2` / `hf download incoai/Qwen3.6-35B-A3B-DFlash2` | 3.85 / 1.05 GB |
 
 With their `mmproj` file next to the model, Gemma 4 12B and E4B read images and audio, and Qwen3.5 4B / 9B and
 Qwen3.6 35B read images (all encoders run on the GPU).
@@ -177,8 +180,8 @@ speculative decoding. `arc-server` / `pi-arc` find the converted file in `%LOCAL
 This starts arcinferzero; add `-OpenCL` for the OpenCL engine. The first start of each model compiles its GPU
 kernels (up to a minute or two); they are cached in `%LOCALAPPDATA%\arcinfer\kernels`, so later starts take 5–40 s
 (mostly reading the model file). The first arcinferzero start of a mixture-of-experts model also writes its expert
-file once (35B: 15 GB, about 2.5 minutes) to `%LOCALAPPDATA%\arcinfer\zero\`; it can be deleted at any time and is
-written again when missing. Then open the web
+file once (35B: 15 GB, about 2.5 minutes; Qwen3.8 Flash Next: 56 GB, about 9.5 minutes, later loads ~13–25 s) to
+`%LOCALAPPDATA%\arcinfer\zero\`; it can be deleted at any time and is written again when missing. Then open the web
 UI at http://127.0.0.1:8090/ or call the OpenAI API at `http://127.0.0.1:8090/v1`. `arc-server status` shows what
 is running and `arc-server stop` frees the GPU memory.
 
@@ -275,7 +278,8 @@ test uses port 8091 and needs the GPU memory.
 ```
 
 `bin\server.exe` (OpenCL engine) takes the same options except the arcinferzero ones (`--mtp-drafts` above 3,
-`--expert-cache-gb`, `--expert-cache-pct`, `--windows-reserve-gb`, `--no-stream`).
+`--expert-cache-gb`, `--expert-cache-pct`, `--windows-reserve-gb`, `--no-stream`, `--dflash`) and does not load
+Qwen3.8 Flash Next.
 
 - Web UI: http://127.0.0.1:8080/
 - OpenAI API: `POST /v1/chat/completions` (streaming, `reasoning_content`, tool calls streamed while they are
@@ -336,6 +340,20 @@ test uses port 8091 and needs the GPU memory.
   sampled from the model's distribution, so the output is unchanged (checked: identical answers at every draft
   count). `--mtp-drafts N`: arcinferzero 1–7 (default 3 for the 4B, 27B and 35B, 2 for the 9B and Gemma; more than 3
   is not faster yet), the OpenCL engine up to 2 (Qwen) / 3 (Gemma).
+- `--dflash DIR` (arcinferzero: `serverz`, `runz`): speculative decoding with a DFlash2 block drafter, `DIR` being
+  the folder with its `config.json` and `model.safetensors` (the snapshot folder of `hf download
+  z-lab/Qwen3.8-27B-DFlash2` for the 27B, `hf download incoai/Qwen3.6-35B-A3B-DFlash2` for the 35B). It drafts a
+  block of 7 tokens per pass from the main model's hidden states. The model's MTP block stays loaded and each step
+  picks the drafter: DFlash2 while its drafts are accepted, else MTP. Greedy, answers identical to plain decoding:
+
+  | Model, text | plain | MTP alone | DFlash2 + MTP |
+  |---|---|---|---|
+  | Qwen3.8 27B, Python code | 4.85 tok/s | ~8.9 | 11.5 |
+  | Qwen3.8 27B, Indonesian prose | 4.67 | ~5.8–6.3 | 5.6 |
+  | Qwen3.6 35B-A3B, Python code | 15.7 | 31.5 | 44.4 (98 % of drafts accepted) |
+  | Qwen3.6 35B-A3B, Indonesian prose | 17.0 | 22.3 | 22.5 |
+
+  The drafters are trained mostly on English and code; on other text the MTP block does most of the work.
 - Images (`image_url` content parts, data URLs) and audio (`input_audio`, `/v1/audio/transcriptions`) when the
   model's `mmproj-*.gguf` is next to it (or given with `--mmproj`): images on Gemma 4 12B / E4B, Qwen3.5 4B / 9B and
   Qwen3.6 35B, audio on Gemma 4 12B / E4B; the encoders run on the GPU.
@@ -344,6 +362,10 @@ test uses port 8091 and needs the GPU memory.
   keys); the content stays the model's choice. `ARC_TOOL_CONSTRAINT=0` turns it off; `ARC_LOG_TOOLCALLS=file.jsonl`
   logs the raw text of every tool call.
 - During a long prompt, streaming responses carry `: prefill N/M` progress comments (also shown in the web UI).
+- Qwen3.8 Flash Next (arcinferzero only): pass the first part (`...-IQ3_S-00001-of-00002.gguf`) with `-m`; part 2
+  must sit next to it. First numbers on the 32 GB laptop: generation ~4 tok/s, short prompts slow while the expert
+  cache is cold (cache 7.9 GiB = 12 % of the experts); KL vs the CPU reference 0.0014 on a short chat prompt. No
+  MTP block, no image input, long-context QSA still to be validated.
 
 ## Using Pi
 

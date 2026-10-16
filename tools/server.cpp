@@ -1720,12 +1720,54 @@ static bool same_file(const std::string& a, const std::string& b) {
 // (defined below) the auto context of a model file with / without its MTP block and image encoders
 static int auto_ctx_tokens(const std::string& model, bool mtp, bool vision);
 
+// the Hugging Face cache (HF_HUB_CACHE, HF_HOME\hub or %USERPROFILE%\.cache\huggingface\hub)
+static std::string hf_hub_dir() {
+  if (const char* v = getenv("HF_HUB_CACHE")) return v;
+  if (const char* h = getenv("HF_HOME")) return std::string(h) + "/hub";
+  if (const char* u = getenv("USERPROFILE")) return std::string(u) + "/.cache/huggingface/hub";
+  return "";
+}
+// extra model folders (e.g. a second drive): ARC_MODEL_DIRS (';'-separated) and %LOCALAPPDATA%\arcinfer\model-dirs.txt
+// (one folder per line, '#' comments); each in the Hugging Face cache layout or with .gguf files directly in it
+static std::vector<std::string> extra_model_dirs() {
+  std::vector<std::string> extra;
+  auto add = [&](std::string d) {
+    while (!d.empty() && (d.back() == '\r' || d.back() == ' ' || d.back() == '\t')) d.pop_back();
+    while (!d.empty() && (d.front() == ' ' || d.front() == '\t')) d.erase(d.begin());
+    if (!d.empty() && d[0] != '#') extra.push_back(d);
+  };
+  if (const char* v = getenv("ARC_MODEL_DIRS")) {
+    std::string all = v;
+    for (size_t a = 0, b; a <= all.size(); a = b + 1) {
+      b = all.find(';', a);
+      if (b == std::string::npos) b = all.size();
+      add(all.substr(a, b - a));
+    }
+  }
+  if (const char* la = getenv("LOCALAPPDATA")) {
+    std::ifstream f(std::filesystem::path(la) / "arcinfer" / "model-dirs.txt");
+    for (std::string line; std::getline(f, line);) add(line);
+  }
+  return extra;
+}
+// (a folder on a drive that hangs, e.g. a USB stick after the laptop slept, would stall every model list and so
+//  every server start: each folder is first listed by a detached thread and skipped if that takes over 2 s)
+// 1: listed, 2: not a readable folder, 0: no answer within 2 s
+static int folder_reachable(const std::filesystem::path& d) {
+  auto st = std::make_shared<std::atomic<int>>(0);
+  std::thread([d, st] {
+    std::error_code e;
+    const bool ok = std::filesystem::is_directory(d, e);
+    if (ok) std::filesystem::directory_iterator it(d, e);
+    st->store(ok && !e ? 1 : 2);
+  }).detach();
+  for (int i = 0; i < 100 && st->load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  return st->load();
+}
+
 static std::vector<ModelInfo> scan_models() {
   namespace fs = std::filesystem;
-  std::string hub;
-  if (const char* v = getenv("HF_HUB_CACHE")) hub = v;
-  else if (const char* h = getenv("HF_HOME")) hub = std::string(h) + "/hub";
-  else if (const char* u = getenv("USERPROFILE")) hub = std::string(u) + "/.cache/huggingface/hub";
+  const std::string hub = hf_hub_dir();
   // (prio: 0 the Hugging Face cache and arcinfer's own folders, 1+ the extra model folders in their order, so a model
   //  kept in both places loads from the first)
   struct Cand { std::string name, file; fs::path path; fs::file_time_type t; int prio = 0; };
@@ -1756,43 +1798,10 @@ static std::vector<ModelInfo> scan_models() {
     }
   };
   if (!hub.empty()) scan_hub(hub, 0);
-  // extra model folders (e.g. a second drive): ARC_MODEL_DIRS (';'-separated) and %LOCALAPPDATA%\arcinfer\model-dirs.txt
-  // (one folder per line, '#' comments); each in the Hugging Face cache layout or with .gguf files directly in it
   {
-    std::vector<std::string> extra;
-    auto add = [&](std::string d) {
-      while (!d.empty() && (d.back() == '\r' || d.back() == ' ' || d.back() == '\t')) d.pop_back();
-      while (!d.empty() && (d.front() == ' ' || d.front() == '\t')) d.erase(d.begin());
-      if (!d.empty() && d[0] != '#') extra.push_back(d);
-    };
-    if (const char* v = getenv("ARC_MODEL_DIRS")) {
-      std::string all = v;
-      for (size_t a = 0, b; a <= all.size(); a = b + 1) {
-        b = all.find(';', a);
-        if (b == std::string::npos) b = all.size();
-        add(all.substr(a, b - a));
-      }
-    }
-    if (const char* la = getenv("LOCALAPPDATA")) {
-      std::ifstream f(fs::path(la) / "arcinfer" / "model-dirs.txt");
-      for (std::string line; std::getline(f, line);) add(line);
-    }
-    // (a folder on a drive that hangs, e.g. a USB stick after the laptop slept, would stall every model list and so
-    //  every server start: each folder is first listed by a detached thread and skipped if that takes over 2 s)
-    auto reachable = [](const fs::path& d) {
-      auto st = std::make_shared<std::atomic<int>>(0);
-      std::thread([d, st] {
-        std::error_code e;
-        const bool ok = fs::is_directory(d, e);
-        if (ok) fs::directory_iterator it(d, e);
-        st->store(ok && !e ? 1 : 2);
-      }).detach();
-      for (int i = 0; i < 100 && st->load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
-      return st->load();
-    };
     int prio = 1;
-    for (const auto& d : extra) {
-      const int r = reachable(fs::path(d));
+    for (const auto& d : extra_model_dirs()) {
+      const int r = folder_reachable(fs::path(d));
       if (r == 1) scan_hub(fs::path(d), prio);
       else if (r == 0) fprintf(stderr, "model folder %s did not answer within 2 s (drive asleep or hung?): skipped\n", d.c_str());
       ++prio;
@@ -1933,6 +1942,54 @@ static std::vector<ModelInfo> scan_models() {
   return all;
 }
 
+#ifdef ARC_ZERO
+// A DFlash2 block drafter for a model file: a *DFlash2* repository (z-lab, incoai: config.json + model.safetensors)
+// in the Hugging Face cache or an extra model folder whose config is a DFlash2DraftModel of the model's width
+// (hidden_size = <arch>.embedding_length) and depth (num_target_layers = <arch>.block_count without the MTP layers);
+// the newest snapshot of the first folder that has one. Empty if none.
+static std::string find_dflash(const std::string& model) {
+  namespace fs = std::filesystem;
+  int64_t n_embd = 0, n_layer = 0;
+  try {
+    const GgufFile g(model);
+    const std::string arch = g.get_str("general.architecture", "");
+    n_embd = g.get_int(arch + ".embedding_length", 0);
+    n_layer = g.get_int(arch + ".block_count", 0) - g.get_int(arch + ".nextn_predict_layers", 0);
+  } catch (const std::exception&) {
+    return "";
+  }
+  if (n_embd <= 0 || n_layer <= 0) return "";
+  std::vector<std::string> dirs;
+  if (!hf_hub_dir().empty()) dirs.push_back(hf_hub_dir());
+  for (const auto& d : extra_model_dirs())
+    if (folder_reachable(fs::path(d)) == 1) dirs.push_back(d);
+  std::error_code ec;
+  for (const auto& dir : dirs) {
+    fs::path best;
+    fs::file_time_type best_t{};
+    for (const auto& d : fs::directory_iterator(fs::path(dir), ec)) {
+      const std::string dn = lower_ascii(d.path().filename().string());
+      if (!d.is_directory(ec) || dn.rfind("models--", 0) != 0 || dn.find("dflash") == std::string::npos) continue;
+      for (const auto& s : fs::directory_iterator(d.path() / "snapshots", ec)) {
+        if (!fs::exists(s.path() / "model.safetensors", ec)) continue;
+        std::ifstream f(s.path() / "config.json", std::ios::binary);
+        Json cfg;
+        if (!f || !Json::try_parse(std::string(std::istreambuf_iterator<char>(f), {}), cfg) || !cfg.is_object()) continue;
+        bool arch = false;
+        for (const auto& a : cfg["architectures"].items()) arch = arch || a.str() == "DFlash2DraftModel";
+        if (!arch || cfg["hidden_size"].as_int() != n_embd || cfg["num_target_layers"].as_int() != n_layer ||
+            !cfg["dflash_config"].is_object())
+          continue;
+        const fs::file_time_type t = fs::last_write_time(s.path(), ec);
+        if (best.empty() || t > best_t) best = s.path(), best_t = t;
+      }
+    }
+    if (!best.empty()) return best.lexically_normal().string();
+  }
+  return "";
+}
+#endif
+
 // ---------------------------------------------------------------- --ctx auto
 // The largest context (a multiple of 4096, at most the trained one) for which the server's GPU memory, the ~0.22 GiB
 // the driver adds and ~0.95 GiB for the desktop and other apps fit the device's global memory. A dry load (the
@@ -1959,7 +2016,8 @@ static std::string ctx_key(const std::string& model, const EngineOptions& eo) {
   for (auto& c : p) c = (char)tolower((unsigned char)c);
   return p + "|" + std::to_string(fs::file_size(model, ec)) + "|" + std::to_string(eo.chunk) +
 #ifdef ARC_ZERO
-         "|z" + std::to_string((int)(eo.windows_reserve_gb * 10)) + (eo.stream_experts ? "s" : "n") + "|" +
+         "|z" + std::to_string((int)(eo.windows_reserve_gb * 10)) + (eo.stream_experts ? "s" : "n") +
+         (eo.dflash.empty() ? std::string() : "|dflash") + "|" +  // (DFlash2 drafter: its weights and buffers)
 #endif
          (eo.min_chunk ? "/" + std::to_string(eo.min_chunk) : std::string()) + "|" + (eo.mtp ? "mtp" : "-") + "|" + (eo.attn_int8 ? "i8" : "f32") + "|" + std::to_string(device_global_mem()) +
          "|m9";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
@@ -2117,6 +2175,9 @@ static int auto_ctx_tokens(const std::string& model, bool mtp, bool vision) {
 // for this GPU memory (with --mtp when the model has a drafter, default chunk), computed now if not known yet.
 static int list_models() {
   Json out = Json::array();
+#ifdef ARC_ZERO
+  std::map<std::string, std::string> dflash;  // model file -> its DFlash2 drafter (one search per file, not per variant)
+#endif
   for (const ModelInfo& m : scan_models()) {
     Json j = Json::object();
     j.set("name", m.name);
@@ -2134,6 +2195,18 @@ static int list_models() {
     j.set("tags", m.tags);
     EngineOptions eo;
     eo.mtp = m.mtp;
+#ifdef ARC_ZERO
+    // dflash: a DFlash2 drafter for this model was found (dflash_path); variants with MTP draft with it as well (the
+    // server picks it up with --mtp, see load_model), so their context and defaults count it
+    std::string dfl;
+    if (m.supported) {
+      if (!dflash.count(m.path)) dflash[m.path] = find_dflash(m.path);
+      dfl = dflash[m.path];
+    }
+    j.set("dflash", !dfl.empty());
+    j.set("dflash_path", dfl);
+    if (m.mtp) eo.dflash = dfl;
+#endif
     AutoCtx a;  // computed now (dry load) if not known yet; per variant (MTP block, encoders' memory)
     a.ctx = 0;
     if (m.supported)
@@ -2160,7 +2233,7 @@ static int list_models() {
       if (gemma && m.vision) chunk = std::max(chunk, 2048);  // (an image is one chunk)
       d.set("chunk", chunk);
 #ifdef ARC_ZERO
-      d.set("mtp_drafts", !m.mtp ? 0 : gemma ? 2 : moe || n_embd >= 5120 || n_embd <= 2560 ? 3 : 2);
+      d.set("mtp_drafts", !m.mtp ? 0 : !eo.dflash.empty() ? 7 : gemma ? 2 : moe || n_embd >= 5120 || n_embd <= 2560 ? 3 : 2);
 #else
       d.set("mtp_drafts", !m.mtp ? 0 : moe ? 1 : !gemma && n_embd >= 5120 ? 3 : 2);
 #endif
@@ -2204,6 +2277,7 @@ struct ServeOpts {
   double prefix_gb = 8.0;  // all models' saved system prompts together (0 = no limit)
   int img_min = 0, img_max = 0;  // image tokens per image (0 = the encoder's default)
   bool budget_given = false;     // --budget: no automatic choice of resident weights
+  bool dflash_auto = true;       // arcinferzero, with MTP: a DFlash2 drafter found for the model drafts too (--no-dflash: not)
 };
 struct Loaded {  // destroyed in reverse order: the server before the tokenizer and engine it refers to
   std::unique_ptr<Engine> eng;
@@ -2217,6 +2291,12 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
   L->path = model;
   fprintf(stderr, "arcinfer-server: loading %s\n", model.c_str());
   EngineOptions eo = so.eo;
+#ifdef ARC_ZERO
+  if (eo.mtp && eo.dflash.empty() && so.dflash_auto) {  // (before --ctx auto: the drafter takes GPU memory)
+    eo.dflash = find_dflash(model);
+    if (!eo.dflash.empty()) fprintf(stderr, "DFlash2 drafter found: %s (--no-dflash: MTP block only)\n", eo.dflash.c_str());
+  }
+#endif
   // Gemma 4 with an image projector: an image's tokens attend to each other both ways, so one image is one forward
   // step; the steps must hold the largest image (resident E4B weights otherwise step through prompts in 512s)
   if (so.mmproj != "-") {
@@ -2388,6 +2468,7 @@ int main(int argc, char** argv) {
     else if (a == "--mtp") so.eo.mtp = true;
 #ifdef ARC_ZERO
     else if (a == "--dflash") { so.eo.dflash = next(); so.eo.mtp = true; }
+    else if (a == "--no-dflash") { so.eo.dflash.clear(); so.dflash_auto = false; }
 #endif
     else if (a == "--mmproj") so.mmproj = next();
     else if (a == "--no-mmproj") so.mmproj = "-";
@@ -2421,7 +2502,9 @@ int main(int argc, char** argv) {
             "                        MoE, else 2)\n"
 #ifdef ARC_ZERO
             "  --dflash DIR          speculative decoding with a DFlash2 block drafter instead (z-lab, Qwen3.8 27B;\n"
-            "                        7 drafts per step)\n"
+            "                        7 drafts per step); default with --mtp: a *DFlash2* drafter for the model in the\n"
+            "                        Hugging Face cache or the extra model folders, if there is one\n"
+            "  --no-dflash           no DFlash2 drafter (--mtp: the model's MTP block only)\n"
 #endif
             "  --think-budget N      default reasoning budget in tokens (requests can override it)\n"
             "  --preserve-thinking   earlier turns keep their reasoning (Qwen3.6 template option; requests can override it\n"
@@ -2740,6 +2823,10 @@ int main(int argc, char** argv) {
           s2.ctx_auto = true;  // the --ctx given at start was for the first model
           s2.eo.mtp = m->mtp;  // the variant's settings: MTP block / drafter, image projector
           s2.mmproj = m->vision ? "" : "-";
+#ifdef ARC_ZERO
+          // (a --dflash drafter is for the first model, and only with MTP; other models find their own)
+          if (!m->mtp || !same_file(m->path, model)) s2.eo.dflash.clear();
+#endif
           try {
             cur = load_model(m->path, m->alias, s2);
             fprintf(stderr, "switched to %s in %.1f s\n", m->alias.c_str(), ms_since(t0) / 1000);
@@ -2754,6 +2841,9 @@ int main(int argc, char** argv) {
                 s3.eo.mtp = pm.mtp;
                 s3.mmproj = pm.vision ? "" : "-";
               }
+#ifdef ARC_ZERO
+            if (!s3.eo.mtp || !same_file(prev_path, model)) s3.eo.dflash.clear();
+#endif
             cur = load_model(prev_path, prev_alias, s3);
             Json err = Json::object(), r = Json::object();
             err.set("message", std::string("could not load model ") + want + ": " + e.what());

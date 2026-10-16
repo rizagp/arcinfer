@@ -38,6 +38,8 @@ Model yang tersedia (setup mengunduhnya ke `%USERPROFILE%\.cache\huggingface\hub
 | `pi-arc e4b` | Gemma 4 E4B | `google/gemma-4-E4B-it-qat-q4_0-gguf` → `gemma-4-E4B_q4_0-it.gguf`; drafter `mtp-gemma-4-E4B-it.gguf` dari `unsloth/gemma-4-E4B-it-qat-GGUF`, disalin ke folder snapshot model Google |
 | `pi-arc 9b` | Qwen3.5 9B | `unsloth/Qwen3.5-9B-MTP-GGUF` → `Qwen3.5-9B-UD-Q4_K_XL.gguf` |
 | `pi-arc 4b` | Qwen3.5 4B | `unsloth/Qwen3.5-4B-MTP-GGUF` → `Qwen3.5-4B-UD-Q4_K_XL.gguf` |
+| (tanpa nama pendek) | Qwen3.8 Flash Next (MoE 512 expert, hanya arcinferzero) | `ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF` → folder `IQ3_S`, 2 file (54,8 + 28,8 GB): `hf download ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF --include "IQ3_S/*"` (tidak diunduh oleh setup) |
+| (opsional) | Drafter DFlash2 untuk 27B / 35B (lihat bagian 3) | `hf download z-lab/Qwen3.8-27B-DFlash2` (3,85 GB) / `hf download incoai/Qwen3.6-35B-A3B-DFlash2` (1,05 GB) |
 
 Pilihan `35b` di `setup.cmd` mengunduh versi GSQ 2-bit dari ISTA-DASLab. Versi ini tidak tersedia dalam GGUF, jadi
 dikonversi sekali (±2,5 menit, hasil 10,9 GB di `%LOCALAPPDATA%\arcinfer\models`):
@@ -161,13 +163,36 @@ Kalau memori GPU tiba-tiba kurang karena aplikasi lain (mis. Chrome), cache dike
 bukan crash.
 
 Catatan arcinferzero:
-- Cache SSD hanya untuk model MoE (35B; expert layer MTP ikut di file yang sama). Model dense (27B, 9B, 4B, Gemma)
+- Cache SSD hanya untuk model MoE (35B dan Qwen3.8 Flash Next; expert layer MTP 35B ikut di file yang sama). Model dense (27B, 9B, 4B, Gemma)
   hanya berganti engine ke Level Zero: konteks dan memori sama dengan engine OpenCL.
 - File expert tidak pernah dihapus otomatis: start berikutnya langsung memakainya (35B sekitar 10 detik, termasuk
   mengisi cache GPU dari daftar terakhir). Dibuat ulang hanya kalau GGUF berubah; file versi lama perlu dihapus
   manual dari `%LOCALAPPDATA%\arcinfer\zero\`.
 - Kernel GPU dikompilasi sekali lalu disimpan (`%LOCALAPPDATA%\arcinfer\kernels`): permintaan pertama sebuah model
   di zero, gambar pertama, atau setelah update driver Intel terasa lebih lambat, setelah itu normal.
+
+**Drafter DFlash2 (`--dflash`, hanya arcinferzero: `serverz.exe` / `runz.exe`).** Drafter ini menebak 7 token
+sekaligus dari hidden state model utama, lalu model utama memeriksanya dalam satu kali jalan. Unduh drafternya
+(tabel di bagian 1), lalu berikan foldernya (folder snapshot yang berisi `config.json` dan `model.safetensors`)
+lewat `--dflash DIR`. Blok MTP model tetap dipakai: tiap langkah server memilih DFlash2 selama tebakannya banyak
+diterima, kalau tidak MTP. Hasil (greedy, jawaban sama persis dengan tanpa drafter):
+
+| Model, jenis teks | Tanpa tebakan | MTP saja | DFlash2 + MTP |
+|---|---|---|---|
+| Qwen3.8 27B, kode Python | 4,85 token/detik | ±8,9 | 11,5 |
+| Qwen3.8 27B, teks bahasa Indonesia | 4,67 | ±5,8–6,3 | 5,6 |
+| Qwen3.6 35B-A3B, kode Python | 15,7 | 31,5 | 44,4 (98 % tebakan diterima) |
+| Qwen3.6 35B-A3B, teks bahasa Indonesia | 17,0 | 22,3 | 22,5 |
+
+Drafter ini dilatih terutama dengan teks Inggris dan kode, jadi untuk bahasa Indonesia hampir tidak menambah
+kecepatan (MTP yang banyak bekerja).
+
+**Qwen3.8 Flash Next (hanya arcinferzero).** Model MoE dengan 512 expert yang diambil dari SSD (seperti 35B).
+Jalankan `serverz.exe` dengan `-m` ke file pertama (`...-IQ3_S-00001-of-00002.gguf`); file kedua harus ada di folder
+yang sama. Start pertama membuat file expert 56 GB di `%LOCALAPPDATA%\arcinfer\zero\` (±9,5 menit); start berikutnya
+±13–25 detik. Angka awal: menulis ±4 token/detik, prompt pendek masih lambat selama cache expert belum terisi (cache
+7,9 GiB = 12 % dari semua expert). Selisih dengan acuan CPU kecil (KL 0,0014 pada prompt chat pendek). Model ini tidak
+punya blok MTP dan tidak bisa membaca gambar; konteks panjang (attention QSA) belum diuji.
 
 Matikan server (`arc-server stop`) sebelum memakai laptop untuk pekerjaan GPU berat lain (game, edit video), atau
 sebelum memindahkan/membangun ulang folder arcinfer.

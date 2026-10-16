@@ -13,8 +13,138 @@
 // everything before this layer; a slot reused within the layer is written by a copy queued after the kernels that
 // read its previous expert.
 #pragma once
-#include "expert_store.h"
 #include <algorithm>
+#include <cstdint>
+#include <vector>
+
+// ---- pools: the layers grouped by record size (pure host logic; tests/test_xcache_pools.cpp, no GPU)
+// A pool's record is the largest record of its layers (a smaller record leaves the rest of its slot unused), and every
+// pool holds at least one layer's experts (a prompt chunk uses all of them). With one or two record sizes every size
+// has its own pool and the cache is split by the pools' share of the expert bytes (as before). With more (Qwen3.8
+// Flash Next: 7 type mixes, Qwen3.6 35B: 4) one pool per size needs more memory than a small cache has, and one pool of
+// the largest record wastes a fifth of it in padding: choose() tries every grouping of the sorted sizes into runs
+// (2^(sizes-1)) whose pools fit the cache with one layer each, gives each the same fraction of its layers' experts,
+// and keeps the one with the most slots (ties: fewer bytes, then fewer pools). One pool of the largest record is the
+// fallback when nothing else fits.
+namespace xpools {
+struct Plan {
+  std::vector<uint64_t> rec;  // pool -> record bytes
+  std::vector<int> layers;    // pool -> MoE layers in it
+  std::vector<int> pool_of;   // layer -> pool (-1: not a MoE layer)
+  std::vector<int> n;         // pool -> slots
+  uint64_t bytes = 0;         // sum of n * rec
+  int slots = 0;
+};
+inline std::vector<uint64_t> sizes(const std::vector<uint64_t>& lrec) {  // distinct record sizes, ascending
+  std::vector<uint64_t> d;
+  for (uint64_t r : lrec) if (r) d.push_back(r);
+  std::sort(d.begin(), d.end());
+  d.erase(std::unique(d.begin(), d.end()), d.end());
+  return d;
+}
+inline uint64_t real_bytes(const std::vector<uint64_t>& lrec, int NE) {  // every expert in a record of its own size
+  uint64_t s = 0;
+  for (uint64_t r : lrec) s += r * NE;
+  return s;
+}
+// A layer goes to the pool of the smallest bound >= its record (bounds: ascending record sizes, the last = the
+// largest); pools in the order of their first layer.
+inline Plan group(const std::vector<uint64_t>& lrec, const std::vector<uint64_t>& bounds) {
+  Plan P;
+  P.pool_of.assign(lrec.size(), -1);
+  std::vector<int> pb(bounds.size(), -1);
+  for (size_t l = 0; l < lrec.size(); ++l) {
+    if (!lrec[l]) continue;
+    const size_t b = std::lower_bound(bounds.begin(), bounds.end(), lrec[l]) - bounds.begin();
+    if (pb[b] < 0) { pb[b] = (int)P.rec.size(); P.rec.push_back(bounds[b]); P.layers.push_back(0); }
+    P.pool_of[l] = pb[b];
+    ++P.layers[pb[b]];
+  }
+  P.n.assign(P.rec.size(), 0);
+  return P;
+}
+inline void tally(Plan& P) {
+  P.bytes = 0;
+  P.slots = 0;
+  for (size_t g = 0; g < P.rec.size(); ++g) P.bytes += (uint64_t)P.n[g] * P.rec[g], P.slots += P.n[g];
+}
+// (one or two sizes) `bytes` split by the pools' share of the expert bytes, at least a layer per pool
+inline void size_shares(Plan& P, int NE, uint64_t bytes) {
+  uint64_t all = 0;
+  for (size_t g = 0; g < P.rec.size(); ++g) all += P.rec[g] * NE * P.layers[g];
+  bytes = std::min(bytes, all);
+  for (size_t g = 0; g < P.rec.size(); ++g) {
+    const uint64_t mine = P.rec[g] * NE * P.layers[g];
+    P.n[g] = std::min((int)(mine / P.rec[g]), std::max(NE, (int)((double)bytes * mine / all / P.rec[g])));
+  }
+  tally(P);
+}
+// (more sizes) the same fraction of every pool's experts (at least a layer, at most all), the most that fits in
+// `bytes`; the bytes left over as whole slots to the pools of the smallest records
+inline void size_even(Plan& P, int NE, uint64_t bytes) {
+  const size_t G = P.rec.size();
+  auto fill = [&](double f) {
+    uint64_t s = 0;
+    for (size_t g = 0; g < G; ++g) {
+      const int cap = NE * P.layers[g];
+      P.n[g] = std::max(NE, std::min(cap, (int)(f * cap)));
+      s += (uint64_t)P.n[g] * P.rec[g];
+    }
+    return s;
+  };
+  double lo = 0, hi = 1;
+  if (fill(1.0) <= bytes) lo = 1;
+  else for (int it = 0; it < 60; ++it) { const double m = (lo + hi) / 2; (fill(m) <= bytes ? lo : hi) = m; }
+  uint64_t used = fill(lo);
+  std::vector<int> order(G);
+  for (size_t g = 0; g < G; ++g) order[g] = (int)g;
+  std::sort(order.begin(), order.end(), [&](int a, int b) { return P.rec[a] < P.rec[b]; });
+  for (int g : order) {
+    if (used >= bytes) break;
+    const uint64_t k = std::min<uint64_t>((uint64_t)NE * P.layers[g] - P.n[g], (bytes - used) / P.rec[g]);
+    P.n[g] += (int)k;
+    used += k * P.rec[g];
+  }
+  tally(P);
+}
+// Least bytes a cache takes: a layer for every pool of the exact grouping (<= 2 sizes), else for one pool of the
+// largest record.
+inline uint64_t min_bytes(const std::vector<uint64_t>& lrec, int NE) {
+  const auto d = sizes(lrec);
+  uint64_t s = 0;
+  if (d.size() <= 2) for (uint64_t r : d) s += r * NE;
+  else if (!d.empty()) s = d.back() * NE;
+  return s;
+}
+inline Plan choose(const std::vector<uint64_t>& lrec, int NE, uint64_t bytes) {
+  const auto d = sizes(lrec);
+  if (d.size() <= 2) {
+    Plan P = group(lrec, d);
+    size_shares(P, NE, bytes);
+    return P;
+  }
+  // (bit i of a mask: a run ends after size i; mask 0: one pool, always kept as the fallback)
+  const int nm = d.size() > 20 ? 1 : 1 << (d.size() - 1);
+  Plan best;
+  for (int mask = 0; mask < nm; ++mask) {
+    std::vector<uint64_t> bounds;
+    for (size_t i = 0; i + 1 < d.size(); ++i) if (mask >> i & 1) bounds.push_back(d[i]);
+    bounds.push_back(d.back());
+    uint64_t need = 0;
+    for (uint64_t b : bounds) need += b * NE;
+    if (mask && need > bytes) continue;
+    Plan P = group(lrec, bounds);
+    size_even(P, NE, bytes);
+    if (best.rec.empty() || P.slots > best.slots ||
+        (P.slots == best.slots && (P.bytes < best.bytes || (P.bytes == best.bytes && P.rec.size() < best.rec.size()))))
+      best = std::move(P);
+  }
+  return best;
+}
+}  // namespace xpools
+
+#ifndef XCACHE_POOLS_ONLY
+#include "expert_store.h"
 #include <thread>
 
 struct XCache {
@@ -130,50 +260,53 @@ struct XCache {
     xaddr = (uint64_t*)zrt::host_alloc((size_t)(NL + 1) * NE * 8);
     memset(xaddr, 0, (size_t)(NL + 1) * NE * 8);
     for (int l = 0; l < NL; ++l) xtab.push_back(zrt::wrap(xaddr + (size_t)l * NE, (size_t)NE * 8));
+    lrec.assign(NL, 0);
     for (int l = 0; l < NL; ++l) {
-      const uint64_t r = l < (int)st.layers.size() ? st.layers[l].rec : 0;
-      if (!r) continue;
-      int p = -1;
-      for (size_t i = 0; i < pools.size(); ++i) if (pools[i].rec == r) p = (int)i;
-      if (p < 0) { pools.emplace_back(); pools.back().rec = r; p = (int)pools.size() - 1; }
-      pool_of[l] = p;
-      stage_rec = std::max(stage_rec, r);
+      lrec[l] = l < (int)st.layers.size() ? st.layers[l].rec : 0;
+      stage_rec = std::max(stage_rec, lrec[l]);
     }
-    // Many record sizes (Qwen3.8 Flash Next: 5 type mixes) would each need a pool of at least a layer's experts (see
-    // min_bytes): more than the GPU memory. Then one pool of the largest record serves every layer (a smaller record
-    // leaves the rest of its slot unused).
-    if (pools.size() > 2) {
-      pools.assign(1, Pool{});
-      pools[0].rec = stage_rec;
-      for (int l = 0; l < NL; ++l) if (pool_of[l] >= 0) pool_of[l] = 0;
-    }
+    // The pools until set_cache picks the grouping for the cache size (xpools::choose): one per record size with one
+    // or two sizes (final), else one pool of the largest record (min_bytes: the least that always fits).
+    const auto d = xpools::sizes(lrec);
+    use(xpools::group(lrec, d.size() <= 2 ? d : std::vector<uint64_t>(1, stage_rec)));
     stage_bytes = 2 * stage_rec * S;
     for (int h = 0; h < 2; ++h) {
       stage[h] = (char*)zrt::host_alloc(stage_rec * S);
       stage_e[h].clear();
     }
   }
-  uint64_t all_bytes() const {  // every expert of every layer
-    uint64_t s = 0;
-    for (int l = 0; l < NL; ++l) if (pool_of[l] >= 0) s += pools[pool_of[l]].rec * NE;
-    return s;
+  std::vector<uint64_t> lrec;  // layer -> its record bytes (0: not a MoE layer)
+  void use(const xpools::Plan& G) {  // (pools without slots yet)
+    pools.assign(G.rec.size(), Pool{});
+    for (size_t p = 0; p < pools.size(); ++p) pools[p].rec = G.rec[p];
+    pool_of = G.pool_of;
   }
+  // every expert of every layer, each in a record of its own size: the cache that holds them all (set_cache then
+  // keeps one pool per size)
+  uint64_t all_bytes() const { return xpools::real_bytes(lrec, NE); }
   // Least bytes set_cache takes: every pool holds at least one layer's experts (a prompt chunk uses all of them).
   uint64_t min_bytes() const {
     uint64_t s = 0;
     for (auto& P : pools) s += P.rec * NE;
     return s;
   }
-  // Splits `bytes` over the pools by their share of the experts (device USM, in pieces of <= 1 GiB).
+  // The pools for `bytes` (xpools::choose: with one or two record sizes the pools of init split by their share of the
+  // experts; with more the grouping with the most slots), allocated as device USM in pieces of <= 1 GiB.
   void set_cache(uint64_t bytes) {
-    const uint64_t all = all_bytes();
-    bytes = std::min(bytes, all);
+    const xpools::Plan G = xpools::choose(lrec, NE, bytes);
+    if (xpools::sizes(lrec).size() > 2) {
+      use(G);
+      const double GiB = 1073741824.0;
+      uint64_t pad = 0;
+      for (int l = 0; l < NL; ++l) if (lrec[l]) pad += (G.rec[G.pool_of[l]] - lrec[l]) * NE;
+      fprintf(stderr, "arcinferzero: %zu expert record sizes in %zu pools (records", xpools::sizes(lrec).size(), G.rec.size());
+      for (size_t p = 0; p < G.rec.size(); ++p) fprintf(stderr, " %.2f MB x %d layers", G.rec[p] / 1e6, G.layers[p]);
+      fprintf(stderr, "), padding %.2f GiB of %.2f GiB experts\n", pad / GiB, all_bytes() / GiB);
+    }
     cache_bytes = 0;
     for (size_t p = 0; p < pools.size(); ++p) {
       Pool& P = pools[p];
-      uint64_t mine = 0;
-      for (int l = 0; l < NL; ++l) if (pool_of[l] == (int)p) mine += P.rec * NE;
-      P.n = std::min((int)(mine / P.rec), std::max(NE, (int)((double)bytes * mine / all / P.rec)));
+      P.n = G.n[p];
       const int per = (int)std::max<uint64_t>(1, (1ull << 30) / P.rec);
       for (int s0 = 0; s0 < P.n; s0 += per) {
         const int k = std::min(per, P.n - s0);
@@ -245,25 +378,29 @@ struct XCache {
   }
   void warm() {
     const auto t0 = std::chrono::steady_clock::now();
-    std::vector<std::vector<int>> want(pools.size());
+    // (the saved pools' key lists, any number of them: the grouping follows the cache size, so it may differ from
+    // the saving run's; pool p takes the saved list p's keys first, then the other lists', each key into its pool)
+    std::vector<std::vector<int>> want;
     if (FILE* f = state_path.empty() ? nullptr : fopen(state_path.c_str(), "rb")) {
       int hdr[3] = {};
-      if (fread(hdr, 4, 3, f) == 3 && hdr[0] == NL && hdr[1] == NE && hdr[2] == (int)pools.size())
-        for (auto& w : want) {
-          int n = 0;
-          if (fread(&n, 4, 1, f) != 1 || n < 0 || n > NL * NE) break;
-          w.resize(n);
-          if (fread(w.data(), 4, n, f) != (size_t)n) { w.clear(); break; }
-        }
+      if (fread(hdr, 4, 3, f) == 3 && hdr[0] == NL && hdr[1] == NE && hdr[2] > 0 && hdr[2] <= 64) want.resize(hdr[2]);
+      for (auto& w : want) {
+        int n = 0;
+        if (fread(&n, 4, 1, f) != 1 || n < 0 || n > NL * NE) break;
+        w.resize(n);
+        if (fread(w.data(), 4, n, f) != (size_t)n) { w.clear(); break; }
+      }
       fclose(f);
     }
     for (size_t p = 0; p < pools.size(); ++p) {
       Pool& P = pools[p];
-      std::vector<int>& w = want[p];
       std::vector<uint8_t> have((size_t)NL * NE, 0);
       std::vector<int> keep;
-      for (int k : w)  // (saved keys that still belong to this pool)
-        if (k >= 0 && k < NL * NE && pool_of[k / NE] == (int)p && !have[k] && (int)keep.size() < P.n) keep.push_back(k), have[k] = 1;
+      for (size_t q0 = 0; q0 < want.size(); ++q0) {
+        const size_t q = q0 == 0 ? std::min(p, want.size() - 1) : q0 <= std::min(p, want.size() - 1) ? q0 - 1 : q0;
+        for (int k : want[q])  // (saved keys that belong to this pool)
+          if (k >= 0 && k < NL * NE && pool_of[k / NE] == (int)p && !have[k] && (int)keep.size() < P.n) keep.push_back(k), have[k] = 1;
+      }
       for (int e = 0; e < NE && (int)keep.size() < P.n; ++e)  // then the first experts of every layer
         for (int l = 0; l < NL && (int)keep.size() < P.n; ++l)
           if (pool_of[l] == (int)p && !have[(size_t)l * NE + e]) keep.push_back(l * NE + e), have[(size_t)l * NE + e] = 1;
@@ -442,3 +579,4 @@ struct XCache {
     if (std::chrono::steady_clock::now() - saved_at > std::chrono::seconds(60)) save_state();
   }
 };
+#endif  // XCACHE_POOLS_ONLY
