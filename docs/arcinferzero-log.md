@@ -312,3 +312,33 @@ E4B / 12B logit identik bit dengan OpenCL. runz --bench-pp: E4B 2K 827 tok/s (tg
 91–231 ms; lambat tidak muncul. Run lambat sebelumnya (64 token, 10,8 vs 17,9 tok/s = ±2,4 dtk ekstra) lebih cocok
 dengan satu jeda besar (mis. WDDM memindahkan memori) daripada GPU lambat sepanjang run; perlu dilihat lagi dengan
 pencatat ini bila muncul.
+
+### Ukuran halaman memori GPU (16 Okt, siang; `zero/page_probe.cpp`)
+
+Dipicu dokumen "Intel GPU Level Zero Custom Kernel Blueprint" (halaman 4 KB, memori virtual read-only, KV berhalaman
+lewat zePhysicalMemCreate). Hasil di driver ini:
+- zeVirtualMemQueryPageSize: 64 KiB untuk alokasi kecil, 2 MiB untuk alokasi >= 2 MiB.
+- zeMemAllocDevice: baca berurutan 67–77 GB/s; baca acak 256 B di area <= 1 GiB ±78 GB/s, di 1,5–2 GiB 22–24 GB/s
+  (±3,5x lebih lambat; dugaan: cakupan TLB GPU ±1 GiB dengan halaman 2 MiB).
+- zeVirtualMemReserve + zePhysicalMemCreate berhasil, tapi zeVirtualMemMap ditolak (0x7800000a, UNSUPPORTED_SIZE)
+  untuk potongan 2, 64 dan 256 MiB: memori virtual Level Zero tidak bisa dipakai di Windows ini. KV berhalaman (slot
+  tahap 1/2, draft pohon) harus lewat tabel blok di kernel, bukan pemetaan halaman fisik.
+- arcinfer membaca bobot berurutan dan expert 35B per blok utuh (ratusan KB), jadi batas ±1 GiB untuk baca acak kecil
+  hampir tidak berpengaruh; tidak ada perubahan.
+
+Sapuan baca acak (`page_probe 3072 sweep`; GB/s, satu alokasi zeMemAllocDevice; satu alokasi 4 GiB ditolak driver):
+
+| Area | 256 B | 4 KiB | 64 KiB |
+|---|---|---|---|
+| 4 MiB | 902 | 934 | 951 |
+| 8 MiB | 156 | 158 | 266 |
+| 16 MiB | 104 | 104 | 228 |
+| 32 MiB | 89 | 89 | 99 |
+| 64 MiB – 1 GiB | 77–83 | 78–83 | 77–89 |
+| 1,5 GiB | 23,7 | 75,7 | 76,0 |
+| 2 GiB | 21,7 | 75,3 | 76,6 |
+| 3 GiB | 20,7 | 74,9 | 76,2 |
+
+Cache GPU ±4 MiB (±900 GB/s); dari ±32 MiB kecepatan RAM (±78 GB/s); di atas ±1 GiB hanya baca acak 256 B yang jatuh
+(±21 GB/s), potongan >= 4 KiB tetap ±75. Bobot, expert dan blok KV arcinfer (16 key x 256 dim = 4 KiB per head)
+semuanya >= 4 KiB bersambung: tidak terpengaruh. Untuk KV berhalaman nanti: halaman >= 4 KiB.
