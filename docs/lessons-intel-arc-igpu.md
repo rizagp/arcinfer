@@ -104,6 +104,9 @@ IQ4_XS / Q4_K reach ±62 in the same profile; codebook types need more arithmeti
 | A smaller draft output head (first N token ids) | faster for English code, slower for Indonesian (its tokens lie beyond 65,536) |
 | int8 vision encoder weights and activations | 10–23 % off the f32 reference: activations must stay f32 |
 | Opting out of Windows power throttling (EcoQoS) | no measurable effect |
+| LSC prefetch of the next K/V tiles in decode attention (`prefetch()`, 1–4 tiles ahead) | 37 % slower (27B, 32K: 1.12 -> 1.53 ms per layer): the extra messages compete with the real loads |
+| Smaller or larger key splits for decode attention (64–512 keys per sub-group, to fill the last wave) | within 3 % at every shape (27B, 4B, 35B at 32K); the wave-count estimate from the assembly did not hold |
+| IQ2/IQ3 GEMV: sign byte computed (`i | parity(i) << 7`) instead of read from a local-memory table, and the sign mask without the 32-bit multiply | gemv_v (the kernel the engine uses for these types) equal or slower: IQ2_XS 63 -> 60 GB/s; only the unused plain gemv got faster. Fewer instructions again did not mean faster |
 | Larger GPU pages / Level Zero virtual memory | the driver already uses 2 MiB pages; mapping physical memory is refused |
 
 ## 6. Compiler flags that this driver honors (tested 16 Oct, driver 32.0.101.9033)
