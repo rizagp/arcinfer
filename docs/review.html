@@ -1,0 +1,620 @@
+<title>arcinfer on Intel Arc</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
+<style>
+/* Layout: a single reading column (~68ch) for the argument; charts and tables break out to the wider page measure.
+   Datasheet tone: hairlines, mono figures, one blue accent that doubles as the arcinfer series color. */
+:root {
+  --bg: #f7f8f9; --surface: #fcfcfb; --ink: #0f1419; --ink-2: #4a5360; --muted: #6b737d;
+  --hair: #e1e4e8; --axis: #c3c8cf; --accent: #2a78d6; --accent-ink: #1c5cab;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a;
+  --good: #006300; --warn: #8a5a00; --code-bg: #eef1f4;
+  --f-display: "IBM Plex Sans Condensed", "Arial Narrow", "Segoe UI", sans-serif;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0f1215; --surface: #1a1a19; --ink: #f2f4f6; --ink-2: #c3c8cf; --muted: #8b939c;
+  --hair: #2c2f33; --axis: #3d4248; --accent: #3987e5; --accent-ink: #86b6ef;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --good: #0ca30c; --warn: #d9a441; --code-bg: #1d2126; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0f1215; --surface: #1a1a19; --ink: #f2f4f6; --ink-2: #c3c8cf; --muted: #8b939c;
+  --hair: #2c2f33; --axis: #3d4248; --accent: #3987e5; --accent-ink: #86b6ef;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --good: #0ca30c; --warn: #d9a441; --code-bg: #1d2126; color-scheme: dark }
+
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--ink); font: 16px/1.62 var(--f-body); margin: 0 }
+.page { max-width: 1040px; margin: 0 auto; padding-inline: 20px; padding-block: 28px 64px }
+.col { max-width: 68ch }
+h1, h2, h3 { font-family: var(--f-display); font-weight: 600; text-wrap: balance; letter-spacing: -0.005em; line-height: 1.15 }
+h1 { font-size: clamp(2.1rem, 5vw, 3.2rem); margin: 0.2em 0 0.25em }
+h2 { font-size: 1.65rem; margin: 2.4em 0 0.5em; padding-top: 0.6em; border-top: 1px solid var(--hair) }
+h3 { font-size: 1.15rem; margin: 1.8em 0 0.4em }
+p { margin: 0 0 1em }
+a { color: var(--accent-ink) }
+code, .mono { font-family: var(--f-mono); font-size: 0.9em }
+code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px }
+.eyebrow { font: 500 0.78rem/1 var(--f-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted) }
+.lede { font-size: 1.16rem; color: var(--ink-2); max-width: 64ch }
+.topbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap }
+.lang { display: inline-flex; border: 1px solid var(--axis); border-radius: 6px; overflow: hidden }
+.lang button { font: 500 0.82rem/1 var(--f-mono); padding: 8px 12px; border: 0; background: transparent; color: var(--ink-2); cursor: pointer }
+.lang button[aria-pressed="true"] { background: var(--ink); color: var(--bg) }
+.lang button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px }
+.spec { display: flex; flex-wrap: wrap; gap: 6px 20px; margin: 18px 0 0; padding: 0; list-style: none; font: 0.84rem/1.4 var(--f-mono); color: var(--ink-2) }
+.spec li::before { content: "▸ "; color: var(--muted) }
+/* language switching: elements carry lang="en" / lang="id" */
+html[data-lang="en"] [lang="id"]:not(html), html[data-lang="id"] [lang="en"]:not(html) { display: none !important }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin: 30px 0 8px }
+.tile { background: var(--surface); border: 1px solid var(--hair); border-radius: 8px; padding: 16px 18px; min-width: 0 }
+.tile .label { font-size: 0.86rem; color: var(--ink-2) }
+.tile .value { font: 600 2.2rem/1.1 var(--f-display); margin: 6px 0 4px }
+.tile .value small { font: 500 1rem var(--f-body); color: var(--ink-2) }
+.tile .delta { font-size: 0.86rem; color: var(--good); font-weight: 500 }
+.tile .note { font-size: 0.8rem; color: var(--muted) }
+
+.figure { background: var(--surface); border: 1px solid var(--hair); border-radius: 8px; padding: 18px 18px 12px; margin: 18px 0 8px; min-width: 0 }
+.figure h4 { margin: 0 0 4px; font: 600 1rem/1.3 var(--f-body) }
+.sub { font-size: 0.85rem; color: var(--ink-2) }
+.figure .sub { margin-bottom: 10px }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 0.84rem; color: var(--ink-2); margin: 4px 0 10px }
+.legend span { display: inline-flex; align-items: center; gap: 7px }
+.legend i { width: 14px; height: 10px; border-radius: 2px; display: inline-block }
+.facets { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 10px 26px }
+.facet { min-width: 0 }
+.facet .ftitle { font: 600 0.9rem/1.3 var(--f-body); margin: 6px 0 2px }
+svg.chart { display: block; width: 100%; height: auto; overflow: visible }
+svg.chart text { font-family: var(--f-body); fill: var(--ink-2); font-size: 11px }
+svg.chart .val { fill: var(--ink); font-family: var(--f-mono); font-size: 11px }
+svg.chart .grp { fill: var(--ink); font-weight: 600; font-size: 11.5px }
+svg.chart .grid { stroke: var(--hair); stroke-width: 1 }
+svg.chart .base { stroke: var(--axis); stroke-width: 1 }
+svg.chart .bar { cursor: default; outline: none }
+svg.chart .bar:hover path, svg.chart .bar:focus path { filter: brightness(1.12) }
+svg.chart .bar:focus-visible path { stroke: var(--ink); stroke-width: 1.5 }
+.tip { position: fixed; pointer-events: none; z-index: 10; background: var(--surface); color: var(--ink); border: 1px solid var(--axis);
+  border-radius: 6px; padding: 8px 10px; font-size: 0.82rem; line-height: 1.35; box-shadow: 0 4px 14px rgba(0,0,0,.14); max-width: 260px }
+.tip b { font: 600 1rem var(--f-mono); display: block }
+.tip .key { display: inline-block; width: 12px; height: 2px; vertical-align: middle; margin-right: 6px }
+
+.tablewrap { overflow-x: auto; margin: 10px 0 6px }
+table { border-collapse: collapse; width: 100%; font-size: 0.88rem; font-variant-numeric: tabular-nums }
+th, td { text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--hair); white-space: nowrap }
+th:first-child, td:first-child, th.l, td.l { text-align: left }
+td.wrap { white-space: normal; min-width: 16ch }
+thead th { font-weight: 600; color: var(--ink-2); border-bottom: 1px solid var(--axis) }
+td.win { font-weight: 600; color: var(--ink) }
+td.pending { color: var(--muted) }
+details { margin: 8px 0 }
+summary { cursor: pointer; color: var(--accent-ink); font-size: 0.9rem }
+.callout { border-left: 3px solid var(--accent); padding: 4px 0 4px 16px; margin: 1.2em 0; color: var(--ink-2) }
+ul.tight { padding-left: 1.2em } ul.tight li { margin: 0.3em 0 }
+/* the build log: a real sequence, so its stages are numbered */
+.timeline { list-style: none; padding: 0; margin: 1.2em 0; display: grid; gap: 14px }
+.timeline li { display: grid; grid-template-columns: 2.4em minmax(0, 1fr); gap: 4px 12px }
+.timeline .n { font: 600 0.8rem/1.9 var(--f-mono); text-align: center; border: 1px solid var(--axis); border-radius: 4px; color: var(--ink-2); height: 1.9em }
+.timeline .t { font-weight: 600 }
+.timeline .r { font: 0.84rem/1.45 var(--f-mono); color: var(--accent-ink); margin-top: 2px }
+.steps { counter-reset: s; list-style: none; padding: 0 }
+.steps li { counter-increment: s; position: relative; padding-left: 2.2em; margin: 0.6em 0 }
+.steps li::before { content: counter(s); position: absolute; left: 0; top: 0.1em; font: 600 0.8rem/1.6 var(--f-mono);
+  width: 1.6em; text-align: center; border: 1px solid var(--axis); border-radius: 4px; color: var(--ink-2) }
+footer { margin-top: 56px; padding-top: 14px; border-top: 1px solid var(--hair); font-size: 0.82rem; color: var(--muted) }
+@media (prefers-reduced-motion: no-preference) { .bar path { transition: filter .12s } }
+@media (max-width: 520px) { body { font-size: 15px } .tile .value { font-size: 1.9rem } }
+</style>
+
+<div class="page">
+  <div class="topbar">
+    <span class="eyebrow">Intel Arc iGPU · LLM inference · review</span>
+    <div class="lang" role="group" aria-label="Language / Bahasa">
+      <button type="button" id="btn-en" data-set="en" aria-pressed="true">EN</button>
+      <button type="button" id="btn-id" data-set="id" aria-pressed="false">ID</button>
+    </div>
+  </div>
+
+  <h1>arcinfer</h1>
+  <p class="lede" lang="en">A from-scratch inference engine for Intel's integrated Arc graphics, built on one laptop to shrink the wait before an LLM starts answering a long prompt. It runs Qwen3.5, Qwen3.6 and Qwen3.8 (dense and mixture of experts) and Gemma 4 with image input, serves an OpenAI-compatible API to the Pi coding agent, and is measured here against llama.cpp tuned on both of its Intel backends.</p>
+  <p class="lede" lang="id">Mesin inferensi yang dibuat dari nol untuk GPU Intel Arc terintegrasi, di satu laptop, untuk memangkas waktu tunggu sebelum LLM mulai menjawab prompt panjang. Ia menjalankan Qwen3.5, Qwen3.6 dan Qwen3.8 (dense dan mixture of experts) serta Gemma 4 dengan input gambar, melayani API kompatibel OpenAI untuk agen pemrograman Pi, dan di sini dibandingkan dengan llama.cpp yang sudah di-tuning pada kedua backend Intel-nya.</p>
+  <ul class="spec">
+    <li>Core Ultra 5 125H</li><li>Arc iGPU · 112 EU · no XMX</li><li>32 GB LPDDR5x-6400</li><li>Windows 11 · driver 32.0.101.9033</li><li>llama.cpp b11527</li>
+  </ul>
+
+  <div class="tiles" id="tiles"></div>
+
+  <div class="col">
+    <h2 lang="en">Why build another engine</h2>
+    <h2 lang="id">Kenapa membuat engine sendiri</h2>
+    <p lang="en">Coding agents such as <a href="https://pi.dev" rel="noopener">Pi</a> send the model long prompts: the system prompt, tool definitions and whole source files. On this laptop's integrated GPU, llama.cpp processes a 27B model's prompt at 20 to 40 tokens per second, so an 11,000-token code prompt takes eight to ten minutes before the first word appears. The chip has no matrix engines (XMX); its fastest arithmetic is the int8 dot-product instruction DP4a, which reaches about 13 TOPS in a microbenchmark. arcinfer is organized around that one instruction.</p>
+    <p lang="id">Agen pemrograman seperti <a href="https://pi.dev" rel="noopener">Pi</a> mengirim prompt yang panjang ke model: prompt sistem, definisi tool, dan isi file kode. Di GPU terintegrasi laptop ini, llama.cpp memproses prompt model 27B pada 20 sampai 40 token per detik, sehingga prompt kode 11.000 token butuh delapan sampai sepuluh menit sebelum kata pertama muncul. Chip ini tidak punya mesin matriks (XMX); aritmetika tercepatnya adalah instruksi dot-product int8 DP4a, sekitar 13 TOPS dalam microbenchmark. arcinfer dibangun di sekitar satu instruksi itu.</p>
+
+    <h2 lang="en">From start to finish</h2>
+    <h2 lang="id">Dari awal sampai akhir</h2>
+    <p lang="en">The engine was built in stages, each measured before the next began. The yardstick through most of it was the time to first token of the 27B model on an 11,240-token code prompt.</p>
+    <p lang="id">Engine ini dibangun bertahap, dan setiap tahap diukur sebelum tahap berikutnya dimulai. Tolok ukur utamanya adalah waktu sampai token pertama model 27B pada prompt kode 11.240 token.</p>
+    <ol class="timeline" lang="en">
+      <li><span class="n">1</span><div><div class="t">A working Qwen3.5 forward pass on the iGPU</div>GGUF loading, a DP4a GEMM, weights decoded just in time into one int8 form, f32 attention, the Gated DeltaNet recurrence. <div class="r">27B, 11K prompt: 116 s</div></div></li>
+      <li><span class="n">2</span><div><div class="t">int8 attention</div>DP4a scores over key tiles in local memory, then int8 P·V with P quantized per 16-key tile, an int8 KV cache, heads split across sub-groups. <div class="r">attention 33 s → 5.2 s · 116 s → 101 s</div></div></li>
+      <li><span class="n">3</span><div><div class="t">GEMM and pipeline work</div>Split-K for long reductions, Q4_K requantized to signed int8, weight tiles shared across token tiles, layer-major prefill (each matrix decoded once per prompt), SwiGLU fused into the GEMM epilogue. <div class="r">101 s → ~90 s; GEMMs at 8–9 TOPS, ~70 % of the DP4a peak</div></div></li>
+      <li><span class="n">4</span><div><div class="t">A server for agents</div>OpenAI-compatible API with streaming, reasoning, tool calls and usage; prefix reuse for agent loops; a web UI; <code>pi-arc</code> / <code>arc-server</code> for a one-command Pi setup, with llama-server's overflow error so that Pi compacts on its own.</div></li>
+      <li><span class="n">5</span><div><div class="t">Speculative decoding with the model's MTP head</div>Drafts from the Qwen GGUFs' own multi-token-prediction block, verified in one pass with the DeltaNet states rolled back on a miss. <div class="r">27B generation 4.1 → 5.3–5.8 tok/s</div></div></li>
+      <li><span class="n">6</span><div><div class="t">Gemma 4</div>Sliding-window and global attention layers, shared KV layers and per-layer embeddings (E4B), Jinja chat templates through minja, and image input for the 12B with the unified vision projector.</div></li>
+      <li><span class="n">7</span><div><div class="t">Qwen3.6-35B-A3B, ISTA-DASLab GSQ 2-bit</div>A converter for the safetensors checkpoint and new kernels for the mixture of experts: routing, a counting sort of token-expert pairs, DP4a GEMMs straight on the 2-bit codes. <div class="r">11K prompt in about 14 s; ~15 tok/s generation</div></div></li>
+      <li><span class="n">8</span><div><div class="t">Gemma 4 at long context</div>Attention reworked for head size 512 and narrow windows, the Gemma 4 assistant drafters for speculative decoding, a persistent kernel cache.</div></li>
+      <li><span class="n">9</span><div><div class="t">An accuracy audit against an f32 reference</div>Gemma 4's distributions drifted with context length. The cause was one int8 scale per V row; Gemma now uses one per 64 dims.</div></li>
+      <li><span class="n">10</span><div><div class="t">Memory</div>Prefill in 16K-token segments; every model now runs at the largest context that fits 16.5 GiB, up to its full 262K.</div></li>
+      <li><span class="n">11</span><div><div class="t">Token generation for Gemma 4</div>The output head allocated first (the GPU read the 826 MB head at half speed when it was allocated last), soft-capping on the GPU, RoPE angles once per pass, fused norm and quantization kernels, and a new decode-attention kernel that splits the head dims over sub-groups so every K/V byte is read once for all heads and rows. <div class="r">attention per layer at 14K: 12B global 742 → 310 µs, E4B global 1,008 → 420 µs, 12B sliding 125 → 73 µs</div></div></li>
+      <li><span class="n">12</span><div><div class="t">Prompts at 90 % of the context</div>Prompts filling 90 % of a model's context, timed to the first token (27B, 81K tokens: 16 minutes). Gemma 4 12B's global layers got a prompt-attention kernel that splits the head dims over sub-groups, so no registers spill; the Qwen KV cache dropped a scale buffer it never used. <div class="r">Gemma 12B global attention 1.25–1.4× faster · Qwen KV cache 1.6 KB smaller per token</div></div></li>
+      <li><span class="n">13</span><div><div class="t">Working in Pi all day</div>Tool calls streamed while they are written; conversations and the system prompt kept across sessions, server restarts and model switches (in memory and on disk); models switched from Pi's <code>/model</code>, each with the largest context the current GPU memory setting allows, sized by a dry load that only adds up the allocations. <div class="r">27B, new Pi session after a server restart: 40 → 5.3 s to the first token</div></div></li>
+      <li><span class="n">14</span><div><div class="t">Esc stops the GPU</div>A client that hangs up cancels prompt processing within one layer. The block in progress is rolled back exactly, completed blocks stay cached, and the resume point sits where Pi's next request diverges after an abort. <div class="r">GPU busy after Esc 73 s → ~1 s · next message 21.5 → 5.0 s</div></div></li>
+      <li><span class="n">15</span><div><div class="t">One command to set up, a cache per project</div><code>setup.cmd</code> checks the requirements, builds, downloads the chosen models and connects Pi, and can be run again at any time. Pi's saved system prompts are grouped by project folder (read from the prompt itself): each folder keeps its two latest versions, and only an 8 GB limit for all models together removes the least recently used. <div class="r">a ninth project no longer pushes out the first one's 40 s of work</div></div></li>
+      <li><span class="n">16</span><div><div class="t">Gemma 4 E4B: decoding no longer costs as much as reading</div>A profile of one generated token showed E4B's 4-bit (IQ4_XS) matrix-vector products at 44–65 GB/s, and ablations showed why: unpacking the codebook indices cost as much as reading them. A new kernel loads each block straight into registers and packs four weights with four lookups in pre-shifted tables; the FFN's gate, up, GELU and quantization run as one kernel; Q6_K output heads use the same kernel (also for Qwen3.5 4B and Gemma 4 12B). Every step's logits are bitwise identical to before. Long prompts: E4B's head-512 global layers moved to the split-head prompt attention of the 12B. <div class="r">E4B generation 17.2 → 21.2 tok/s, with the drafter ~23 → 30.7 · 14K-token prompt 23.5 → 21.8 s</div></div></li>
+      <li><span class="n">17</span><div><div class="t">Images for Qwen3.5, on the GPU</div>The Qwen3-VL image encoder runs on the iGPU. With the language model's int8 matrix products it drifted 10–23 % from an f32 reference on photos; emulating each rounding on the CPU showed that the vision transformer, unlike the language model, needs floating point throughout, so it runs f16 weights with f32 activations and attention. A new attention kernel (one query row per lane, keys broadcast) made large images 2.4× faster. The language model got Qwen's M-RoPE positions for image tokens. Pi, the web UI and the API send images to Qwen3.5 4B. <div class="r">error 0.2–0.6 % · ~250-token image 0.4 s, 2048 tokens ~5 s, 4096 tokens 15 s (llama.cpp: 71 s) · a 6750-px logo read exactly</div></div></li>
+      <li><span class="n">18</span><div><div class="t">Weights decoded once</div>The just-in-time weight decoding reads each superblock with vector loads (it read global memory byte by byte), and the automatic context now keeps a model's decoded weights resident when at least 128K tokens of context still fit, instead of decoding every matrix again on every request. The GEMM itself measured at its practical ceiling: about 65 % of the DP4a peak, loads and per-block scales taking the rest. <div class="r">27B decoding per 11K prompt 5.8 → 2.2 s · Qwen3.5 9B, short prompt 1.05 → 0.27 s to the first token</div></div></li>
+    </ol>
+    <ol class="timeline" lang="id">
+      <li><span class="n">1</span><div><div class="t">Forward pass Qwen3.5 yang berjalan di iGPU</div>Pemuatan GGUF, GEMM DP4a, bobot di-decode tepat waktu ke satu format int8, attention f32, rekurensi Gated DeltaNet. <div class="r">27B, prompt 11K: 116 dtk</div></div></li>
+      <li><span class="n">2</span><div><div class="t">Attention int8</div>Skor DP4a atas tile key di memori lokal, lalu P·V int8 dengan P dikuantisasi per tile 16 key, cache KV int8, head dibagi ke beberapa sub-group. <div class="r">attention 33 dtk → 5,2 dtk · 116 dtk → 101 dtk</div></div></li>
+      <li><span class="n">3</span><div><div class="t">GEMM dan alur pemrosesan</div>Split-K untuk reduksi panjang, Q4_K dikuantisasi ulang ke int8 bertanda, tile bobot dipakai bersama oleh beberapa tile token, prefill layer demi layer (setiap matriks di-decode sekali per prompt), SwiGLU digabung ke epilog GEMM. <div class="r">101 dtk → ±90 dtk; GEMM 8–9 TOPS, ±70 % puncak DP4a</div></div></li>
+      <li><span class="n">4</span><div><div class="t">Server untuk agen</div>API kompatibel OpenAI dengan streaming, reasoning, tool call dan usage; pemakaian ulang prefix untuk loop agen; web UI; <code>pi-arc</code> / <code>arc-server</code> untuk setup Pi satu perintah, dengan error overflow ala llama-server sehingga Pi meringkas sendiri.</div></li>
+      <li><span class="n">5</span><div><div class="t">Speculative decoding dengan kepala MTP model</div>Draft dari blok multi-token prediction milik GGUF Qwen, diverifikasi dalam satu langkah, dengan state DeltaNet dikembalikan saat draft ditolak. <div class="r">generasi 27B 4,1 → 5,3–5,8 tok/dtk</div></div></li>
+      <li><span class="n">6</span><div><div class="t">Gemma 4</div>Layer attention sliding window dan global, layer KV bersama dan embedding per layer (E4B), template chat Jinja lewat minja, serta input gambar untuk 12B dengan proyektor vision terpadu.</div></li>
+      <li><span class="n">7</span><div><div class="t">Qwen3.6-35B-A3B, GSQ 2-bit ISTA-DASLab</div>Konverter untuk checkpoint safetensors dan kernel baru untuk mixture of experts: routing, counting sort pasangan token-expert, GEMM DP4a langsung pada kode 2-bit. <div class="r">prompt 11K sekitar 14 dtk; generasi ±15 tok/dtk</div></div></li>
+      <li><span class="n">8</span><div><div class="t">Gemma 4 pada konteks panjang</div>Attention dirombak untuk head 512 dan window sempit, drafter assistant Gemma 4 untuk speculative decoding, cache kernel permanen.</div></li>
+      <li><span class="n">9</span><div><div class="t">Audit akurasi terhadap referensi f32</div>Distribusi Gemma 4 makin menyimpang seiring panjang konteks. Penyebabnya satu skala int8 per baris V; Gemma kini memakai satu skala per 64 dimensi.</div></li>
+      <li><span class="n">10</span><div><div class="t">Memori</div>Prefill dalam segmen 16K token; setiap model kini berjalan dengan konteks terbesar yang muat di 16,5 GiB, sampai penuh 262K.</div></li>
+      <li><span class="n">11</span><div><div class="t">Generasi token untuk Gemma 4</div>Output head dialokasikan paling awal (GPU membaca head 826 MB pada separuh kecepatan bila dialokasikan terakhir), soft-capping di GPU, sudut RoPE sekali per langkah, kernel norm dan kuantisasi digabung, dan kernel attention decode baru yang membagi dimensi head ke sub-group sehingga setiap byte K/V dibaca sekali untuk semua head dan baris. <div class="r">attention per layer pada 14K: global 12B 742 → 310 µs, global E4B 1.008 → 420 µs, sliding 12B 125 → 73 µs</div></div></li>
+      <li><span class="n">12</span><div><div class="t">Prompt sebesar 90 % konteks</div>Prompt yang mengisi 90 % konteks model, diukur sampai token pertama (27B, 81K token: 16 menit). Layer global Gemma 4 12B mendapat kernel attention prompt yang membagi dimensi head ke sub-group, sehingga tidak ada register yang tumpah; cache KV Qwen tidak lagi membawa buffer skala yang tidak pernah dipakai. <div class="r">attention global Gemma 12B 1,25–1,4× lebih cepat · cache KV Qwen 1,6 KB lebih kecil per token</div></div></li>
+      <li><span class="n">13</span><div><div class="t">Bekerja seharian di Pi</div>Tool call dialirkan selagi ditulis; percakapan dan prompt sistem disimpan lintas sesi, restart server dan pergantian model (di memori dan di disk); model diganti dari <code>/model</code> di Pi, masing-masing dengan konteks terbesar yang diizinkan pengaturan memori GPU saat ini, dihitung lewat pemuatan kering yang hanya menjumlahkan alokasi. <div class="r">27B, sesi Pi baru setelah server di-restart: 40 → 5,3 dtk sampai token pertama</div></div></li>
+      <li><span class="n">14</span><div><div class="t">Esc menghentikan GPU</div>Klien yang memutus koneksi membatalkan pemrosesan prompt dalam satu layer. Blok yang sedang diproses dikembalikan persis, blok yang sudah selesai tetap di cache, dan titik lanjutnya berada tepat di tempat request Pi berikutnya berbeda setelah pembatalan. <div class="r">GPU sibuk setelah Esc 73 dtk → ±1 dtk · pesan berikutnya 21,5 → 5,0 dtk</div></div></li>
+      <li><span class="n">15</span><div><div class="t">Satu perintah untuk setup, cache per proyek</div><code>setup.cmd</code> memeriksa kebutuhan, membangun, mengunduh model yang dipilih dan menghubungkan Pi, dan boleh dijalankan ulang kapan saja. Prompt sistem Pi yang disimpan dikelompokkan per folder proyek (dibaca dari prompt itu sendiri): setiap folder menyimpan dua versi terakhirnya, dan hanya batas 8 GB untuk semua model bersama-sama yang menghapus yang paling lama tidak dipakai. <div class="r">proyek kesembilan tidak lagi menggusur hasil kerja 40 detik milik proyek pertama</div></div></li>
+      <li><span class="n">16</span><div><div class="t">Gemma 4 E4B: membongkar bobot tidak lagi semahal membacanya</div>Profil satu token yang dihasilkan menunjukkan perkalian matriks-vektor 4-bit (IQ4_XS) E4B hanya 44–65 GB/dtk, dan ablasi menunjukkan sebabnya: membongkar indeks codebook sama mahalnya dengan membacanya. Kernel baru memuat setiap blok langsung ke register dan menyusun empat bobot dengan empat lookup di tabel yang sudah digeser; gate, up, GELU dan kuantisasi FFN berjalan sebagai satu kernel; output head Q6_K memakai kernel yang sama (juga untuk Qwen3.5 4B dan Gemma 4 12B). Logit setiap langkah identik bit demi bit dengan sebelumnya. Prompt panjang: layer global E4B (head 512) pindah ke attention prompt split-head milik 12B. <div class="r">generasi E4B 17,2 → 21,2 tok/dtk, dengan drafter ±23 → 30,7 · prompt 14K token 23,5 → 21,8 dtk</div></div></li>
+      <li><span class="n">17</span><div><div class="t">Gambar untuk Qwen3.5, di GPU</div>Encoder gambar Qwen3-VL berjalan di iGPU. Dengan perkalian matriks int8 milik model bahasa, hasilnya menyimpang 10–23 % dari referensi f32 pada foto; emulasi setiap pembulatan di CPU menunjukkan bahwa vision transformer, tidak seperti model bahasa, butuh floating point di semua bagian, sehingga kini memakai bobot f16 dengan aktivasi dan attention f32. Kernel attention baru (satu baris query per lane, key di-broadcast) membuat gambar besar 2,4× lebih cepat. Model bahasa mendapat posisi M-RoPE Qwen untuk token gambar. Pi, web UI dan API mengirim gambar ke Qwen3.5 4B. <div class="r">error 0,2–0,6 % · gambar ±250 token 0,4 dtk, 2048 token ±5 dtk, 4096 token 15 dtk (llama.cpp: 71 dtk) · logo 6750 piksel terbaca tepat</div></div></li>
+      <li><span class="n">18</span><div><div class="t">Bobot didekode sekali</div>Dekode bobot just-in-time membaca setiap superblock dengan load vektor (sebelumnya membaca memori global byte demi byte), dan konteks otomatis kini membiarkan bobot yang sudah didekode tetap di GPU bila konteks minimal 128K token masih muat, alih-alih mendekode ulang semua matriks di setiap request. GEMM-nya sendiri terukur di batas praktisnya: sekitar 65 % dari puncak DP4a, sisanya untuk load dan skala per blok. <div class="r">dekode 27B per prompt 11K 5,8 → 2,2 dtk · Qwen3.5 9B, prompt pendek 1,05 → 0,27 dtk sampai token pertama</div></div></li>
+    </ol>
+
+    <h2 lang="en">What arcinfer does differently</h2>
+    <h2 lang="id">Apa yang dilakukan arcinfer secara berbeda</h2>
+    <ul class="tight" lang="en">
+      <li><b>int8 everywhere it counts.</b> Prompt-processing matrix multiplications run on DP4a with int8 activations (one scale per 32 values) at 8–9 TOPS. Attention is int8 end to end: an int8 K/V cache, DP4a scores, and P·V on DP4a with P quantized per 16-key tile.</li>
+      <li><b>Weights decoded just in time.</b> Every GGUF quant type (IQ1–IQ4, Q2–Q8 K-quants) is decoded on the GPU into one int8 layout right before its multiplication, so one fast kernel serves all of them and a 27B model only has to fit in its compressed form.</li>
+      <li><b>Kernels for the model, not for a framework.</b> The DeltaNet recurrence keeps a whole 128-value state column per SIMD lane; the mixture-of-experts kernels multiply straight on 2-bit expert codes; token generation reads the raw quantized blocks at 60–77 GB/s.</li>
+      <li><b>Speculative decoding without changing the output.</b> Qwen's own MTP head or the Gemma 4 assistant drafter proposes tokens; one main-model pass verifies them and the next token is still sampled from the model.</li>
+      <li><b>A complete server.</b> OpenAI-compatible API, reasoning and tool calls streamed as they are written, image input, prefix caching for agent loops, conversations and system prompts kept across sessions, restarts and model switches (system prompts per project folder), cancellation within a layer when the client hangs up, a web UI, one command to set everything up (<code>setup.cmd</code>) and one to start Pi (<code>pi-arc</code>), which switches models from inside Pi.</li>
+    </ul>
+    <ul class="tight" lang="id">
+      <li><b>int8 di semua bagian penting.</b> Perkalian matriks saat memproses prompt berjalan di DP4a dengan aktivasi int8 (satu skala per 32 nilai) pada 8–9 TOPS. Attention memakai int8 dari awal sampai akhir: cache K/V int8, skor DP4a, dan P·V di DP4a dengan P dikuantisasi per tile 16 key.</li>
+      <li><b>Bobot di-decode tepat waktu.</b> Semua tipe kuantisasi GGUF (IQ1–IQ4, K-quant Q2–Q8) di-decode di GPU ke satu format int8 tepat sebelum perkaliannya, jadi satu kernel cepat melayani semuanya dan model 27B cukup muat dalam bentuk terkompresinya.</li>
+      <li><b>Kernel untuk modelnya, bukan untuk framework.</b> Rekurensi DeltaNet menyimpan satu kolom state 128 nilai per lane SIMD; kernel mixture of experts mengalikan langsung kode expert 2-bit; generasi token membaca blok terkuantisasi mentah pada 60–77 GB/s.</li>
+      <li><b>Speculative decoding tanpa mengubah output.</b> Kepala MTP milik Qwen atau drafter assistant Gemma 4 mengusulkan token; satu langkah model utama memverifikasinya dan token berikutnya tetap disampling dari model.</li>
+      <li><b>Server lengkap.</b> API kompatibel OpenAI, reasoning dan tool call yang dialirkan selagi ditulis, input gambar, cache prefix untuk loop agen, percakapan dan prompt sistem yang disimpan lintas sesi, restart dan pergantian model (prompt sistem per folder proyek), pembatalan dalam satu layer saat klien memutus koneksi, web UI, satu perintah untuk menyiapkan semuanya (<code>setup.cmd</code>) dan satu untuk menjalankan Pi (<code>pi-arc</code>), yang bisa mengganti model dari dalam Pi.</li>
+    </ul>
+  </div>
+
+  <h2 lang="en">Time to first token on real code prompts</h2>
+  <h2 lang="id">Waktu sampai token pertama pada prompt kode nyata</h2>
+  <div class="col">
+    <p lang="en">Two prompts built from local projects: a scan of the <i>supreme-search</i> codebase and of an internal web app, <i>portal-evaluasi</i>. The same text is 11,240 and 33,937 tokens for the Qwen tokenizer and 13,921 and 35,957 for Gemma's. llama.cpp was measured through <code>llama-server</code> with the same token ids, flash attention on and the best micro-batch size per model and backend. llama.cpp cannot load the 2-bit GSQ Qwen3.6-35B-A3B. A speed reference on Unsloth's UD-IQ2_M GGUF of the same model, and llama.cpp SYCL on Gemma 4 12B, were left out: llama.cpp processes long prompts slowly on this iGPU (the 27B's 34K-token prompt alone took 40 minutes on Vulkan), and waiting several more hours for those runs did not seem worth it, so those bars read “not run”.</p>
+    <p lang="id">Dua prompt dari proyek lokal: pemindaian kode <i>supreme-search</i> dan sebuah aplikasi web internal, <i>portal-evaluasi</i>. Teks yang sama menjadi 11.240 dan 33.937 token dengan tokenizer Qwen, serta 13.921 dan 35.957 token dengan tokenizer Gemma. llama.cpp diukur lewat <code>llama-server</code> dengan token id yang sama, flash attention aktif, dan ukuran micro-batch terbaik per model dan backend. llama.cpp tidak bisa memuat Qwen3.6-35B-A3B GSQ 2-bit. Pembanding kecepatan dengan GGUF UD-IQ2_M milik Unsloth untuk model yang sama, serta llama.cpp SYCL pada Gemma 4 12B, tidak dijalankan: llama.cpp memproses prompt panjang dengan lambat di iGPU ini (prompt 34K token pada 27B saja butuh 40 menit di Vulkan), dan menunggu beberapa jam lagi untuk run tersebut terasa tidak sepadan, sehingga batang itu bertuliskan “tidak dijalankan”.</p>
+  </div>
+  <div class="figure">
+    <h4 lang="en">Seconds until the first generated token (shorter is better)</h4>
+    <h4 lang="id">Detik sampai token pertama (lebih pendek lebih baik)</h4>
+    <div class="legend" id="leg-ttft"></div>
+    <div class="facets" id="fig-ttft"></div>
+  </div>
+  <details><summary lang="en">Table: time to first token and generation speed at that context</summary><summary lang="id">Tabel: waktu sampai token pertama dan kecepatan generasi pada konteks itu</summary>
+    <div class="tablewrap" id="tbl-ttft"></div></details>
+
+  <h2 lang="en">Throughput</h2>
+  <h2 lang="id">Throughput</h2>
+  <div class="col">
+    <p lang="en">Synthetic llama-bench style runs: prompt processing over 2,048 tokens, and generation of 64 tokens after a short prompt. Generation is limited by memory bandwidth and is much closer between engines; arcinfer's lead there comes mostly from speculative decoding, shown in its own section.</p>
+    <p lang="id">Pengukuran sintetis ala llama-bench: memproses 2.048 token prompt, dan menghasilkan 64 token setelah prompt pendek. Generasi dibatasi bandwidth memori sehingga selisih antar-engine jauh lebih kecil; keunggulan arcinfer di sana terutama berasal dari speculative decoding, yang dibahas di bagiannya sendiri.</p>
+  </div>
+  <div class="figure">
+    <h4 lang="en">Prompt processing, pp2048 (tokens per second, higher is better)</h4>
+    <h4 lang="id">Pemrosesan prompt, pp2048 (token per detik, lebih tinggi lebih baik)</h4>
+    <div class="legend" id="leg-pp"></div>
+    <div class="facets" id="fig-pp"></div>
+  </div>
+  <div class="figure">
+    <h4 lang="en">Generation, tg64 (tokens per second, higher is better)</h4>
+    <h4 lang="id">Generasi, tg64 (token per detik, lebih tinggi lebih baik)</h4>
+    <div class="legend" id="leg-tg"></div>
+    <div class="facets" id="fig-tg"></div>
+  </div>
+  <details><summary lang="en">Table: all throughput numbers</summary><summary lang="id">Tabel: semua angka throughput</summary>
+    <div class="tablewrap" id="tbl-pp"></div></details>
+
+  <div class="col">
+    <h2 lang="en">Qwen3.6-35B-A3B in 2 bits</h2>
+    <h2 lang="id">Qwen3.6-35B-A3B dalam 2 bit</h2>
+    <p lang="en">ISTA-DASLab's GSQ checkpoint stores the 256 routed experts in 2 bits ({−2, −1, 0, 1} times a scale per 128 weights) and everything else in int8; only about 3 B of the 35 B parameters are active per token. llama.cpp cannot load it, so <code>tools/convert_gsq.py</code> converts it once into a GGUF that keeps the exact 2-bit codes, and new kernels multiply directly on them. A speed reference on llama.cpp Vulkan with Unsloth's UD-IQ2_M GGUF of the same model (a different 2–3-bit quantization of similar size) was not run: given how slowly llama.cpp processes long prompts here, it did not seem worth the wait.</p>
+    <p lang="id">Checkpoint GSQ dari ISTA-DASLab menyimpan 256 routed expert dalam 2 bit ({−2, −1, 0, 1} dikali satu skala per 128 bobot) dan sisanya dalam int8; hanya sekitar 3 B dari 35 B parameter yang aktif per token. llama.cpp tidak bisa memuatnya, jadi <code>tools/convert_gsq.py</code> mengonversinya sekali ke GGUF yang menyimpan kode 2-bit apa adanya, dan kernel baru mengalikan langsung pada kode itu. Pembanding kecepatan di llama.cpp Vulkan dengan GGUF UD-IQ2_M dari Unsloth untuk model yang sama (kuantisasi 2–3 bit lain dengan ukuran serupa) tidak dijalankan: melihat lambatnya llama.cpp memproses prompt panjang di sini, hasilnya terasa tidak sepadan dengan lamanya menunggu.</p>
+    <div class="tablewrap" id="tbl-moe"></div>
+    <p class="sub" id="moe-note"></p>
+  </div>
+
+  <div class="col">
+    <h2 lang="en">Speculative decoding</h2>
+    <h2 lang="id">Speculative decoding</h2>
+    <p lang="en">Qwen drafts with the MTP block inside its own GGUF; Gemma 4 with its separate assistant model, which reads the main model's KV cache instead of keeping one of its own. Both reproduce the plain greedy output token for token (<code>tests/run_tests.ps1</code>). The table gives Gemma 4 generation at short context, plain and with drafting: the 12B after a short story prompt, measured after the decode work of 10 October; the E4B after a 160-token code prompt, measured after the work of 12 October (stage 16; through the server with sampling it drafts at 31 tok/s as well). How much drafting gains depends on the text: code and structured answers accept more drafts than a story. Qwen3.8 27B went from 4.1 to 5.3–5.8 tok/s with its MTP head.</p>
+    <p lang="id">Qwen men-draft dengan blok MTP di dalam GGUF-nya sendiri; Gemma 4 dengan model assistant terpisah, yang membaca cache KV model utama alih-alih menyimpan cache sendiri. Keduanya menghasilkan output greedy yang sama persis, token demi token (<code>tests/run_tests.ps1</code>). Tabel berisi generasi Gemma 4 pada konteks pendek, tanpa dan dengan drafting: 12B setelah prompt cerita pendek, diukur setelah perbaikan decode 10 Oktober; E4B setelah prompt kode 160 token, diukur setelah perbaikan 12 Oktober (tahap 16; lewat server dengan sampling, drafting-nya juga 31 tok/dtk). Besar keuntungan drafting tergantung teksnya: kode dan jawaban terstruktur menerima lebih banyak draft dibanding cerita. Qwen3.8 27B naik dari 4,1 ke 5,3–5,8 tok/dtk dengan kepala MTP-nya.</p>
+    <div class="tablewrap" id="tbl-spec"></div>
+  </div>
+
+  <div class="col" id="task-section">
+    <h2 lang="en">One task on every model</h2>
+    <h2 lang="id">Satu tugas untuk semua model</h2>
+    <p lang="en">The same request went to every model through the server, the way Pi or the web UI would send it: <i>“buat html landing page professional toko coklat enak di pondok gede dalam satu file yang ringkas, interaksi dengan animasi, vanilla css, dan vanilla js dengan struktur mvvm”</i> (a compact one-file professional landing page for a chocolate shop in Pondok Gede, animated interactions, vanilla CSS and JS with an MVVM structure). Each model used its own sampling defaults, no reasoning, at most 6,144 output tokens, and speculative decoding where it has a drafter. The pages are the models' unedited output for a fictional shop; only a label was added on top.</p>
+    <p lang="id">Permintaan yang sama dikirim ke setiap model lewat server, seperti yang dilakukan Pi atau web UI: <i>“buat html landing page professional toko coklat enak di pondok gede dalam satu file yang ringkas, interaksi dengan animasi, vanilla css, dan vanilla js dengan struktur mvvm”</i>. Setiap model memakai sampling bawaannya, tanpa reasoning, output paling banyak 6.144 token, serta speculative decoding bila punya drafter. Halamannya adalah keluaran model apa adanya untuk toko fiktif; hanya sebuah label yang ditambahkan di atasnya.</p>
+    <div class="tablewrap" id="tbl-task"></div>
+  </div>
+
+  <div class="col">
+    <h2 lang="en">Accuracy</h2>
+    <h2 lang="id">Akurasi</h2>
+    <p lang="en">Speed only matters if the answers stay the same. Each architecture was checked against an independent f32 CPU implementation (<code>tools/ref_forward</code>) and against llama.cpp. The table gives the mean KL divergence of the next-token distributions over every position of a test prompt.</p>
+    <p lang="id">Kecepatan hanya berarti kalau jawabannya tetap sama. Setiap arsitektur diperiksa terhadap implementasi f32 independen di CPU (<code>tools/ref_forward</code>) dan terhadap llama.cpp. Tabel berisi rata-rata KL divergence distribusi token berikutnya di semua posisi prompt uji.</p>
+    <div class="tablewrap" id="tbl-kl"></div>
+    <ul class="tight" lang="en">
+      <li>Greedy continuations are identical to llama.cpp on the 4B, 9B, Gemma 4 12B and E4B test prompts; tokenizer output is identical to <code>llama-tokenize</code>; chat templates render exactly like the GGUF Jinja templates.</li>
+      <li>The audit that mattered: on Gemma 4 the drift from the reference grew with the context, up to a complete flip of the predicted token at a few positions of a code prompt. Re-running the f32 reference with each piece of arcinfer's int8 rounding simulated in turn pointed at the V cache: Gemma's V rows hold a few large values, and one scale per row left the rest with too few levels. One scale per 64 dims removed the flips and halved the drift. It costs Gemma's attention 1.5–1.8× more time; Qwen keeps per-row scales, which measure as accurate there.</li>
+      <li>Gemma 4 stays further from its reference than Qwen: rounding the activations to int8 alone, in the f32 reference, already gives a KL of 0.009 on Gemma against 0.001 on Qwen3.5-4B.</li>
+    </ul>
+    <ul class="tight" lang="id">
+      <li>Kelanjutan greedy identik dengan llama.cpp pada prompt uji 4B, 9B, Gemma 4 12B dan E4B; hasil tokenizer identik dengan <code>llama-tokenize</code>; template chat dirender persis seperti template Jinja di GGUF.</li>
+      <li>Audit yang paling penting: pada Gemma 4, penyimpangan dari referensi makin besar seiring konteks, sampai token yang diprediksi berbalik total di beberapa posisi prompt kode. Menjalankan ulang referensi f32 dengan tiap pembulatan int8 arcinfer disimulasikan satu per satu menunjuk ke cache V: baris V Gemma berisi beberapa nilai besar, dan satu skala per baris membuat nilai lainnya kehilangan presisi. Satu skala per 64 dimensi menghilangkan prediksi yang berbalik dan memangkas penyimpangan menjadi separuh. Harganya, attention Gemma 1,5–1,8× lebih lama; Qwen tetap memakai skala per baris, yang terukur akurat di sana.</li>
+      <li>Gemma 4 tetap lebih jauh dari referensinya dibanding Qwen: membulatkan aktivasi ke int8 saja, di referensi f32, sudah memberi KL 0,009 pada Gemma dibanding 0,001 pada Qwen3.5-4B.</li>
+    </ul>
+    <div class="tablewrap" id="tbl-ppl"></div>
+    <p class="sub" id="ppl-note"></p>
+  </div>
+
+  <div class="col">
+    <h2 lang="en">Context that fits</h2>
+    <h2 lang="id">Konteks yang muat</h2>
+    <p lang="en">How much of the laptop's memory the iGPU may use is a driver setting (Intel Graphics Software): 16.5 GiB during the benchmarks, 18.3 GiB now. When the server loads a model it sizes the default context to the current setting, leaving about 1 GiB for Windows and other apps: the largest context that fits, or the model's trained maximum, including the server's recurrent-state snapshots for prefix reuse. A dry load that only adds up the allocations takes seconds, and the result is remembered until the setting changes. At 18.3 GiB:</p>
+    <p lang="id">Seberapa besar memori laptop yang boleh dipakai iGPU adalah pengaturan driver (Intel Graphics Software): 16,5 GiB saat benchmark, 18,3 GiB sekarang. Saat memuat model, server menyesuaikan konteks bawaannya dengan pengaturan saat ini dan menyisakan sekitar 1 GiB untuk Windows dan aplikasi lain: konteks terbesar yang muat, atau batas latih model, termasuk snapshot state rekuren server untuk pemakaian ulang prefix. Pemuatan kering yang hanya menjumlahkan alokasi butuh beberapa detik, dan hasilnya diingat sampai pengaturannya berubah. Pada 18,3 GiB:</p>
+    <div class="tablewrap" id="tbl-mem"></div>
+
+    <h2 lang="en">In practice: Pi on the 27B model</h2>
+    <h2 lang="id">Dalam praktik: Pi dengan model 27B</h2>
+    <p lang="en">With <code>pi-arc</code> the server starts in the background on first use and stays loaded. Pi's <code>/model</code> lists every model in the Hugging Face cache, and the server switches to the chosen one in 5–40 s. Pi's system prompt is now about 4,100 tokens (tool definitions, skills, the project folder and its <code>AGENTS.md</code>), so each project has its own. The server processes it once per project, 40 s on the 27B, and keeps the result in memory and on disk, filed under the project folder (its two latest versions, which other projects do not replace). A new session then reaches its first token in 3.9 s on a running server, 5.3 s after a server restart, and 6.8 s after switching back from another model (once the 37 s load is done). Continuing a session (<code>pi-arc -c</code>) right after closing Pi processes only the new message, because the server still holds that conversation; after other sessions that takes the optional session cache, and the conversation held when the server stops is not saved, so after a restart it is processed again.</p>
+    <p lang="en">In an agent loop each request processes only what is new: 5–7 s before the 27B starts writing, even 27,000 tokens into a session; a large tool result costs its length (a 3,000-line command output: 104 s). Writing is what takes the time: the 27B generates 5–6 tokens per second, so a 770-token reply (reasoning and a tool call) takes about two and a half minutes. Esc stops the GPU within about a second, and the next message reuses the whole conversation (5.0 s instead of 21.5 s for a 2,500-token one).</p>
+    <p lang="en">An end-to-end check on 11 October ran Pi with its normal tools, two extensions and a local MCP server in a scratch git project: reading two files in one reply, a minimal edit, a new file with backslashes, quotes, braces and non-ASCII text, a 3,000-line command output, a failing command, an MCP lookup, a commit and a follow-up question. It produced 27 replies and 21 tool calls, every one with valid arguments, no errors from the server or Pi, and every file on disk as requested. The 35B-A3B model answers the same kind of request several times faster, and Gemma 4 12B can be sent screenshots.</p>
+    <p lang="id">Dengan <code>pi-arc</code>, server menyala di latar belakang saat pertama dipakai lalu tetap dimuat. <code>/model</code> di Pi menampilkan semua model di cache Hugging Face, dan server berganti ke model yang dipilih dalam 5–40 detik. Prompt sistem Pi sekarang sekitar 4.100 token (definisi tool, skill, folder proyek dan <code>AGENTS.md</code>-nya), sehingga setiap proyek punya prompt sendiri. Server memprosesnya sekali per proyek, 40 detik pada 27B, lalu menyimpan hasilnya di memori dan di disk, dikelompokkan per folder proyek (dua versi terakhirnya, yang tidak digantikan oleh proyek lain). Sesi baru kemudian sampai ke token pertama dalam 3,9 detik pada server yang menyala, 5,3 detik setelah server di-restart, dan 6,8 detik setelah kembali dari model lain (setelah pemuatan 37 detik selesai). Melanjutkan sesi (<code>pi-arc -c</code>) tepat setelah Pi ditutup hanya memproses pesan baru, karena server masih memegang percakapan itu; setelah ada sesi lain, hal itu butuh cache sesi (opsional), dan percakapan yang dipegang saat server dimatikan tidak disimpan, sehingga setelah restart percakapan itu diproses ulang.</p>
+    <p lang="id">Dalam loop agen, setiap request hanya memproses bagian yang baru: 5–7 detik sebelum 27B mulai menulis, bahkan setelah 27.000 token dalam satu sesi; hasil tool yang besar memakan waktu sesuai panjangnya (output perintah 3.000 baris: 104 detik). Yang memakan waktu adalah menulis: 27B menghasilkan 5–6 token per detik, jadi balasan 770 token (reasoning dan satu tool call) butuh sekitar dua setengah menit. Esc menghentikan GPU dalam sekitar satu detik, dan pesan berikutnya memakai ulang seluruh percakapan (5,0 detik, bukan 21,5 detik, untuk percakapan 2.500 token).</p>
+    <p lang="id">Pemeriksaan menyeluruh pada 11 Oktober menjalankan Pi dengan tool bawaannya, dua ekstensi dan server MCP lokal di proyek git percobaan: membaca dua file dalam satu balasan, edit kecil, file baru berisi backslash, tanda kutip, kurung kurawal dan teks non-ASCII, output perintah 3.000 baris, perintah yang gagal, pencarian lewat MCP, commit, dan pertanyaan lanjutan. Hasilnya 27 balasan dan 21 tool call, semuanya dengan argumen yang valid, tanpa error dari server maupun Pi, dan setiap file di disk sesuai permintaan. Model 35B-A3B menjawab permintaan sejenis beberapa kali lebih cepat, dan Gemma 4 12B bisa dikirimi tangkapan layar.</p>
+
+    <h2 lang="en">Limits</h2>
+    <h2 lang="id">Batasan</h2>
+    <ul class="tight" lang="en">
+      <li>The original goal, an 11,000-token prompt on the 27B model in under a minute, was not reached: about 90 s on a cool laptop, 97 s mid-benchmark. The matrix multiplications alone take about 70 s at 8–9 TOPS; 60 s would need more than 90 % of the DP4a peak. The 35B-A3B mixture of experts does it in about 14 s.</li>
+      <li>Windows with an Intel Arc (Xe-LPG) iGPU only; Qwen3.5 / 3.6 / 3.8 (dense and MoE) and Gemma 4 (12B, E4B text) only. Image input runs for Qwen3.5 4B (on the GPU) and Gemma 4 12B (on the CPU); not yet for the 9B (its wider encoder), the E4B, or the 27B models (no image projector). Audio input for the 12B is written but not yet tested.</li>
+      <li>llama.cpp SYCL on Gemma 4 12B, Gemma's Vulkan perplexity and the UD-IQ2_M reference for the 35B were not run: llama.cpp's prompt processing on this iGPU is slow enough that those runs alone would have taken hours, and the comparison already showed the picture; those cells read “not run”. The generation figures in the charts were measured before the 10 October decode work, which was measured per kernel and at short context; at short context its gain is within run-to-run noise (±4 %), at long context it saves attention time as shown in stage 11. They also predate the 12 October work (stage 16), which made Gemma 4 E4B ~23 % faster and the Q6_K output heads of Qwen3.5 4B and Gemma 4 12B ~8 % faster.</li>
+      <li>The 35B-A3B GSQ checkpoint ships its MTP block without routed experts, so that model runs without speculative decoding.</li>
+      <li>The laptop throttles under sustained load: back-to-back runs are 5–10 % slower than the first one. Every measurement here was preceded by 30 s of idle GPU, for all engines alike.</li>
+      <li>On the 27B every request takes about 3 s before the first token even when only a handful of tokens are new (15 tokens: 2.8–3.8 s). The cause has not been investigated yet; in an agent loop it is paid on every step.</li>
+      <li>A cancelled Gemma 4 prompt can only be rolled back while its sliding-window rings still hold the positions before the block (blocks up to about 8K tokens). After a longer block the conversation is reset and the next request reloads the system prompt from disk.</li>
+      <li>One conversation is held at a time, in GPU memory. Stopping or restarting the server loses it: system prompts come back from disk, but a long session continued afterwards is processed again (27B: about 100 tokens per second). Saved conversations (the session cache, off by default) are written only when the server moves on to another conversation.</li>
+    </ul>
+    <ul class="tight" lang="id">
+      <li>Target awal, prompt 11.000 token pada model 27B dalam kurang dari satu menit, tidak tercapai: sekitar 90 detik saat laptop dingin, 97 detik di tengah benchmark. Perkalian matriks saja makan sekitar 70 detik pada 8–9 TOPS; 60 detik butuh lebih dari 90 % puncak DP4a. Mixture of experts 35B-A3B melakukannya dalam sekitar 14 detik.</li>
+      <li>Hanya Windows dengan iGPU Intel Arc (Xe-LPG); hanya Qwen3.5 / 3.6 / 3.8 (dense dan MoE) dan Gemma 4 (12B, teks E4B). Input gambar berjalan untuk Qwen3.5 4B (di GPU) dan Gemma 4 12B (di CPU); belum untuk 9B (encoder-nya lebih lebar), E4B, dan model 27B (tidak punya proyektor gambar). Input audio untuk 12B sudah ditulis tetapi belum diuji.</li>
+      <li>llama.cpp SYCL pada Gemma 4 12B, perplexity Vulkan untuk Gemma, dan pembanding UD-IQ2_M untuk 35B tidak dijalankan: pemrosesan prompt llama.cpp di iGPU ini cukup lambat sehingga run itu saja akan memakan waktu berjam-jam, sementara perbandingan yang ada sudah cukup menunjukkan gambarannya; sel itu bertuliskan “tidak dijalankan”. Angka generasi di grafik diukur sebelum perbaikan decode 10 Oktober, yang diukur per kernel dan pada konteks pendek; pada konteks pendek peningkatannya masih dalam rentang noise antar-run (±4 %), pada konteks panjang ia menghemat waktu attention seperti di tahap 11. Angka itu juga diukur sebelum perbaikan 12 Oktober (tahap 16), yang membuat Gemma 4 E4B ±23 % lebih cepat dan output head Q6_K Qwen3.5 4B serta Gemma 4 12B ±8 % lebih cepat.</li>
+      <li>Checkpoint GSQ 35B-A3B membawa blok MTP tanpa routed expert, jadi model itu berjalan tanpa speculative decoding.</li>
+      <li>Laptop melambat saat beban berkepanjangan: run berturut-turut 5–10 % lebih lambat dari run pertama. Setiap pengukuran di sini didahului 30 detik GPU idle, sama untuk semua engine.</li>
+      <li>Pada 27B, setiap request butuh sekitar 3 detik sebelum token pertama walaupun hanya beberapa token yang baru (15 token: 2,8–3,8 detik). Penyebabnya belum diselidiki; dalam loop agen biaya ini dibayar di setiap langkah.</li>
+      <li>Prompt Gemma 4 yang dibatalkan hanya bisa dikembalikan selama ring sliding-window-nya masih menyimpan posisi sebelum blok tersebut (blok sampai sekitar 8K token). Setelah blok yang lebih panjang, percakapan di-reset dan request berikutnya memuat ulang prompt sistem dari disk.</li>
+      <li>Hanya satu percakapan yang dipegang dalam satu waktu, di memori GPU. Mematikan atau me-restart server menghilangkannya: prompt sistem kembali dari disk, tetapi sesi panjang yang dilanjutkan sesudahnya diproses ulang (27B: sekitar 100 token per detik). Percakapan tersimpan (cache sesi, bawaan mati) hanya ditulis saat server berpindah ke percakapan lain.</li>
+    </ul>
+
+    <h2 lang="en">What did not work</h2>
+    <h2 lang="id">Yang tidak berhasil</h2>
+    <ul class="tight" lang="en">
+      <li>A SIMD8 GEMM variant (13.7 TOPS in a microbenchmark) was slower in the real kernel; so were several-tokens-per-sub-group DeltaNet convolutions and local-memory staging of the recurrence.</li>
+      <li>f16 P·V accumulation: no faster and less accurate than int8 P·V. 7-bit P: same speed, 1.8× the error.</li>
+      <li>Keeping Q4_K's block minimums exact in the int8 GEMM runs 3× slower and was not more accurate end to end; the requantized form stays.</li>
+      <li>A third Gemma draft per verification pass: 2.67 instead of 2.25 tokens per pass, but each pass costs more, for +1.5 % overall.</li>
+      <li>Faster IQ4_XS decoding for the E4B: a 256-entry byte-pair table conflicted on local-memory banks (66 → 55 GB/s) and register shuffles with a variable lane index halved the speed; the 16-byte table stays.</li>
+      <li>The new decode-attention kernel on Qwen: up to 2× faster for two-row verification passes, but its rows are no longer bit-identical to single-token decoding, which the MTP test requires; Qwen keeps the previous kernels.</li>
+    </ul>
+    <ul class="tight" lang="id">
+      <li>Varian GEMM SIMD8 (13,7 TOPS di microbenchmark) lebih lambat di kernel sebenarnya; begitu juga konvolusi DeltaNet beberapa token per sub-group dan staging rekurensi di memori lokal.</li>
+      <li>Akumulasi P·V f16: tidak lebih cepat dan kurang akurat dibanding P·V int8. P 7-bit: kecepatan sama, galat 1,8×.</li>
+      <li>Mempertahankan nilai minimum blok Q4_K secara persis di GEMM int8 berjalan 3× lebih lambat dan tidak lebih akurat secara keseluruhan; bentuk yang dikuantisasi ulang tetap dipakai.</li>
+      <li>Draft ketiga Gemma per langkah verifikasi: 2,67 alih-alih 2,25 token per langkah, tetapi setiap langkah lebih mahal, sehingga hanya +1,5 % secara keseluruhan.</li>
+      <li>Decode IQ4_XS yang lebih cepat untuk E4B: tabel pasangan byte 256 entri bentrok di bank memori lokal (66 → 55 GB/s) dan shuffle register dengan indeks lane variabel memangkas kecepatan jadi separuh; tabel 16 byte tetap dipakai.</li>
+      <li>Kernel attention decode baru untuk Qwen: sampai 2× lebih cepat untuk verifikasi dua baris, tetapi barisnya tidak lagi identik bit demi bit dengan decoding satu token, yang disyaratkan tes MTP; Qwen tetap memakai kernel sebelumnya.</li>
+    </ul>
+
+    <h2 lang="en">Method</h2>
+    <h2 lang="id">Metode</h2>
+    <ol class="steps" lang="en">
+      <li>Models: Qwen3.5-4B and 9B UD-Q4_K_XL (Unsloth); Qwen3.8-27B GSQ-RCO IQ3_S-mtp (ISTA-DASLab, mixed IQ1_M–Q6_K per tensor); Gemma 4 12B QAT Q4_K_M and E4B IQ4_XS (community quantizations) with their mmproj and assistant drafters; Qwen3.6-35B-A3B 2-bit GSQ (ISTA-DASLab).</li>
+      <li>llama.cpp b11527 official Windows builds. Micro-batch size tuned per model and backend over 512 / 1024 / 2048 with flash attention on; SYCL needs <code>GGML_SYCL_ENABLE_VMM=0</code> on this driver, and its other options were tested and left at their defaults.</li>
+      <li>Each test preceded by 30 s of idle GPU; throughput is the best of repeated runs for every engine.</li>
+      <li>Perplexity: 40 chunks of 512 tokens from 500 KB of llama.cpp documentation, second half of each chunk scored (the llama-perplexity method, including its BOS handling).</li>
+      <li>Scripts and raw results: <code>bench/run_bench.ps1</code>, <code>bench/results/results.jsonl</code>; accuracy: <code>tools/ref_forward</code>, <code>tests/run_tests.ps1</code>; working notes: <code>docs/review_notes.md</code>.</li>
+      <li>Decode kernels: <code>bench/attn_dec_bench</code> (attention for 1–4 query rows against an int8 cache, checked against a CPU reference) and <code>bench/gemv_bench</code> (GEMV on real model tensors); decode-path accuracy: <code>run --kl-decode</code>. Changes of 10 and 11 October: <code>CHANGELOG.md</code>.</li>
+      <li>Pi in practice (11 October, Qwen3.8 27B): scripted <code>pi -p</code> sessions, timed from the server log. Cancellation tests ran in an empty folder with <code>--no-tools</code>; the use-case run in a scratch git project with Pi's tools, two extensions and a local MCP server. Exact rollback: the greedy output after a cancelled prompt equals that of a run that never cancelled (27B and Gemma 4 12B). The per-folder system-prompt cache was checked on a separate 4B server with its own cache folder (grouping, two versions per folder, loading after a restart, older files adopted, the size limit) and with one real Pi request.</li>
+      <li>E4B generation (12 October): <code>run --prof-gen</code> per kernel, <code>bench/gemv_bench</code> per matrix with the weights streaming over all layers (ablations and a bitwise comparison with the old kernel), <code>run --dump-logits</code> for bitwise identity of 64 generation steps, 128 tokens after <code>bench/prompts/gemma-code160</code>, old and new path in the same session. Long prompts: <code>bench/attn_bench</code> at 13,921 tokens, then the 13,921-token code prompt end to end and perplexity over 6 chunks of 4,096 tokens.</li>
+    </ol>
+    <ol class="steps" lang="id">
+      <li>Model: Qwen3.5-4B dan 9B UD-Q4_K_XL (Unsloth); Qwen3.8-27B GSQ-RCO IQ3_S-mtp (ISTA-DASLab, campuran IQ1_M–Q6_K per tensor); Gemma 4 12B QAT Q4_K_M dan E4B IQ4_XS (kuantisasi komunitas) beserta mmproj dan drafter assistant-nya; Qwen3.6-35B-A3B GSQ 2-bit (ISTA-DASLab).</li>
+      <li>llama.cpp b11527 build resmi Windows. Ukuran micro-batch di-tuning per model dan backend dari 512 / 1024 / 2048 dengan flash attention aktif; SYCL butuh <code>GGML_SYCL_ENABLE_VMM=0</code> di driver ini, dan opsi lainnya sudah diuji lalu dibiarkan default.</li>
+      <li>Setiap tes didahului 30 detik GPU idle; throughput adalah hasil terbaik dari beberapa run untuk setiap engine.</li>
+      <li>Perplexity: 40 potongan 512 token dari 500 KB dokumentasi llama.cpp, separuh kedua tiap potongan dinilai (metode llama-perplexity, termasuk penanganan BOS-nya).</li>
+      <li>Skrip dan hasil mentah: <code>bench/run_bench.ps1</code>, <code>bench/results/results.jsonl</code>; akurasi: <code>tools/ref_forward</code>, <code>tests/run_tests.ps1</code>; catatan kerja: <code>docs/review_notes.md</code>.</li>
+      <li>Kernel decode: <code>bench/attn_dec_bench</code> (attention untuk 1–4 baris query terhadap cache int8, dicek terhadap referensi CPU) dan <code>bench/gemv_bench</code> (GEMV pada tensor model asli); akurasi jalur decode: <code>run --kl-decode</code>. Perubahan 10 dan 11 Oktober: <code>CHANGELOG.md</code>.</li>
+      <li>Pi dalam praktik (11 Oktober, Qwen3.8 27B): sesi <code>pi -p</code> yang dijalankan skrip, waktunya diambil dari log server. Tes pembatalan berjalan di folder kosong dengan <code>--no-tools</code>; uji kasus pemakaian di proyek git percobaan dengan tool Pi, dua ekstensi dan server MCP lokal. Pengembalian yang persis: output greedy setelah prompt yang dibatalkan sama dengan run yang tidak pernah dibatalkan (27B dan Gemma 4 12B). Cache prompt sistem per folder diperiksa pada server 4B terpisah dengan folder cache sendiri (pengelompokan, dua versi per folder, pemuatan setelah restart, file lama diambil alih, batas ukuran) dan dengan satu request Pi sungguhan.</li>
+      <li>Generasi E4B (12 Oktober): <code>run --prof-gen</code> per kernel, <code>bench/gemv_bench</code> per matriks dengan bobot dibaca dari memori untuk semua layer (ablasi dan perbandingan bit demi bit dengan kernel lama), <code>run --dump-logits</code> untuk memastikan 64 langkah generasi identik bit demi bit, 128 token setelah <code>bench/prompts/gemma-code160</code>, jalur lama dan baru dalam sesi yang sama. Prompt panjang: <code>bench/attn_bench</code> pada 13.921 token, lalu prompt kode 13.921 token dari awal sampai akhir dan perplexity atas 6 potongan 4.096 token.</li>
+    </ol>
+  </div>
+
+  <footer>
+    <span lang="en">arcinfer · C++ and OpenCL · benchmarks from <span id="mdate"></span> · Pi measurements from 2026-10-11 · E4B and vision work 2026-10-12</span>
+    <span lang="id">arcinfer · C++ dan OpenCL · benchmark tanggal <span id="mdate-id"></span> · pengukuran Pi tanggal 2026-10-11 · perbaikan E4B dan vision 2026-10-12</span>
+  </footer>
+</div>
+<div class="tip" id="tip" hidden></div>
+
+<script>
+// ---------------------------------------------------------------- data (generated from bench/results/results.jsonl)
+const DATA = /*DATA-BEGIN*/{"date":"2026-10-10","engines":[{"id":"arcinfer","name":"arcinfer","color":"var(--s1)"},{"id":"vulkan","name":"llama.cpp Vulkan","color":"var(--s2)"},{"id":"sycl","name":"llama.cpp SYCL","color":"var(--s3)"}],"models":[{"id":"4b","name":"Qwen3.5 4B"},{"id":"9b","name":"Qwen3.5 9B"},{"id":"27b","name":"Qwen3.8 27B"},{"id":"g12","name":"Gemma 4 12B"},{"id":"35b","name":"Qwen3.6 35B-A3B · llama.cpp on UD-IQ2_M","skip":["sycl"]}],"prompts":[{"id":"code-11k","name":{"en":"code 11K","id":"kode 11K"}},{"id":"code-34k","name":{"en":"code 34K","id":"kode 34K"}}],"ttft":{"4b":{"code-11k":{"arcinfer":{"s":14.48,"tg":15.51,"n":11240},"vulkan":{"s":68.95,"tg":13.62,"n":11240},"sycl":{"s":41.69,"tg":12.77,"n":11240}},"code-34k":{"arcinfer":{"s":59.46,"tg":14.19,"n":33937},"vulkan":{"s":376.08,"tg":10.64,"n":33937},"sycl":{"s":162.89,"tg":8.15,"n":33937}}},"9b":{"code-11k":{"arcinfer":{"s":29.44,"tg":8.7,"n":11240},"vulkan":{"s":97.11,"tg":8.52,"n":11240},"sycl":{"s":67.03,"tg":8.94,"n":11240}},"code-34k":{"arcinfer":{"s":103.17,"tg":8.58,"n":33937},"vulkan":{"s":461.32,"tg":7.26,"n":33937},"sycl":{"s":243.14,"tg":6.36,"n":33937}}},"27b":{"code-11k":{"arcinfer":{"s":103.03,"tg":3.95,"n":11240},"vulkan":{"s":589.56,"tg":2.36,"n":11240},"sycl":{"s":503.87,"tg":1.78,"n":11240}},"code-34k":{"arcinfer":{"s":350.37,"tg":3.65,"n":33937},"vulkan":{"s":2417.49,"tg":2.06,"n":33937},"sycl":{"s":1623.65,"tg":1.09,"n":33937}}},"g12":{"code-11k":{"arcinfer":{"s":69.08,"tg":6.41,"n":13921},"vulkan":{"s":249.68,"tg":5.51,"n":13921}},"code-34k":{"arcinfer":{"s":239.87,"tg":6.1,"n":35957},"vulkan":{"s":1164.56,"tg":4.6,"n":35957}}},"35b":{"code-11k":{"arcinfer":{"s":14.28,"tg":15.27,"n":11240}},"code-34k":{"arcinfer":{"s":60.57,"tg":14.21,"n":33937}}}},"pp512":{"4b":{"arcinfer":909.9,"vulkan":263.9,"sycl":295.3},"9b":{"arcinfer":293.3,"vulkan":158.4,"sycl":161.5},"27b":{"arcinfer":80.7,"vulkan":24.2,"sycl":40.5},"g12":{"arcinfer":202.7,"vulkan":125.1},"35b":{"arcinfer":894.4}},"pp2048":{"4b":{"arcinfer":892.3,"vulkan":241.6,"sycl":337.4},"9b":{"arcinfer":377.5,"vulkan":150.8,"sycl":189.0},"27b":{"arcinfer":108.5,"vulkan":22.9,"sycl":24.9},"g12":{"arcinfer":240.1,"vulkan":95.6},"35b":{"arcinfer":908.6}},"tg64":{"4b":{"arcinfer":17.6,"vulkan":16.2,"sycl":17.9},"9b":{"arcinfer":10.1,"vulkan":9.5,"sycl":11.1},"27b":{"arcinfer":4.2,"vulkan":2.8,"sycl":2.2},"g12":{"arcinfer":7.5,"vulkan":7.0},"35b":{"arcinfer":15.7}},"ppl":{"4b":{"arcinfer":6.0562,"vulkan":6.141,"sycl":6.138},"9b":{"arcinfer":5.4172,"vulkan":5.4987,"sycl":5.4969},"27b":{"arcinfer":4.2738,"vulkan":4.3114,"sycl":4.3104},"g12":{"arcinfer":50.8016},"35b":{"arcinfer":5.6116}},"pplModels":[{"id":"4b","name":"Qwen3.5 4B"},{"id":"9b","name":"Qwen3.5 9B"},{"id":"27b","name":"Qwen3.8 27B"},{"id":"g12","name":"Gemma 4 12B"}],"moe":{"arcinfer":{"pp512":894.4,"pp2048":908.6,"tg64":15.7,"ttft11":{"s":14.28,"tg":15.27,"n":11240},"ttft34":{"s":60.57,"tg":14.21,"n":33937},"ppl":5.6116},"ref":{"pp512":null,"pp2048":null,"tg64":null,"ttft11":null,"ttft34":null,"ppl":null}},"spec":[{"model":"g12","name":"Gemma 4 12B","kind":"assistant","plain":7.66,"spec":8.74,"accept":50.0,"tpp":1.94},{"model":"e4b","name":"Gemma 4 E4B","kind":"assistant","plain":21.2,"spec":30.7,"accept":58.3,"tpp":2.1}],"spec_ctx":"short","kl":[{"name":"Qwen3.5 4B","prompt":{"en":"chat, 20 positions","id":"chat, 20 posisi"},"kl":0.0021,"note":{"en":"int8 activations, attention and KV cache (0.0006 with f32 attention)","id":"aktivasi, attention dan cache KV int8 (0,0006 dengan attention f32)"}},{"name":"Qwen3.6 35B-A3B","prompt":{"en":"chat, 20 positions","id":"chat, 20 posisi"},"kl":0.0008,"note":{"en":"the reference decodes the 2-bit expert layout on its own","id":"referensi men-decode layout expert 2-bit secara terpisah"}},{"name":"Gemma 4 12B","prompt":{"en":"chat, 20 positions","id":"chat, 20 posisi"},"kl":0.029,"note":{"en":"0.032 with one V scale per row","id":"0,032 dengan satu skala V per baris"}},{"name":"Gemma 4 12B","prompt":{"en":"code, 160 positions","id":"kode, 160 posisi"},"kl":0.018,"note":{"en":"0.23 with one V scale per row, including a flipped prediction (KL 27 at one position)","id":"0,23 dengan satu skala V per baris, termasuk satu prediksi yang berbalik (KL 27 di satu posisi)"}},{"name":"Gemma 4 12B","prompt":{"en":"raw text, 120 positions","id":"teks mentah, 120 posisi"},"kl":0.035,"note":{"en":"0.080 with one V scale per row","id":"0,080 dengan satu skala V per baris"}},{"name":"Gemma 4 12B","prompt":{"en":"code, 160 positions, token by token","id":"kode, 160 posisi, token demi token"},"kl":0.013,"note":{"en":"the generation path (run --kl-decode) after the 10 October decode work; 0.020 before it. Runs differ by float rounding at a few near-tied tokens","id":"jalur generasi (run --kl-decode) setelah perbaikan decode 10 Oktober; 0,020 sebelumnya. Selisih antar-run berasal dari pembulatan float di beberapa token yang hampir seri"}}],"mem":[{"name":"Qwen3.8 27B","ctx":86016,"gib":16.84,"note":{"en":"the largest that fits 18.3 GiB with ~1 GiB left for other apps (32,768 at 16.5 GiB, 57,344 at 17.4 GiB)","id":"terbesar yang muat di 18,3 GiB dengan sisa ±1 GiB untuk aplikasi lain (32.768 pada 16,5 GiB, 57.344 pada 17,4 GiB)"}},{"name":"Qwen3.6 35B-A3B","ctx":262144,"gib":14.5,"note":{"en":"trained maximum","id":"batas latih"}},{"name":"Qwen3.5 9B","ctx":262144,"gib":12.05,"note":{"en":"trained maximum","id":"batas latih"}},{"name":"Qwen3.5 4B","ctx":262144,"gib":11.64,"note":{"en":"trained maximum","id":"batas latih"}},{"name":"Gemma 4 12B","ctx":262144,"gib":12.72,"note":{"en":"trained maximum","id":"batas latih"}},{"name":"Gemma 4 E4B","ctx":131072,"gib":10.75,"note":{"en":"trained maximum","id":"batas latih"}}],"landing":[]}/*DATA-END*/;
+
+// ---------------------------------------------------------------- language
+const T = {
+  en: { pending: "not run", s: "s", tps: "tok/s", model: "Model", prompt: "Prompt", tokens: "Tokens", test: "Test",
+        genAt: "gen tok/s at that context (arc / Vulkan / SYCL)", tokensWord: "tokens",
+        tile27: "Qwen3.8 27B · 11K-token code prompt, time to first token", tileG: "Gemma 4 12B · 34K-token code prompt, time to first token",
+        tileMoe: "Qwen3.6-35B-A3B · 11K-token code prompt, time to first token", tileSpec: "Gemma 4 12B generation with its assistant drafter",
+        fasterThan: (x, e) => `${x}× faster than llama.cpp ${e}`, genNote: (v) => `then generates ${v} tok/s`,
+        vsPlain: (p) => `+${p} % vs without the drafter`,
+        moeHead: ["", "arcinfer · GSQ 2-bit", "llama.cpp Vulkan · UD-IQ2_M"], moeRows: ["pp512 (tok/s)", "pp2048 (tok/s)", "tg64 (tok/s)",
+        "11K-token prompt (s)", "34K-token prompt (s)", "generation after 11K (tok/s)", "perplexity"],
+        moeNote: "Perplexities of two different quantizations of the same model are not an engine comparison; the GSQ model card reports 2–4 points below the unquantized model on GPQA, IFEval and MMLU-Pro.",
+        specHead: ["Model", "drafter", "plain (tok/s)", "with drafts (tok/s)", "gain", "drafts accepted", "tokens per pass"],
+        mtpName: "MTP head", asstName: "assistant model",
+        klHead: ["Model", "test prompt", "mean KL vs f32", "note"],
+        pplHead: "Perplexity, 40 × 512 tokens (lower is better)",
+        pplNote: "On the Qwen models arcinfer's perplexity is about 1.5 % below llama.cpp's on the same tokens. That makes neither engine better: both run the same weights, so ideally the numbers would be equal, and a gap in either direction is a deviation, not a gain. The two llama.cpp backends agree with each other; arcinfer's own int8 choices move its perplexity by less than 0.06 %, and the cause of the gap was not pinned down. The accuracy measure is the KL against the f32 reference above, and greedy outputs are identical to llama.cpp's. For Gemma 4 the raw-text perplexity of this corpus is not usable at all: on four chunks the full-precision CPU build of llama.cpp gives 130, its Vulkan build 120, SYCL 113, arcinfer 111.",
+        memHead: ["Model", "context (tokens)", "GPU memory", "note"],
+        taskHead: ["Model", "first token (s)", "answer starts (s)", "total (s)", "tokens", "gen tok/s", "drafts accepted", "page"],
+        open: "open", noPage: "no HTML" },
+  id: { pending: "tidak dijalankan", s: "dtk", tps: "tok/dtk", model: "Model", prompt: "Prompt", tokens: "Token", test: "Tes",
+        genAt: "gen tok/dtk pada konteks itu (arc / Vulkan / SYCL)", tokensWord: "token",
+        tile27: "Qwen3.8 27B · prompt kode 11K token, waktu sampai token pertama", tileG: "Gemma 4 12B · prompt kode 34K token, waktu sampai token pertama",
+        tileMoe: "Qwen3.6-35B-A3B · prompt kode 11K token, waktu sampai token pertama", tileSpec: "Generasi Gemma 4 12B dengan drafter assistant",
+        fasterThan: (x, e) => `${x}× lebih cepat dari llama.cpp ${e}`, genNote: (v) => `lalu menghasilkan ${v} tok/dtk`,
+        vsPlain: (p) => `+${p} % dibandingkan tanpa drafter`,
+        moeHead: ["", "arcinfer · GSQ 2-bit", "llama.cpp Vulkan · UD-IQ2_M"], moeRows: ["pp512 (tok/dtk)", "pp2048 (tok/dtk)", "tg64 (tok/dtk)",
+        "prompt 11K token (dtk)", "prompt 34K token (dtk)", "generasi setelah 11K (tok/dtk)", "perplexity"],
+        moeNote: "Perplexity dari dua kuantisasi berbeda untuk model yang sama bukan perbandingan engine; model card GSQ melaporkan 2–4 poin di bawah model tanpa kuantisasi pada GPQA, IFEval dan MMLU-Pro.",
+        specHead: ["Model", "drafter", "biasa (tok/dtk)", "dengan draft (tok/dtk)", "peningkatan", "draft diterima", "token per langkah"],
+        mtpName: "kepala MTP", asstName: "model assistant",
+        klHead: ["Model", "prompt uji", "rata-rata KL dibandingkan dengan f32", "catatan"],
+        pplHead: "Perplexity, 40 × 512 token (lebih rendah lebih baik)",
+        pplNote: "Pada model Qwen, perplexity arcinfer sekitar 1,5 % di bawah llama.cpp pada token yang sama. Itu tidak berarti salah satu engine lebih bagus: keduanya menjalankan bobot yang sama, jadi idealnya angkanya sama, dan selisih ke arah mana pun adalah penyimpangan, bukan peningkatan. Kedua backend llama.cpp saling cocok; pilihan int8 arcinfer sendiri menggeser perplexity-nya kurang dari 0,06 %, dan penyebab selisih ini belum dipastikan. Ukuran akurasinya adalah KL dibandingkan dengan referensi f32 di atas, dan output greedy identik dengan llama.cpp. Untuk Gemma 4, perplexity teks mentah korpus ini sama sekali tidak bisa dipakai: pada empat potongan, build CPU llama.cpp yang presisi penuh memberi 130, build Vulkan 120, SYCL 113, arcinfer 111.",
+        memHead: ["Model", "konteks (token)", "memori GPU", "catatan"],
+        taskHead: ["Model", "token pertama (dtk)", "jawaban mulai (dtk)", "total (dtk)", "token", "gen tok/dtk", "draft diterima", "halaman"],
+        open: "buka", noPage: "tanpa HTML" },
+};
+// language: the viewer's last choice, else the browser language (Indonesian -> ID), else English
+let lang = (navigator.language || "").toLowerCase().startsWith("id") ? "id" : "en";
+try { const saved = localStorage.getItem("arc-review-lang"); if (saved === "en" || saved === "id") lang = saved; } catch (e) {}
+function fmt(v, d = 1) {
+  if (v == null || Number.isNaN(v)) return "–";
+  return v.toLocaleString(lang === "id" ? "id-ID" : "en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+const el = (tag, attrs = {}, text) => { const e = document.createElementNS(tag === "svg" || ["g","rect","path","line","text"].includes(tag) ? "http://www.w3.org/2000/svg" : "http://www.w3.org/1999/xhtml", tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); if (text != null) e.textContent = text; return e; };
+
+// ---------------------------------------------------------------- tooltip
+const tip = document.getElementById("tip");
+function showTip(evt, eng, value, unit, extra) {
+  tip.replaceChildren();
+  const b = document.createElement("b"); b.textContent = `${value} ${unit}`; tip.append(b);
+  const row = document.createElement("div"); const key = document.createElement("span"); key.className = "key"; key.style.background = eng.color;
+  row.append(key, document.createTextNode(eng.name)); tip.append(row);
+  if (extra) { const x = document.createElement("div"); x.style.color = "var(--ink-2)"; x.textContent = extra; tip.append(x); }
+  tip.hidden = false;
+  const r = evt.currentTarget.getBoundingClientRect();
+  const x = evt.clientX ?? (r.left + r.width), y = evt.clientY ?? (r.top + r.height / 2);
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  tip.style.left = Math.min(window.innerWidth - tw - 8, x + 14) + "px";
+  tip.style.top = Math.max(8, Math.min(window.innerHeight - th - 8, y - th - 10)) + "px";
+}
+const hideTip = () => { tip.hidden = true; };
+
+// ---------------------------------------------------------------- horizontal grouped bars (one facet)
+// groups: [{ label, values: {engine: number|null}, extra: {engine: string} }]
+function barFacet(title, groups, unit, digits, skip = []) {
+  const W = 460, padR = 64, barH = 13, gap = 2, groupGap = 18, groupLabelH = 16, top = 4;
+  const engines = DATA.engines.filter(e => !skip.includes(e.id)), n = engines.length;
+  const vals = groups.flatMap(g => Object.values(g.values).filter(v => v != null));
+  const nice = niceMax(vals.length ? Math.max(...vals) : 1);
+  const H = top + groups.length * (groupLabelH + n * barH + (n - 1) * gap + groupGap) + 18;
+  const plotW = W - padR;
+  const x = (v) => v / nice * plotW;
+  const svg = el("svg", { class: "chart", viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": title });
+  const plotBottom = H - 18;
+  for (const t of [0, 0.25, 0.5, 0.75, 1].map(f => f * nice)) {
+    svg.append(el("line", { class: t === 0 ? "base" : "grid", x1: x(t), x2: x(t), y1: top, y2: plotBottom }));
+    svg.append(el("text", { x: x(t), y: H - 4, "text-anchor": t === 0 ? "start" : "middle" }, fmt(t, t >= 100 || t === 0 ? 0 : (nice < 10 ? 1 : 0))));
+  }
+  let y = top;
+  for (const g of groups) {
+    svg.append(el("text", { class: "grp", x: 0, y: y + 11 }, g.label));
+    y += groupLabelH;
+    engines.forEach((eng, i) => {
+      const v = g.values[eng.id];
+      const yy = y + i * (barH + gap);
+      if (v != null) {
+        const gEl = el("g", { class: "bar", tabindex: "0", role: "img", "aria-label": `${eng.name}: ${fmt(v, digits)} ${unit}` });
+        const w = Math.max(2, x(v)), r = 4;
+        const d = w > r ? `M0,${yy} H${w - r} Q${w},${yy} ${w},${yy + r} V${yy + barH - r} Q${w},${yy + barH} ${w - r},${yy + barH} H0 Z`
+                        : `M0,${yy} H${w} V${yy + barH} H0 Z`;
+        gEl.append(el("path", { d, fill: eng.color }));
+        gEl.append(el("rect", { x: 0, y: yy - 1, width: Math.max(w + 40, 40), height: barH + 2, fill: "transparent" }));
+        svg.append(gEl);
+        svg.append(el("text", { class: "val", x: w + 6, y: yy + barH - 3 }, fmt(v, digits)));
+        const extra = g.extra && g.extra[eng.id];
+        const on = (e) => showTip(e, eng, fmt(v, digits), unit, extra);
+        gEl.addEventListener("pointermove", on); gEl.addEventListener("pointerleave", hideTip);
+        gEl.addEventListener("focus", on); gEl.addEventListener("blur", hideTip);
+      } else {
+        svg.append(el("text", { class: "val", x: 2, y: yy + barH - 3, style: "fill: var(--muted)" }, `${eng.name}: ${T[lang].pending}`));
+      }
+    });
+    y += n * barH + (n - 1) * gap + groupGap;
+  }
+  const f = document.createElement("div"); f.className = "facet";
+  const h = document.createElement("div"); h.className = "ftitle"; h.textContent = title;
+  f.append(h, svg);
+  return f;
+}
+function niceMax(v) {
+  const p = Math.pow(10, Math.floor(Math.log10(v))); const m = v / p;
+  const step = m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 4 ? 4 : m <= 5 ? 5 : m <= 8 ? 8 : 10;
+  return step * p;
+}
+function legend(id) {
+  const box = document.getElementById(id); box.replaceChildren();
+  for (const e of DATA.engines) { const s = document.createElement("span"); const i = document.createElement("i"); i.style.background = e.color; s.append(i, document.createTextNode(e.name)); box.append(s); }
+}
+// table helper: head = labels; rows = [[{text, win, pending, wrap}]]; nLeft = left-aligned leading columns
+function table(head, rows, nLeft = 1) {
+  const tb = document.createElement("table"); const th = document.createElement("thead"); const tr = document.createElement("tr");
+  head.forEach((h, i) => { const c = document.createElement("th"); c.textContent = h; if (i < nLeft) c.className = "l"; tr.append(c); }); th.append(tr); tb.append(th);
+  const body = document.createElement("tbody");
+  for (const r of rows) { const tr2 = document.createElement("tr");
+    r.forEach((c, i) => { const td = document.createElement("td"); td.textContent = c.text; if (i < nLeft) td.className = "l";
+      if (c.win) td.classList.add("win"); if (c.pending) td.classList.add("pending"); if (c.wrap) td.classList.add("wrap", "l"); tr2.append(td); });
+    body.append(tr2); }
+  tb.append(body); return tb;
+}
+
+// ---------------------------------------------------------------- render
+function render() {
+  const t = T[lang], L = (o) => o[lang] ?? o.en;
+  document.documentElement.setAttribute("data-lang", lang);
+  document.documentElement.setAttribute("lang", lang);
+  for (const b of document.querySelectorAll(".lang button")) b.setAttribute("aria-pressed", String(b.dataset.set === lang));
+  document.getElementById("mdate").textContent = DATA.date; document.getElementById("mdate-id").textContent = DATA.date;
+  const cell = (v, d, best) => v == null ? { text: t.pending, pending: true } : { text: fmt(v, d), win: best };
+
+  // tiles
+  const tiles = document.getElementById("tiles"); tiles.replaceChildren();
+  const tile = (label, value, unit, delta, note) => {
+    const d = document.createElement("div"); d.className = "tile";
+    const l = document.createElement("div"); l.className = "label"; l.textContent = label;
+    const v = document.createElement("div"); v.className = "value"; v.textContent = value + " "; const u = document.createElement("small"); u.textContent = unit; v.append(u);
+    d.append(l, v);
+    if (delta) { const x = document.createElement("div"); x.className = "delta"; x.textContent = delta; d.append(x); }
+    if (note) { const x = document.createElement("div"); x.className = "note"; x.textContent = note; d.append(x); }
+    tiles.append(d);
+  };
+  const bestLlama = (r) => ["vulkan", "sycl"].filter(e => r[e]).map(e => ({ e, s: r[e].s })).sort((a, b) => a.s - b.s)[0];
+  for (const [mid, pid, lbl] of [["27b", "code-11k", t.tile27], ["g12", "code-34k", t.tileG]]) {
+    const r = DATA.ttft[mid] && DATA.ttft[mid][pid]; if (!r || !r.arcinfer) continue;
+    const b = bestLlama(r);
+    tile(lbl, fmt(r.arcinfer.s, 0), t.s, b ? t.fasterThan((b.s / r.arcinfer.s).toFixed(1), b.e === "sycl" ? "SYCL" : "Vulkan") : null,
+         ["vulkan", "sycl"].filter(e => r[e]).map(e => `${e === "sycl" ? "SYCL" : "Vulkan"} ${fmt(r[e].s, 0)} ${t.s}`).join(" · "));
+  }
+  if (DATA.moe && DATA.moe.arcinfer.ttft11) tile(t.tileMoe, fmt(DATA.moe.arcinfer.ttft11.s, 1), t.s, null, t.genNote(fmt(DATA.moe.arcinfer.ttft11.tg, 1)));
+  const sg = (DATA.spec || []).find(x => x.model === "g12");
+  if (sg) tile(t.tileSpec, fmt(sg.spec, 1), t.tps, t.vsPlain(Math.round((sg.spec / sg.plain - 1) * 100)), `${fmt(sg.accept, 0)} % · ${fmt(sg.tpp, 2)} ${lang === "id" ? "token per langkah" : "tokens per pass"}`);
+
+  // TTFT facets
+  legend("leg-ttft"); legend("leg-pp"); legend("leg-tg");
+  const ft = document.getElementById("fig-ttft"); ft.replaceChildren();
+  for (const mo of DATA.models) {
+    const groups = DATA.prompts.map(p => {
+      const r = DATA.ttft[mo.id][p.id] || {}; const vals = {}, extra = {};
+      for (const e of DATA.engines) { const c = r[e.id]; vals[e.id] = c ? c.s : null;
+        if (c && c.tg) extra[e.id] = `${fmt(c.tg, 2)} ${t.tps} ${lang === "id" ? "generasi pada konteks ini" : "generation at this context"}`; }
+      const n = Object.values(r).map(c => c && c.n).find(Boolean);
+      return { label: `${L(p.name)}${n ? " · " + fmt(n, 0) + " " + t.tokensWord : ""}`, values: vals, extra };
+    });
+    ft.append(barFacet(mo.name, groups, t.s, 1, mo.skip));
+  }
+  // throughput facets
+  const fp = document.getElementById("fig-pp"); fp.replaceChildren();
+  const ftg = document.getElementById("fig-tg"); ftg.replaceChildren();
+  for (const mo of DATA.models) {
+    fp.append(barFacet(mo.name, [{ label: "pp2048", values: DATA.pp2048[mo.id] || {} }], t.tps, 1, mo.skip));
+    ftg.append(barFacet(mo.name, [{ label: "tg64", values: DATA.tg64[mo.id] || {} }], t.tps, 1, mo.skip));
+  }
+
+  // TTFT table
+  const rowsT = [];
+  for (const mo of DATA.models) for (const p of DATA.prompts) {
+    const r = DATA.ttft[mo.id][p.id] || {};
+    const vals = DATA.engines.map(e => r[e.id] ? r[e.id].s : null);
+    const minv = Math.min(...vals.filter(v => v != null));
+    const n = Object.values(r).map(c => c && c.n).find(Boolean);
+    rowsT.push([{ text: mo.name }, { text: n ? fmt(n, 0) : L(p.name) },
+      ...vals.map((v, i) => (mo.skip || []).includes(DATA.engines[i].id) ? { text: "–" } : cell(v, 1, v === minv)),
+      { text: DATA.engines.map(e => r[e.id] && r[e.id].tg ? fmt(r[e.id].tg, 2) : "–").join(" / ") }]);
+  }
+  document.getElementById("tbl-ttft").replaceChildren(table([t.model, t.tokens, ...DATA.engines.map(e => e.name + " (" + t.s + ")"), t.genAt], rowsT, 2));
+  // throughput table
+  const rowsP = [];
+  for (const mo of DATA.models) for (const k of ["pp512", "pp2048", "tg64"]) {
+    const vals = DATA.engines.map(e => (DATA[k][mo.id] || {})[e.id]);
+    const maxv = Math.max(...vals.filter(v => v != null));
+    rowsP.push([{ text: mo.name }, { text: k },
+      ...vals.map((v, i) => (mo.skip || []).includes(DATA.engines[i].id) ? { text: "–" } : cell(v, 1, v === maxv))]);
+  }
+  document.getElementById("tbl-pp").replaceChildren(table([t.model, t.test, ...DATA.engines.map(e => e.name + " (" + t.tps + ")")], rowsP, 2));
+
+  // MoE
+  if (DATA.moe) {
+    const a = DATA.moe.arcinfer, r = DATA.moe.ref;
+    const rows = [[a.pp512, r.pp512, 1], [a.pp2048, r.pp2048, 1], [a.tg64, r.tg64, 1],
+                  [a.ttft11 && a.ttft11.s, r.ttft11 && r.ttft11.s, 1], [a.ttft34 && a.ttft34.s, r.ttft34 && r.ttft34.s, 1],
+                  [a.ttft11 && a.ttft11.tg, r.ttft11 && r.ttft11.tg, 1], [a.ppl, r.ppl, 4]];
+    document.getElementById("tbl-moe").replaceChildren(table(t.moeHead,
+      rows.map((x, i) => [{ text: t.moeRows[i] }, cell(x[0], x[2], false), cell(x[1], x[2], false)])));
+    document.getElementById("moe-note").textContent = t.moeNote;
+  }
+  // speculative decoding
+  document.getElementById("tbl-spec").replaceChildren(table(t.specHead, (DATA.spec || []).map(x => [
+    { text: x.name }, { text: x.kind === "mtp" ? t.mtpName : t.asstName }, cell(x.plain, 2, false), cell(x.spec, 2, true),
+    { text: x.plain && x.spec ? `${x.spec >= x.plain ? "+" : ""}${Math.round((x.spec / x.plain - 1) * 100)} %` : "–" },
+    { text: x.accept != null ? fmt(x.accept, 0) + " %" : "–" }, cell(x.tpp, 2, false)]), 2));
+  // accuracy
+  document.getElementById("tbl-kl").replaceChildren(table(t.klHead, (DATA.kl || []).map(x => [
+    { text: x.name }, { text: L(x.prompt) }, cell(x.kl, 4, false), { text: L(x.note), wrap: true }]), 2));
+  const rowsL = DATA.pplModels.map(mo => [{ text: mo.name }, ...DATA.engines.map(e => cell((DATA.ppl[mo.id] || {})[e.id], 4, false))]);
+  const tl = document.getElementById("tbl-ppl"); tl.replaceChildren();
+  const cap = document.createElement("div"); cap.className = "sub"; cap.style.margin = "14px 0 4px"; cap.textContent = t.pplHead;
+  tl.append(cap, table([t.model, ...DATA.engines.map(e => e.name)], rowsL));
+  document.getElementById("ppl-note").textContent = t.pplNote;
+  // one task on every model (links to the generated pages published next to this one)
+  const task = DATA.landing || [];
+  document.getElementById("task-section").hidden = !task.length;
+  const tt2 = document.getElementById("tbl-task"); tt2.replaceChildren();
+  if (task.length) {
+    const tb = table(t.taskHead, task.map(x => [{ text: x.name }, cell(x.ttft, 1, false), cell(x.answer, 1, false), cell(x.total, 0, false),
+      cell(x.tokens, 0, false), cell(x.tps, 1, false), { text: x.drafts ? `${x.accepted} / ${x.drafts}` : "–" }, { text: "" }]));
+    tb.querySelectorAll("tbody tr").forEach((tr, i) => {
+      const c = tr.lastElementChild, x = task[i];
+      if (x.file) { const a = document.createElement("a"); a.href = x.file; a.target = "_blank"; a.rel = "noopener"; a.textContent = t.open; c.append(a); }
+      else c.textContent = t.noPage;
+    });
+    tt2.append(tb);
+  }
+  // memory
+  document.getElementById("tbl-mem").replaceChildren(table(t.memHead, (DATA.mem || []).map(x => [
+    { text: x.name }, { text: fmt(x.ctx, 0) }, { text: fmt(x.gib, 1) + " GiB" }, { text: L(x.note), wrap: true }])));
+}
+for (const b of document.querySelectorAll(".lang button")) b.addEventListener("click", () => {
+  lang = b.dataset.set; try { localStorage.setItem("arc-review-lang", lang); } catch (e) {} render();
+});
+render();
+</script>

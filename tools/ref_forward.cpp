@@ -1,0 +1,526 @@
+// CPU reference forward for Qwen3.5 (f32 activations, dequantized weights), mirroring llama.cpp's graph.
+// Used to measure how close arcinfer and llama.cpp are to the unquantized-activation result.
+// usage: ref_forward model.gguf 1,2,3 [arcinfer_top_logits_file]
+#include "../src/gguf.h"
+#include "../src/quants.h"
+#include <cmath>
+#include <cstdio>
+#include <sstream>
+#include <algorithm>
+
+static GgufFile* F;
+static std::string A;
+
+static int hp(const std::string& k, int def = -1) { return (int)F->get_int(A + "." + k, def); }
+
+// Optional fake-quantization of matmul inputs (env REF_Q = substring of tensor names or "all",
+// REF_QB = block size): int8 absmax per block, as arcinfer does with 256-element blocks.
+static std::vector<float> fake_quant(const std::string& name, const std::vector<float>& X, int K) {
+  const char* sel = getenv("REF_Q");
+  if (!sel || !(std::string(sel) == "all" || name.find(sel) != std::string::npos)) return X;
+  const int B = getenv("REF_QB") ? atoi(getenv("REF_QB")) : 256;
+  std::vector<float> q = X;
+  for (size_t b = 0; b < q.size(); b += B) {
+    float amax = 0;
+    for (int i = 0; i < B; ++i) amax = std::fmax(amax, std::fabs(q[b + i]));
+    const float d = amax / 127.0f, inv = amax > 0 ? 127.0f / amax : 0.0f;
+    for (int i = 0; i < B; ++i) q[b + i] = d * std::lrintf(q[b + i] * inv);
+  }
+  (void)K;
+  return q;
+}
+
+// Y[T][N] = X[T][K] * W^T ; W from GGUF (any supported type).
+static void matmul(const std::string& name, const std::vector<float>& X0, int T, std::vector<float>& Y) {
+  const GgufTensor& t = F->get(name);
+  const int K = (int)t.dims[0], N = (int)t.dims[1];
+  const std::vector<float> X = fake_quant(name, X0, K);
+  const size_t rb = t.nbytes / N;
+  Y.assign((size_t)T * N, 0.0f);
+#pragma omp parallel
+  {
+    std::vector<float> w(K);
+#pragma omp for schedule(dynamic, 16)
+    for (int n = 0; n < N; ++n) {
+      dequant_row(t.type, t.data + (size_t)n * rb, K, w.data());
+      for (int i = 0; i < T; ++i) {
+        double acc = 0;
+        const float* x = &X[(size_t)i * K];
+        for (int k = 0; k < K; ++k) acc += (double)w[k] * x[k];
+        Y[(size_t)i * N + n] = (float)acc;
+      }
+    }
+  }
+}
+
+static std::vector<float> vecf(const std::string& name) {
+  const GgufTensor& t = F->get(name);
+  std::vector<float> v(t.nelements());
+  dequant_row(t.type, t.data, (int)v.size(), v.data());
+  return v;
+}
+
+static void rmsnorm(float* x, int n, const float* w, float eps) {
+  double ss = 0;
+  for (int i = 0; i < n; ++i) ss += (double)x[i] * x[i];
+  const float r = (float)(1.0 / std::sqrt(ss / n + eps));
+  for (int i = 0; i < n; ++i) x[i] = x[i] * r * (w ? w[i] : 1.0f);
+}
+static float silu(float x) { return x / (1.0f + std::exp(-x)); }
+
+static float bf16f(uint16_t h) {
+  uint32_t u = (uint32_t)h << 16;
+  float f;
+  memcpy(&f, &u, 4);
+  return f;
+}
+
+// y[N] = W_e x for routed expert e of a tools/convert_gsq.py tensor pair (2-bit codes in the GPU layout of
+// kernels/moe.cl, bf16 scale per 128 inputs), decoded independently of the GPU kernels.
+// Standard GGUF expert tensors ([n_expert][N][K] of any type with a dequantizer): row by row.
+static void expert_mv(const std::string& name, int e, int N, int K, const float* x, float* y) {
+  const GgufTensor& q = F->get(name + ".weight");
+  if (!F->find(name + ".scale")) {
+    const size_t rb = q.nbytes / ((size_t)q.dims[2] * N);
+    std::vector<float> w(K);
+    for (int n = 0; n < N; ++n) {
+      dequant_row(q.type, q.data + ((size_t)e * N + n) * rb, K, w.data());
+      double acc = 0;
+      for (int k = 0; k < K; ++k) acc += (double)w[k] * x[k];
+      y[n] = (float)acc;
+    }
+    return;
+  }
+  const GgufTensor& s = F->get(name + ".scale");
+  const uint32_t* cw = (const uint32_t*)q.data + (size_t)e * N * K / 16;
+  const uint16_t* sw = (const uint16_t*)s.data + (size_t)e * N * K / 128;
+  const int KG = K / 128;
+  for (int n = 0; n < N; ++n) {
+    const int g = n / 16, lane = n % 16;
+    double acc = 0;
+    for (int kg = 0; kg < KG; ++kg) {
+      const float sc = bf16f(sw[((size_t)g * KG + kg) * 16 + lane]);
+      double part = 0;
+      for (int w = 0; w < 8; ++w) {
+        const uint32_t word = cw[(((size_t)g * KG + kg) * 8 + w) * 16 + lane];
+        for (int i = 0; i < 16; ++i) {
+          const int code = (word >> (8 * (i % 4) + 2 * (i / 4))) & 3;
+          part += (double)(code - 2) * x[kg * 128 + w * 16 + i];
+        }
+      }
+      acc += part * sc;
+    }
+    y[n] = (float)acc;
+  }
+}
+
+static float gelu_tanh(float x) { return 0.5f * x * (1.0f + std::tanh(0.7978845608f * (x + 0.044715f * x * x * x))); }
+
+// Gemma 4 decoder (f32 activations, dequantized weights), mirroring llama.cpp's gemma4 graph: embeddings * sqrt(E),
+// sandwich norms, q/k RMS norms, V = RMS-normed V (or raw K) without weight, NEOX RoPE (global layers: rope_freqs),
+// attention scale 1, sliding window, shared KV layers, GeGLU FFN, layer output scale. Leaves the residual stream in x.
+// REF_ATTQ: q, k and v rows rounded to int8 with a per-row absmax scale, as arcinfer's attention stores them.
+// REF_ATTQB = block size of the scales (default: the whole row).
+static void fq_row(float* v, int n, bool is_v = false) {
+  if (!getenv("REF_ATTQ")) return;
+  const bool row = is_v ? getenv("REF_ATTQV_ROW") != nullptr : getenv("REF_ATTQQK_ROW") != nullptr;
+  const int B = getenv("REF_ATTQB") && !row ? atoi(getenv("REF_ATTQB")) : n;
+  for (int b0 = 0; b0 < n; b0 += B) {
+    float amax = 0;
+    for (int i = b0; i < b0 + B; ++i) amax = std::fmax(amax, std::fabs(v[i]));
+    const float d = amax / 127.0f, inv = amax > 0 ? 127.0f / amax : 0.0f;
+    for (int i = b0; i < b0 + B; ++i) v[i] = d * std::lrintf(v[i] * inv);
+  }
+}
+static void gemma4_layers(const std::vector<int>& toks, std::vector<float>& x) {
+  const int T = (int)toks.size(), nl = hp("block_count"), E = hp("embedding_length"), nh = hp("attention.head_count");
+  const int hd_full = hp("attention.key_length"), hd_swa = hp("attention.key_length_swa", hd_full);
+  const int n_swa = hp("attention.sliding_window", 0), n_layer_kv = nl - hp("attention.shared_kv_layers", 0);
+  if (hp("embedding_length_per_layer_input", 0) > 0) { fprintf(stderr, "per-layer embeddings: not in the reference\n"); exit(1); }
+  const float eps = (float)F->get_float(A + ".attention.layer_norm_rms_epsilon", 1e-6);
+  const double base = F->get_float(A + ".rope.freq_base", 1e6), base_swa = F->get_float(A + ".rope.freq_base_swa", 1e4);
+  const auto* pat = F->get_ints(A + ".attention.sliding_window_pattern");
+  const auto* kvh = F->get_ints(A + ".attention.head_count_kv");
+  std::vector<float> rope_ff;
+  if (F->find("rope_freqs.weight")) rope_ff = vecf("rope_freqs.weight");
+  const GgufTensor& te = F->get("token_embd.weight");
+  const int V = (int)te.dims[1];
+  x.assign((size_t)T * E, 0.0f);
+  for (int t = 0; t < T; ++t) {
+    dequant_row(te.type, te.data + (size_t)toks[t] * (te.nbytes / V), E, &x[(size_t)t * E]);
+    for (int i = 0; i < E; ++i) x[(size_t)t * E + i] *= std::sqrt((float)E);
+  }
+  std::vector<std::vector<float>> Ks(nl), Vs(nl);
+  std::vector<int> hds(nl), nkvs(nl);
+  for (int il = 0; il < nl; ++il) {
+    const std::string p = "blk." + std::to_string(il) + ".";
+    const bool swa = pat && (*pat)[il] != 0;
+    const int hd = swa ? hd_swa : hd_full, nkv = kvh ? (int)(*kvh)[il] : hp("attention.head_count_kv");
+    hds[il] = hd;
+    nkvs[il] = nkv;
+    auto rope = [&](float* v, int pos) {
+      const int half = hd / 2;
+      for (int i = 0; i < half; ++i) {
+        double th = pos * std::pow(swa ? base_swa : base, -2.0 * i / hd);
+        if (!swa && !rope_ff.empty()) th /= rope_ff[i];
+        const double c = std::cos(th), sn = std::sin(th), a = v[i], b = v[i + half];
+        v[i] = (float)(a * c - b * sn);
+        v[i + half] = (float)(a * sn + b * c);
+      }
+    };
+    auto an = vecf(p + "attn_norm.weight");
+    std::vector<float> h = x, q;
+    for (int t = 0; t < T; ++t) rmsnorm(&h[(size_t)t * E], E, an.data(), eps);
+    matmul(p + "attn_q.weight", h, T, q);
+    auto qn = vecf(p + "attn_q_norm.weight");
+    for (int t = 0; t < T; ++t)
+      for (int hh = 0; hh < nh; ++hh) {
+        float* v = &q[((size_t)t * nh + hh) * hd];
+        rmsnorm(v, hd, qn.data(), eps);
+        rope(v, t);
+        fq_row(v, hd);
+      }
+    int src = il;
+    if (il >= n_layer_kv) {
+      src = n_layer_kv - (swa ? 2 : 1);
+    } else {
+      std::vector<float> k, v;
+      matmul(p + "attn_k.weight", h, T, k);
+      if (F->find(p + "attn_v.weight")) matmul(p + "attn_v.weight", h, T, v);
+      else v = k;  // no V projection: V is the raw K projection
+      auto kn = vecf(p + "attn_k_norm.weight");
+      for (int t = 0; t < T; ++t)
+        for (int g = 0; g < nkv; ++g) {
+          float* kr = &k[((size_t)t * nkv + g) * hd];
+          rmsnorm(kr, hd, kn.data(), eps);
+          rope(kr, t);
+          fq_row(kr, hd);
+          rmsnorm(&v[((size_t)t * nkv + g) * hd], hd, nullptr, eps);
+          fq_row(&v[((size_t)t * nkv + g) * hd], hd, true);
+        }
+      Ks[il] = std::move(k);
+      Vs[il] = std::move(v);
+    }
+    const std::vector<float>&K = Ks[src], &Vv = Vs[src];
+    const int nkv_s = nkvs[src];
+    std::vector<float> att((size_t)T * nh * hd);
+#pragma omp parallel for collapse(2)
+    for (int t = 0; t < T; ++t)
+      for (int hh = 0; hh < nh; ++hh) {
+        const int g = hh / (nh / nkv_s), u0 = swa && n_swa > 0 ? std::max(0, t - n_swa + 1) : 0;
+        const float* qv = &q[((size_t)t * nh + hh) * hd];
+        std::vector<double> sc(t + 1);
+        double mx = -1e300;
+        for (int u = u0; u <= t; ++u) {
+          double s2 = 0;
+          for (int i = 0; i < hd; ++i) s2 += (double)qv[i] * K[((size_t)u * nkv_s + g) * hd + i];
+          sc[u] = s2;  // attention scale 1
+          mx = std::max(mx, s2);
+        }
+        double z = 0;
+        for (int u = u0; u <= t; ++u) { sc[u] = std::exp(sc[u] - mx); z += sc[u]; }
+        // REF_ATTP: P * vscale rounded to 8 bits per 16-key tile and 64-dim block, as arcinfer's P*V does
+        const bool pq = getenv("REF_ATTP") != nullptr;
+        for (int i = 0; i < hd; ++i) {
+          double acc = 0;
+          if (!pq) {
+            for (int u = u0; u <= t; ++u) acc += sc[u] * Vv[((size_t)u * nkv_s + g) * hd + i];
+          } else {
+            const int c0 = i / 64 * 64;
+            for (int b0 = u0 / 16 * 16; b0 <= t; b0 += 16) {
+              double w[16], vs[16], wmax = 0;
+              for (int j = 0; j < 16; ++j) {
+                const int u = b0 + j;
+                w[j] = vs[j] = 0;
+                if (u < u0 || u > t) continue;
+                double am = 0;
+                for (int d = c0; d < c0 + 64; ++d) am = std::max(am, (double)std::fabs(Vv[((size_t)u * nkv_s + g) * hd + d]));
+                vs[j] = am / 127.0;
+                w[j] = sc[u] * vs[j];
+                wmax = std::max(wmax, w[j]);
+              }
+              if (wmax <= 0) continue;
+              for (int j = 0; j < 16; ++j)
+                if (vs[j] > 0)
+                  acc += std::nearbyint(w[j] / wmax * 255.0) * (wmax / 255.0) *
+                         (Vv[((size_t)(b0 + j) * nkv_s + g) * hd + i] / vs[j]);
+            }
+          }
+          att[((size_t)t * nh + hh) * hd + i] = (float)(acc / z);
+        }
+      }
+    std::vector<float> o, gg, uu, dd;
+    matmul(p + "attn_output.weight", att, T, o);
+    auto pa = vecf(p + "post_attention_norm.weight");
+    for (int t = 0; t < T; ++t) {
+      rmsnorm(&o[(size_t)t * E], E, pa.data(), eps);
+      for (int i = 0; i < E; ++i) x[(size_t)t * E + i] += o[(size_t)t * E + i];
+    }
+    auto fn = vecf(p + "ffn_norm.weight");
+    h = x;
+    for (int t = 0; t < T; ++t) rmsnorm(&h[(size_t)t * E], E, fn.data(), eps);
+    matmul(p + "ffn_gate.weight", h, T, gg);
+    matmul(p + "ffn_up.weight", h, T, uu);
+    for (size_t i = 0; i < gg.size(); ++i) gg[i] = gelu_tanh(gg[i]) * uu[i];
+    matmul(p + "ffn_down.weight", gg, T, dd);
+    auto pf = vecf(p + "post_ffw_norm.weight");
+    float scale = 1.0f;
+    if (F->find(p + "layer_output_scale.weight")) scale = vecf(p + "layer_output_scale.weight")[0];
+    for (int t = 0; t < T; ++t) {
+      rmsnorm(&dd[(size_t)t * E], E, pf.data(), eps);
+      for (int i = 0; i < E; ++i) x[(size_t)t * E + i] = (x[(size_t)t * E + i] + dd[(size_t)t * E + i]) * scale;
+    }
+    fprintf(stderr, "\rlayer %d/%d", il + 1, nl);
+  }
+}
+
+// Gemma's final logit soft-capping (cap * tanh(l / cap)); no-op for other models.
+static void softcap(std::vector<float>& l) {
+  const float c = (float)F->get_float(A + ".final_logit_softcapping", 0.0);
+  if (c > 0)
+    for (auto& v : l) v = c * std::tanh(v / c);
+}
+
+int main(int argc, char** argv) {
+  if (argc < 3) { fprintf(stderr, "usage: ref_forward model.gguf ids\n"); return 1; }
+  GgufFile f(argv[1]);
+  F = &f;
+  A = f.get_str("general.architecture");
+  std::vector<int> toks;
+  { std::stringstream ss(argv[2]); std::string s; while (std::getline(ss, s, ',')) toks.push_back(std::stoi(s)); }
+  const int T = (int)toks.size();
+  const int nl = hp("block_count") - hp("nextn_predict_layers", 0), E = hp("embedding_length");
+  const int nh = hp("attention.head_count"), nkv = hp("attention.head_count_kv"), hd = hp("attention.key_length");
+  const int nrot = hp("rope.dimension_count"), ds = hp("ssm.state_size"), nk = hp("ssm.group_count"), nv = hp("ssm.time_step_rank");
+  const int Di = hp("ssm.inner_size"), interval = hp("full_attention_interval", 4);
+  const float eps = (float)f.get_float(A + ".attention.layer_norm_rms_epsilon", 1e-6);
+  const float base = (float)f.get_float(A + ".rope.freq_base", 1e7);
+  const int Cd = 2 * nk * ds + Di;
+  const GgufTensor& te = f.get("token_embd.weight");
+  const int V = (int)te.dims[1];
+
+  std::vector<float> x((size_t)T * E), h, y, y2, y3;
+  for (int t = 0; t < T; ++t) dequant_row(te.type, te.data + (size_t)toks[t] * (te.nbytes / V), E, &x[(size_t)t * E]);
+
+  if (A == "gemma4") gemma4_layers(toks, x);
+  for (int il = 0; il < nl && A != "gemma4"; ++il) {
+    const std::string p = "blk." + std::to_string(il) + ".";
+    auto an = vecf(p + "attn_norm.weight");
+    h = x;
+    for (int t = 0; t < T; ++t) rmsnorm(&h[(size_t)t * E], E, an.data(), eps);
+    std::vector<float> out((size_t)T * E, 0.0f);
+    if ((il + 1) % interval != 0) {
+      // Gated DeltaNet
+      std::vector<float> qkv, z, al, be;
+      matmul(p + "attn_qkv.weight", h, T, qkv);
+      matmul(p + "attn_gate.weight", h, T, z);
+      matmul(p + "ssm_alpha.weight", h, T, al);
+      matmul(p + "ssm_beta.weight", h, T, be);
+      auto dt = vecf(p + "ssm_dt.bias"), sa = vecf(p + "ssm_a"), cw = vecf(p + "ssm_conv1d.weight"), sn = vecf(p + "ssm_norm.weight");
+      std::vector<float> c((size_t)T * Cd);
+      for (int t = 0; t < T; ++t)
+        for (int ch = 0; ch < Cd; ++ch) {
+          float acc = 0;
+          for (int i = 0; i < 4; ++i) { int tt = t - 3 + i; if (tt >= 0) acc += cw[ch * 4 + i] * qkv[(size_t)tt * Cd + ch]; }
+          c[(size_t)t * Cd + ch] = silu(acc);
+        }
+      for (int t = 0; t < T; ++t)
+        for (int hh = 0; hh < 2 * nk; ++hh) {
+          float* v = &c[(size_t)t * Cd + hh * ds];
+          double ss = 0;
+          for (int i = 0; i < ds; ++i) ss += (double)v[i] * v[i];
+          const float r = (float)(1.0 / std::sqrt(ss + eps));
+          for (int i = 0; i < ds; ++i) v[i] *= r;
+        }
+      std::vector<float> o((size_t)T * Di);
+      std::vector<double> S((size_t)nv * ds * ds, 0.0);  // S[h][j][i]
+      for (int t = 0; t < T; ++t)
+        for (int hv = 0; hv < nv; ++hv) {
+          const int kh = hv % nk;
+          const float* q = &c[(size_t)t * Cd + kh * ds];
+          const float* k = &c[(size_t)t * Cd + nk * ds + kh * ds];
+          const float* v = &c[(size_t)t * Cd + 2 * nk * ds + hv * ds];
+          const float a = al[(size_t)t * nv + hv] + dt[hv];
+          const double g = (a > 20 ? a : std::log1p(std::exp((double)a))) * sa[hv];
+          const double decay = std::exp(g), beta = 1.0 / (1.0 + std::exp(-(double)be[(size_t)t * nv + hv]));
+          for (int jj = 0; jj < ds; ++jj) {
+            double* s = &S[((size_t)hv * ds + jj) * ds];
+            double sk = 0;
+            for (int i = 0; i < ds; ++i) { s[i] *= decay; sk += s[i] * k[i]; }
+            const double d = (v[jj] - sk) * beta;
+            double oq = 0;
+            for (int i = 0; i < ds; ++i) { s[i] += k[i] * d; oq += s[i] * q[i]; }
+            o[(size_t)t * Di + hv * ds + jj] = (float)(oq / std::sqrt((double)ds));
+          }
+        }
+      for (int t = 0; t < T; ++t)
+        for (int hv = 0; hv < nv; ++hv) {
+          float* ov = &o[(size_t)t * Di + hv * ds];
+          rmsnorm(ov, ds, sn.data(), eps);
+          for (int i = 0; i < ds; ++i) ov[i] *= silu(z[(size_t)t * Di + hv * ds + i]);
+        }
+      matmul(p + "ssm_out.weight", o, T, out);
+    } else {
+      std::vector<float> qg, kk, vv;
+      matmul(p + "attn_q.weight", h, T, qg);
+      matmul(p + "attn_k.weight", h, T, kk);
+      matmul(p + "attn_v.weight", h, T, vv);
+      auto qn = vecf(p + "attn_q_norm.weight"), kn = vecf(p + "attn_k_norm.weight");
+      std::vector<float> q((size_t)T * nh * hd);
+      auto rope = [&](float* v, int pos) {
+        const int hr = nrot / 2;
+        for (int i = 0; i < hr; ++i) {
+          const double th = pos * std::pow((double)base, -2.0 * i / nrot);
+          const double cs = std::cos(th), sn = std::sin(th), a = v[i], b = v[i + hr];
+          v[i] = (float)(a * cs - b * sn);
+          v[i + hr] = (float)(a * sn + b * cs);
+        }
+      };
+      for (int t = 0; t < T; ++t) {
+        for (int hh = 0; hh < nh; ++hh) {
+          float* d = &q[((size_t)t * nh + hh) * hd];
+          memcpy(d, &qg[(size_t)t * nh * hd * 2 + hh * hd * 2], hd * 4);
+          rmsnorm(d, hd, qn.data(), eps);
+          rope(d, t);
+        }
+        for (int hh = 0; hh < nkv; ++hh) {
+          float* d = &kk[(size_t)t * nkv * hd + hh * hd];
+          rmsnorm(d, hd, kn.data(), eps);
+          rope(d, t);
+        }
+      }
+      std::vector<float> att((size_t)T * nh * hd);
+      for (int t = 0; t < T; ++t)
+        for (int hh = 0; hh < nh; ++hh) {
+          const int g = hh / (nh / nkv);
+          std::vector<double> sc(t + 1);
+          double mx = -1e300;
+          for (int u = 0; u <= t; ++u) {
+            double s = 0;
+            for (int i = 0; i < hd; ++i) s += (double)q[((size_t)t * nh + hh) * hd + i] * kk[(size_t)u * nkv * hd + g * hd + i];
+            sc[u] = s / std::sqrt((double)hd);
+            mx = std::max(mx, sc[u]);
+          }
+          double z = 0;
+          for (auto& s : sc) { s = std::exp(s - mx); z += s; }
+          for (int i = 0; i < hd; ++i) {
+            double acc = 0;
+            for (int u = 0; u <= t; ++u) acc += sc[u] * vv[(size_t)u * nkv * hd + g * hd + i];
+            const float gate = qg[(size_t)t * nh * hd * 2 + hh * hd * 2 + hd + i];
+            att[((size_t)t * nh + hh) * hd + i] = (float)(acc / z) / (1.0f + std::exp(-gate));
+          }
+        }
+      matmul(p + "attn_output.weight", att, T, out);
+    }
+    for (size_t i = 0; i < x.size(); ++i) x[i] += out[i];
+    auto pn = vecf(p + "post_attention_norm.weight");
+    h = x;
+    for (int t = 0; t < T; ++t) rmsnorm(&h[(size_t)t * E], E, pn.data(), eps);
+    std::vector<float> g, u, d;
+    const bool moe = A == "qwen35moe";
+    const std::string sfx = moe ? "_shexp.weight" : ".weight";  // MoE: the shared expert first
+    matmul(p + "ffn_gate" + sfx, h, T, g);
+    matmul(p + "ffn_up" + sfx, h, T, u);
+    for (size_t i = 0; i < g.size(); ++i) g[i] = silu(g[i]) * u[i];
+    matmul(p + "ffn_down" + sfx, g, T, d);
+    if (moe) {
+      // sigmoid-gated shared expert + the top-k experts of the router softmax, weights renormalized
+      const int NE = hp("expert_count"), NU = hp("expert_used_count"), Fe = hp("expert_feed_forward_length");
+      auto sgw = vecf(p + "ffn_gate_inp_shexp.weight");
+      std::vector<float> rl;
+      matmul(p + "ffn_gate_inp.weight", h, T, rl);
+#pragma omp parallel for
+      for (int t = 0; t < T; ++t) {
+        const float* ht = &h[(size_t)t * E];
+        double sg = 0;
+        for (int i = 0; i < E; ++i) sg += (double)sgw[i] * ht[i];
+        sg = 1.0 / (1.0 + std::exp(-sg));
+        float* dt = &d[(size_t)t * E];
+        for (int i = 0; i < E; ++i) dt[i] *= (float)sg;
+        std::vector<int> id(NE);
+        for (int i = 0; i < NE; ++i) id[i] = i;
+        const float* l = &rl[(size_t)t * NE];
+        std::stable_sort(id.begin(), id.end(), [&](int a, int b) { return l[a] > l[b]; });
+        double z = 0;
+        for (int k = 0; k < NU; ++k) z += std::exp((double)l[id[k]] - l[id[0]]);
+        std::vector<float> ge(Fe), ue(Fe), de(E);
+        for (int k = 0; k < NU; ++k) {
+          const int e = id[k];
+          const float w = (float)(std::exp((double)l[e] - l[id[0]]) / z);
+          expert_mv(p + "ffn_gate_exps", e, Fe, E, ht, ge.data());
+          expert_mv(p + "ffn_up_exps", e, Fe, E, ht, ue.data());
+          for (int i = 0; i < Fe; ++i) ge[i] = silu(ge[i]) * ue[i];
+          expert_mv(p + "ffn_down_exps", e, E, Fe, ge.data(), de.data());
+          for (int i = 0; i < E; ++i) dt[i] += w * de[i];
+        }
+      }
+    }
+    for (size_t i = 0; i < x.size(); ++i) x[i] += d[i];
+    fprintf(stderr, "\rlayer %d/%d", il + 1, nl);
+  }
+  auto on = vecf("output_norm.weight");
+  if (getenv("REF_PPL")) {
+    // perplexity-style scoring of this chunk: negative log-likelihood of tokens T/2+1 .. T-1
+    std::vector<float> xs(x.begin() + (size_t)(T / 2) * E, x.end() - E), lg;
+    const int R = T - 1 - T / 2;
+    for (int r = 0; r < R; ++r) rmsnorm(&xs[(size_t)r * E], E, on.data(), eps);
+    matmul(f.find("output.weight") ? "output.weight" : "token_embd.weight", xs, R, lg);
+    softcap(lg);
+    double nll = 0;
+    for (int r = 0; r < R; ++r) {
+      const float* l = &lg[(size_t)r * V];
+      double m2 = l[0], z2 = 0;
+      for (int i = 0; i < V; ++i) m2 = std::max(m2, (double)l[i]);
+      for (int i = 0; i < V; ++i) z2 += std::exp(l[i] - m2);
+      nll += -(l[toks[T / 2 + r + 1]] - m2 - std::log(z2));
+    }
+    printf("\nppl_nll %.6f %d\n", nll, R);
+    return 0;
+  }
+  std::vector<float> last(x.end() - E, x.end()), logits;
+  rmsnorm(last.data(), E, on.data(), eps);
+  matmul(f.find("output.weight") ? "output.weight" : "token_embd.weight", last, 1, logits);
+  softcap(logits);
+  std::vector<int> idx(V);
+  for (int i = 0; i < V; ++i) idx[i] = i;
+  std::partial_sort(idx.begin(), idx.begin() + 10, idx.end(), [&](int a, int b) { return logits[a] > logits[b]; });
+  double mx = logits[idx[0]], z = 0;
+  for (float l : logits) z += std::exp(l - mx);
+  printf("\nreference top-10:");
+  for (int i = 0; i < 10; ++i) printf(" %d(%.4f)", idx[i], std::exp(logits[idx[i]] - mx) / z);
+  printf("\n");
+  // argv[3]: dump log-probs; argv[4]: compare against a dump (KL(dump || this)).
+  if (argc > 4) {
+    FILE* fi = fopen(argv[4], "rb");
+    std::vector<float> ref(V);
+    fread(ref.data(), 4, V, fi);
+    fclose(fi);
+    double kl = 0;
+    for (int i = 0; i < V; ++i) kl += std::exp(ref[i]) * (ref[i] - (logits[i] - mx - std::log(z)));
+    printf("KL(ref || this) = %.5f\n", kl);
+  }
+  if (argc > 3 && std::string(argv[3]) != "-") {
+    FILE* fo = fopen(argv[3], "wb");
+    std::vector<float> lp(V);
+    if (getenv("REF_ALL")) {
+      // log-probs of every position (T x V), for a KL averaged over the prompt
+      std::vector<float> xs = x, all;
+      for (int t = 0; t < T; ++t) rmsnorm(&xs[(size_t)t * E], E, on.data(), eps);
+      matmul(f.find("output.weight") ? "output.weight" : "token_embd.weight", xs, T, all);
+      softcap(all);
+      for (int t = 0; t < T; ++t) {
+        const float* l = &all[(size_t)t * V];
+        double m2 = l[0], z2 = 0;
+        for (int i = 0; i < V; ++i) m2 = std::max(m2, (double)l[i]);
+        for (int i = 0; i < V; ++i) z2 += std::exp(l[i] - m2);
+        for (int i = 0; i < V; ++i) lp[i] = (float)(l[i] - m2 - std::log(z2));
+        fwrite(lp.data(), 4, V, fo);
+      }
+    } else {
+      for (int i = 0; i < V; ++i) lp[i] = (float)(logits[i] - mx - std::log(z));
+      fwrite(lp.data(), 4, V, fo);
+    }
+    fclose(fo);
+  }
+  return 0;
+}

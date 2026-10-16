@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>arcinfer</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1f; --muted: #6b6b70; --border: #e2e2de;
+  --accent: #2f6fde; --accent-text: #ffffff; --user: #eef3fd; --code: #f1f1ee; --think: #fafaf7; --danger: #c43c3c;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141416; --panel: #1d1d20; --text: #ececee; --muted: #9a9aa2; --border: #303036;
+    --accent: #5b8ff0; --accent-text: #0e0e10; --user: #232b3b; --code: #26262b; --think: #19191c; --danger: #e06767;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; display: flex; flex-direction: column; }
+header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
+header h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+header .model { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+header .spacer { flex: 1; }
+button { font: inherit; border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+main { flex: 1; overflow-y: auto; padding: 16px; }
+.thread { max-width: 880px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+.msg { padding: 10px 14px; border-radius: 12px; border: 1px solid var(--border); background: var(--panel); overflow-wrap: anywhere; }
+.msg.user { background: var(--user); align-self: flex-end; max-width: 85%; white-space: pre-wrap; }
+.msg .role { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.msg pre { background: var(--code); padding: 10px; border-radius: 8px; overflow-x: auto; font-size: 13px; }
+.msg code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 13px; }
+.codeblock { margin: 8px 0; }
+.codebar { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-bottom: -4px; }
+.codebar.bottom { margin: -4px 0 0; }
+.codebar span { flex: 1; font-family: ui-monospace, Consolas, monospace; }
+.codebar button { padding: 2px 10px; font-size: 12px; border-radius: 6px; }
+.msg :not(pre) > code { background: var(--code); padding: 1px 5px; border-radius: 5px; }
+details.think { background: var(--think); border: 1px dashed var(--border); border-radius: 8px; padding: 6px 10px; margin-bottom: 8px; color: var(--muted); font-size: 13.5px; }
+details.think summary { cursor: pointer; }
+details.think div { white-space: pre-wrap; margin-top: 6px; }
+.tool { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; background: var(--code); border-radius: 8px; padding: 8px; margin-top: 8px; white-space: pre-wrap; }
+.stats { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.progress { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin: 6px 0; }
+.progress > div { height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+footer { border-top: 1px solid var(--border); background: var(--panel); padding: 10px 16px; }
+.composer { max-width: 880px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; }
+textarea { flex: 1; resize: vertical; min-height: 48px; max-height: 40vh; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+.settings { max-width: 880px; margin: 8px auto 0; display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: var(--muted); align-items: center; }
+.settings label { display: flex; gap: 6px; align-items: center; }
+.settings input[type=number] { width: 70px; }
+.settings input, .settings select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 2px 6px; }
+#sys { width: 100%; margin-top: 6px; min-height: 36px; }
+.drop { outline: 2px dashed var(--accent); outline-offset: -6px; }
+.attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.attachments:empty { display: none; }
+.att { position: relative; }
+.att img { height: 64px; max-width: 120px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border, #8884); display: block; }
+.att button { position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; padding: 0; border-radius: 50%; font-size: 12px; line-height: 18px; }
+.msg.user .imgs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.msg.user .imgs img { max-height: 160px; max-width: 240px; border-radius: 6px; }
+.msg.user .imgs audio, .att audio { height: 36px; max-width: 260px; }
+.att .clip { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--border, #8884); border-radius: 6px; font-size: 12px; }
+.empty { color: var(--muted); text-align: center; margin-top: 18vh; }
+.compacted { border: 1px dashed var(--border); border-radius: 10px; padding: 6px 12px; color: var(--muted); font-size: 13px; }
+.compacted summary { cursor: pointer; }
+.compacted div { white-space: pre-wrap; margin-top: 6px; }
+.msg.old { opacity: .55; }
+#ctxuse { font-size: 12px; color: var(--muted); white-space: nowrap; }
+/* shown while a reply streams and the view is not at the bottom (following paused by scrolling up) */
+#latest { position: sticky; bottom: 12px; display: block; margin: 12px auto 0; background: var(--accent); color: var(--accent-text); border-color: var(--accent); border-radius: 16px; box-shadow: 0 2px 10px rgba(0,0,0,.25); }
+#latest[hidden] { display: none; }
+@media (max-width: 600px) { header .model { display: none; } .msg.user { max-width: 100%; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>arcinfer</h1>
+  <span class="model" id="model">connecting…</span>
+  <span class="spacer"></span>
+  <span id="ctxuse" title="Context used by this conversation (as of the last reply)"></span>
+  <button id="compact" title="Summarize the earlier messages so the conversation takes less context (done automatically when the context is nearly full)" disabled>Compact</button>
+  <button id="newchat" title="Start a new conversation">New chat</button>
+</header>
+<main id="main"><div class="thread" id="thread"><div class="empty" id="empty">Ask anything, or drop source files and images here to include them in your message.</div></div><button id="latest" hidden title="Scroll to the newest output and keep following it">↓ Latest</button></main>
+<footer>
+  <div class="attachments" id="atts"></div>
+  <div class="composer">
+    <textarea id="input" placeholder="Message (Enter to send, Shift+Enter for a new line, paste or drop images)"></textarea>
+    <button id="attach" title="Attach images (Qwen3.5 4B, Gemma 4 12B) or audio (Gemma 4 12B)">Media</button>
+    <input type="file" id="file" accept="image/*,audio/*" multiple hidden>
+    <button class="primary" id="send">Send</button>
+    <button id="stop" disabled>Stop</button>
+  </div>
+  <div class="settings">
+    <label><input type="checkbox" id="thinking" checked> Thinking</label>
+    <label>Effort <select id="effort"><option value="low">low</option><option value="medium">medium</option><option value="xhigh" selected>xhigh</option></select></label>
+    <label>Temperature <input type="number" id="temp" step="0.1" min="0" max="2" value="0.7"></label>
+    <label>Max tokens <input type="number" id="maxtok" step="128" min="16" value="4096"></label>
+    <details style="flex-basis:100%"><summary>System prompt</summary><textarea id="sys" placeholder="Optional system prompt"></textarea></details>
+  </div>
+</footer>
+<script>
+const $ = (id) => document.getElementById(id);
+const thread = $("thread"), input = $("input");
+let history = [], controller = null, modelId = "";
+let ctxLen = 0, used = 0;  // the server's context size; tokens the conversation took at the last reply
+
+function loadPrefs() {
+  try {
+    const p = JSON.parse(localStorage.getItem("arcinfer-prefs") || "{}");
+    if (p.thinking !== undefined) $("thinking").checked = p.thinking;
+    if (p.effort) $("effort").value = p.effort;
+    if (p.temp !== undefined) $("temp").value = p.temp;
+    if (p.maxtok) $("maxtok").value = p.maxtok;
+    if (p.sys) $("sys").value = p.sys;
+  } catch (e) {}
+}
+function savePrefs() {
+  try {
+    localStorage.setItem("arcinfer-prefs", JSON.stringify({ thinking: $("thinking").checked, effort: $("effort").value,
+      temp: $("temp").value, maxtok: $("maxtok").value, sys: $("sys").value }));
+  } catch (e) {}
+}
+loadPrefs();
+["thinking", "effort", "temp", "maxtok", "sys"].forEach((id) => $(id).addEventListener("change", savePrefs));
+
+fetch("/v1/models").then((r) => r.json()).then((j) => {
+  modelId = j.data[0].id; ctxLen = j.data[0].context_length || 0; $("model").textContent = modelId + " · ctx " + ctxLen; showUse();
+})
+  .catch(() => { $("model").textContent = "server not reachable"; });
+
+function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function inline(s) {
+  return s.replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+}
+function markdown(src) {
+  const parts = src.split(/```/);
+  let html = "";
+  parts.forEach((p, i) => {
+    if (i % 2 === 1) {
+      const nl = p.indexOf("\n");
+      const body = nl >= 0 ? p.slice(nl + 1) : p;
+      const lang = (nl >= 0 ? p.slice(0, nl) : "").trim().toLowerCase().replace(/[^a-z0-9+#._-]/g, "");
+      // the same buttons above and below the block, so a long one needs no scrolling either way
+      const bar = (cls) => '<div class="codebar ' + cls + '"><span>' + esc(lang || "code") + '</span><button class="cb-copy" title="Copy the code">Copy</button>' +
+        '<button class="cb-dl" title="Save the code as a file">Download</button></div>';
+      html += '<div class="codeblock">' + bar("top") + '<pre><code data-lang="' + esc(lang) + '">' +
+        esc(body.replace(/\n$/, "")) + "</code></pre>" + bar("bottom") + "</div>";
+      return;
+    }
+    const lines = esc(p).split("\n");
+    let inList = false;
+    for (const line of lines) {
+      const h = line.match(/^(#{1,4})\s+(.*)$/), li = line.match(/^\s*(?:[-*]|\d+\.)\s+(.*)$/);
+      if (li) { if (!inList) { html += "<ul>"; inList = true; } html += "<li>" + inline(li[1]) + "</li>"; continue; }
+      if (inList) { html += "</ul>"; inList = false; }
+      if (h) html += "<h" + (h[1].length + 2) + ">" + inline(h[2]) + "</h" + (h[1].length + 2) + ">";
+      else if (line.trim() === "") html += "<br>";
+      else html += "<div>" + inline(line) + "</div>";
+    }
+    if (inList) html += "</ul>";
+  });
+  return html;
+}
+
+function mediaEl(m, alt) {
+  if (m.kind === "audio") { const a = document.createElement("audio"); a.controls = true; a.src = m.url; return a; }
+  const im = document.createElement("img"); im.src = m.url; im.alt = alt; return im;
+}
+function addUser(text, media) {
+  $("empty")?.remove();
+  const d = document.createElement("div");
+  d.className = "msg user";
+  if (media && media.length) {
+    const box = document.createElement("div");
+    box.className = "imgs";
+    for (const m of media) box.appendChild(mediaEl(m, "attached image"));
+    d.appendChild(box);
+  }
+  d.appendChild(document.createTextNode(text));
+  thread.appendChild(d);
+  return d;
+}
+
+// media waiting to be sent with the next message: { kind: "image" | "audio", url: data URL }
+let pending = [];
+function renderAtts() {
+  const box = $("atts");
+  box.replaceChildren();
+  pending.forEach((m, i) => {
+    const a = document.createElement("div");
+    a.className = "att";
+    const x = document.createElement("button");
+    x.textContent = "×";
+    x.title = m.kind === "audio" ? "Remove audio" : "Remove image";
+    x.addEventListener("click", () => { pending.splice(i, 1); renderAtts(); });
+    a.append(mediaEl(m, "image to send"), x);
+    box.appendChild(a);
+  });
+}
+// any audio file the browser can decode -> 16 kHz mono 16-bit WAV (data URL), the input the model expects
+async function toWav16k(file) {
+  const ctx = new AudioContext();
+  let buf;
+  try { buf = await ctx.decodeAudioData(await file.arrayBuffer()); } finally { ctx.close(); }
+  const n = Math.max(1, Math.ceil(buf.duration * 16000));
+  const off = new OfflineAudioContext(1, n, 16000);
+  const src = off.createBufferSource();
+  src.buffer = buf;
+  src.connect(off.destination);
+  src.start();
+  const pcm = (await off.startRendering()).getChannelData(0);
+  const out = new DataView(new ArrayBuffer(44 + pcm.length * 2));
+  const str = (o, t) => { for (let i = 0; i < t.length; i++) out.setUint8(o + i, t.charCodeAt(i)); };
+  str(0, "RIFF"); out.setUint32(4, 36 + pcm.length * 2, true); str(8, "WAVE"); str(12, "fmt ");
+  out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, 1, true); out.setUint32(24, 16000, true);
+  out.setUint32(28, 32000, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true); str(36, "data");
+  out.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) out.setInt16(44 + 2 * i, Math.max(-1, Math.min(1, pcm[i])) * 32767, true);
+  return readDataURL(new Blob([out.buffer], { type: "audio/wav" }));
+}
+function readDataURL(f) {
+  return new Promise((ok, fail) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = fail; r.readAsDataURL(f); });
+}
+async function addFiles(files) {
+  for (const f of files) {
+    if (f.type.startsWith("image/")) pending.push({ kind: "image", url: await readDataURL(f) });
+    else if (f.type.startsWith("audio/")) {
+      try { pending.push({ kind: "audio", url: await toWav16k(f) }); }
+      catch (e) { console.error(e); input.value += (input.value ? "\n" : "") + "(could not decode " + f.name + ")"; }
+    } else input.value += (input.value ? "\n\n" : "") + "=== FILE: " + f.name + " ===\n" + (await f.text());
+  }
+  renderAtts();
+  input.focus();
+}
+function addAssistant() {
+  $("empty")?.remove();
+  const d = document.createElement("div");
+  d.className = "msg assistant";
+  d.innerHTML = '<div class="role">assistant</div><div class="progress"><div></div></div><details class="think" hidden><summary>Thinking</summary><div></div></details><div class="content"></div><div class="tools"></div><div class="stats"></div>';
+  thread.appendChild(d);
+  return d;
+}
+// Follow the newest output: while the view is at the bottom it stays there whenever the thread grows (streamed text,
+// the thinking box opening, images loading, tool calls, stats); scrolling up pauses that and shows "Latest";
+// scrolling back down, that button, or sending a message resumes it.
+let follow = true;
+const mainEl = $("main"), latest = $("latest");
+const atBottom = () => mainEl.scrollHeight - mainEl.scrollTop - mainEl.clientHeight < 40;
+function scroll(force) {
+  if (force) follow = true;
+  if (follow) mainEl.scrollTop = mainEl.scrollHeight;
+  latest.hidden = follow || !controller;
+}
+mainEl.addEventListener("scroll", () => { follow = atBottom(); latest.hidden = follow || !controller; });
+// the scroll event arrives only at the next frame, and a streamed piece in between would scroll back down: the user's
+// own scrolling input pauses following at once
+const pause = () => { if (controller) { follow = false; latest.hidden = false; } };
+mainEl.addEventListener("wheel", (e) => { if (e.deltaY < 0) pause(); }, { passive: true });
+mainEl.addEventListener("touchmove", pause, { passive: true });
+mainEl.addEventListener("mousedown", (e) => { if (e.target === mainEl) pause(); });  // the scrollbar
+window.addEventListener("keydown", (e) => {
+  if (["PageUp", "ArrowUp", "Home"].includes(e.key) && !e.target.closest("textarea, input, select")) pause();
+});
+new ResizeObserver(() => scroll()).observe(thread);
+latest.addEventListener("click", () => scroll(true));
+
+// ---- context use and compaction: when the conversation nearly fills the context (or the server says it does not
+// fit), the earlier messages are summarized by the model and the conversation goes on with that summary plus the
+// latest exchange. The Compact button does the same on demand. The old messages stay on screen, dimmed.
+const k1 = (n) => n >= 1000 ? (n / 1000).toFixed(1) + "K" : String(n);
+function showUse() {
+  $("ctxuse").textContent = ctxLen && used ? "context " + k1(used) + " / " + k1(ctxLen) + " (" + Math.round(100 * used / ctxLen) + "%)" : "";
+  $("compact").disabled = !!controller || compactable() < 2;
+}
+// messages that a compaction would summarize (all but the latest exchange, beyond an earlier summary)
+function compactable() {
+  const lead = history.length && history[0].role === "user" && textOf(history[0].content).startsWith(SUMMARY_HEAD) ? 2 : 0;
+  return history.length - 2 - lead;
+}
+function sysMessages() { return $("sys").value.trim() ? [{ role: "system", content: $("sys").value.trim() }] : []; }
+const textOf = (c) => typeof c === "string" ? c
+  : c.map((p) => p.type === "text" ? p.text : p.type === "input_audio" ? "[audio]" : "[image]").join("\n");
+const SUMMARY_HEAD = "[Summary of the earlier part of this conversation]\n";
+const summaryPair = (s) => [{ role: "user", content: SUMMARY_HEAD + s },
+  { role: "assistant", content: "Understood. I have the summary of our earlier conversation and will continue from it." }];
+const SUMMARIZE = "Summarize our conversation so far, for your own reference when we continue. Write a list: the user's goals and " +
+  "requests; the answers and decisions given; then EVERY specific item mentioned, copied exactly and none left out (each " +
+  "name, number, code word, file name, path, setting, piece of code that is still needed); and what is still open. " +
+  "Be brief: one short line per item, skip filler text. Write it in the language of the conversation. Output only the summary.";
+const overflow = (t) => /exceed_context_size_error|exceeds the available context/.test(t);
+async function chatOnce(messages, signal) {
+  const res = await fetch("/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json" }, signal,
+    body: JSON.stringify({ model: modelId, messages, stream: false, temperature: 0, max_tokens: 1500,
+      chat_template_kwargs: { enable_thinking: false }, reasoning_effort: "none" }) });
+  const t = await res.text();
+  if (!res.ok) { const e = new Error(t); e.overflow = overflow(t); throw e; }
+  return JSON.parse(t).choices[0].message.content.trim();
+}
+// the messages as they are (the server reuses its cache of that prefix) and the request; when even that does not fit,
+// the first half is summarized on its own and then the rest with that summary in front
+async function summarize(msgs, signal) {
+  if (signal?.aborted) throw new DOMException("stopped", "AbortError");
+  try {
+    return await chatOnce([...sysMessages(), ...msgs, { role: "user", content: SUMMARIZE }], signal);
+  } catch (e) {
+    if (!e.overflow) throw e;
+    // the first part holds at least one exchange beyond a leading summary, so every round gets shorter
+    const minMid = msgs[0].role === "user" && textOf(msgs[0].content).startsWith(SUMMARY_HEAD) ? 3 : 1;
+    let mid = Math.max(Math.floor(msgs.length / 2), minMid);
+    while (mid < msgs.length && msgs[mid].role !== "user") mid++;
+    if (mid >= msgs.length) {  // (no split left, e.g. one long message: as text, in two halves)
+      const flat = msgs.map((m) => m.role + ": " + textOf(m.content)).join("\n\n");
+      if (flat.length < 2000) throw e;
+      const half = Math.floor(flat.length / 2), noted = { role: "assistant", content: "(noted)" };
+      const first = await summarize([{ role: "user", content: "Conversation text, part 1:\n" + flat.slice(0, half) }, noted], signal);
+      return summarize([...summaryPair(first), { role: "user", content: "Conversation text, continued:\n" + flat.slice(half) }, noted], signal);
+    }
+    const first = await summarize(msgs.slice(0, mid), signal);
+    return summarize([...summaryPair(first), ...msgs.slice(mid)], signal);
+  }
+}
+// keep: the last messages kept word for word (the latest exchange); the kept part starts with a user message
+async function compact(keep, signal, statsEl) {
+  let cut = history.length - keep;
+  while (cut > 0 && history[cut]?.role !== "user") cut--;
+  if (cut < 2) return false;
+  const old = history.slice(0, cut), kept = history.slice(cut);
+  if (statsEl) statsEl.textContent = "compacting the earlier conversation…";
+  const summary = await summarize(old, signal);
+  history = [...summaryPair(summary), ...kept];
+  const oldSet = new Set(old);
+  let firstKept = null;
+  for (const m of thread.querySelectorAll(".msg")) {
+    if (oldSet.has(m._h)) m.classList.add("old");
+    else if (!firstKept && !m.classList.contains("old")) firstKept = m;
+  }
+  const d = document.createElement("details");
+  d.className = "compacted";
+  d.innerHTML = "<summary>Earlier messages compacted (" + old.length + " messages → summary)</summary><div></div>";
+  d.querySelector("div").textContent = summary;
+  thread.insertBefore(d, firstKept);
+  used = 0;
+  showUse();
+  return true;
+}
+
+async function send() {
+  const text = input.value.trim();
+  if ((!text && !pending.length) || controller) return;
+  input.value = "";
+  const media = pending;
+  pending = [];
+  renderAtts();
+  const userEl = addUser(text, media);
+  const part = (m) => m.kind === "audio"
+    ? { type: "input_audio", input_audio: { data: m.url.slice(m.url.indexOf(",") + 1), format: "wav" } }
+    : { type: "image_url", image_url: { url: m.url } };
+  const userMsg = { role: "user", content: media.length ? [...media.map(part), ...(text ? [{ type: "text", text }] : [])] : text };
+  userEl._h = userMsg;
+  const el = addAssistant();
+  const thinkBox = el.querySelector(".think"), thinkText = thinkBox.querySelector("div"), content = el.querySelector(".content");
+  const bar = el.querySelector(".progress > div"), stats = el.querySelector(".stats");
+  scroll(true);
+  controller = new AbortController();
+  $("send").disabled = true; $("stop").disabled = false; showUse();
+  const maxTok = parseInt($("maxtok").value, 10);
+  let reasoning = "", answer = "", toolCalls = [], timings = null;
+  const t0 = performance.now();
+  let tFirst = 0;
+  stats.textContent = "processing prompt…";
+  try {
+    // nearly full (the last reply's size + this message + room for the answer): compact first
+    const need = used + Math.ceil(text.length / 3) + 300 * media.length + Math.min(maxTok, 2048);
+    if (ctxLen && used && need > 0.9 * ctxLen) await compact(2, controller.signal, stats);
+    history.push(userMsg);
+    let res;
+    for (let attempt = 0; ; attempt++) {
+      const body = { model: modelId, messages: [...sysMessages(), ...history], stream: true, stream_options: { include_usage: true },
+        temperature: parseFloat($("temp").value), max_tokens: maxTok,
+        chat_template_kwargs: { enable_thinking: $("thinking").checked }, reasoning_effort: $("thinking").checked ? $("effort").value : "none" };
+      res = await fetch("/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: controller.signal });
+      if (res.ok) break;
+      const t = await res.text();
+      // the server says it does not fit: compact everything before this message and try again (once)
+      if (attempt === 0 && overflow(t)) {
+        history.pop();
+        const done = await compact(0, controller.signal, stats);
+        history.push(userMsg);
+        if (done) { stats.textContent = "processing prompt…"; continue; }
+      }
+      throw new Error(t);
+    }
+    const reader = res.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const ev = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 2);
+        if (ev.startsWith(": prefill")) {
+          const m = ev.match(/(\d+)\/(\d+)/);
+          if (m) { bar.style.width = (100 * m[1] / m[2]).toFixed(1) + "%"; stats.textContent = "processing prompt " + m[1] + " / " + m[2] + " tokens…"; }
+          continue;
+        }
+        if (!ev.startsWith("data:")) continue;
+        const data = ev.slice(5).trim();
+        if (data === "[DONE]") continue;
+        const j = JSON.parse(data);
+        if (j.timings) timings = j.timings;
+        const delta = j.choices && j.choices[0] && j.choices[0].delta;
+        if (!delta) continue;
+        if ((delta.reasoning_content || delta.content) && !tFirst) { tFirst = performance.now(); el.querySelector(".progress").remove(); }
+        if (delta.reasoning_content) { reasoning += delta.reasoning_content; thinkBox.hidden = false; thinkText.textContent = reasoning; }
+        if (delta.content) { answer += delta.content; content.innerHTML = markdown(answer); }
+        for (const tc of delta.tool_calls || []) {  // streamed in pieces: the arguments of a call are concatenated by index
+          const k = tc.index ?? toolCalls.length;
+          const c = toolCalls[k] ??= { function: { name: "", arguments: "" } };
+          if (tc.function?.name) c.function.name = tc.function.name;
+          c.function.arguments += tc.function?.arguments ?? "";
+        }
+        if (!timings) stats.textContent = "generating…";
+        scroll();
+      }
+    }
+  } catch (e) {
+    if (e.name !== "AbortError") content.innerHTML += '<div style="color:var(--danger)">' + esc(String(e.message || e)) + "</div>";
+  }
+  el.querySelector(".progress")?.remove();
+  for (const tc of toolCalls) {
+    const d = document.createElement("div");
+    d.className = "tool";
+    d.textContent = "tool call: " + tc.function.name + " " + tc.function.arguments;
+    el.querySelector(".tools").appendChild(d);
+  }
+  if (timings) {
+    stats.textContent = "prompt " + (timings.prompt_n + timings.cache_n) + " tok (" + timings.cache_n + " cached) in " + (timings.prompt_ms / 1000).toFixed(1) +
+      " s · " + timings.prompt_per_second.toFixed(1) + " t/s · generated " + timings.predicted_n + " tok at " + timings.predicted_per_second.toFixed(2) + " t/s";
+    used = timings.prompt_n + timings.cache_n + timings.predicted_n;
+  } else {
+    stats.textContent = "stopped";
+  }
+  if (history[history.length - 1] !== userMsg) history.push(userMsg);  // (stopped while compacting)
+  const reply = { role: "assistant", content: answer, reasoning_content: reasoning };
+  history.push(reply);
+  el._h = reply;
+  controller = null;
+  $("send").disabled = false; $("stop").disabled = true;
+  showUse();
+  scroll();
+}
+
+// code blocks: Copy and Download (file name from the block's language, e.g. ```html -> code.html)
+const EXT = { html: "html", css: "css", js: "js", javascript: "js", ts: "ts", typescript: "ts", jsx: "jsx", tsx: "tsx",
+  py: "py", python: "py", json: "json", sh: "sh", bash: "sh", shell: "sh", ps1: "ps1", powershell: "ps1", bat: "bat",
+  cmd: "cmd", c: "c", cpp: "cpp", "c++": "cpp", h: "h", cs: "cs", "c#": "cs", java: "java", go: "go", rs: "rs",
+  rust: "rs", php: "php", rb: "rb", ruby: "rb", sql: "sql", md: "md", markdown: "md", yaml: "yaml", yml: "yaml",
+  xml: "xml", svg: "svg", kt: "kt", swift: "swift", lua: "lua", r: "r", toml: "toml", ini: "ini", dockerfile: "Dockerfile" };
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); return true; } catch (e) {}
+  const ta = document.createElement("textarea");
+  ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (e) {}
+  ta.remove();
+  return ok;
+}
+thread.addEventListener("click", async (e) => {
+  const b = e.target.closest(".cb-copy, .cb-dl");
+  if (!b) return;
+  const code = b.closest(".codeblock").querySelector("code");
+  const text = code.textContent, lang = code.dataset.lang;
+  if (b.classList.contains("cb-copy")) {
+    b.textContent = (await copyText(text)) ? "Copied" : "Copy failed";
+    setTimeout(() => { b.textContent = "Copy"; }, 1500);
+  } else {
+    const ext = EXT[lang] || "txt", name = ext === "Dockerfile" ? "Dockerfile" : "code." + ext;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([text.endsWith("\n") ? text : text + "\n"], { type: "text/plain;charset=utf-8" }));
+    a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+});
+
+$("send").addEventListener("click", send);
+$("stop").addEventListener("click", () => controller && controller.abort());
+input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+$("newchat").addEventListener("click", () => {
+  if (controller) controller.abort();
+  history = []; used = 0; showUse();
+  thread.innerHTML = '<div class="empty" id="empty">New conversation.</div>';
+});
+$("compact").addEventListener("click", async () => {
+  if (controller || compactable() < 2) return;
+  controller = new AbortController();
+  $("send").disabled = true; $("stop").disabled = false; showUse();
+  const note = document.createElement("div");
+  note.className = "stats";
+  note.textContent = "compacting the earlier conversation…";
+  thread.appendChild(note);
+  scroll(true);
+  try { await compact(2, controller.signal); note.remove(); }
+  catch (e) { note.textContent = e.name === "AbortError" ? "compacting stopped" : "compacting failed: " + (e.message || e); }
+  controller = null;
+  $("send").disabled = false; $("stop").disabled = true; showUse();
+});
+
+// drop source files (added as text) and images (sent as image parts) into the message
+const main = $("main");
+["dragenter", "dragover"].forEach((t) => main.addEventListener(t, (e) => { e.preventDefault(); main.classList.add("drop"); }));
+["dragleave", "drop"].forEach((t) => main.addEventListener(t, (e) => { e.preventDefault(); main.classList.remove("drop"); }));
+main.addEventListener("drop", (e) => addFiles(e.dataTransfer.files));
+$("attach").addEventListener("click", () => $("file").click());
+$("file").addEventListener("change", (e) => { addFiles(e.target.files); e.target.value = ""; });
+input.addEventListener("paste", (e) => {
+  const imgs = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith("image/"));
+  if (imgs.length) { e.preventDefault(); addFiles(imgs); }
+});
+</script>
+</body>
+</html>

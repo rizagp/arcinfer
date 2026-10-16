@@ -1,0 +1,31 @@
+# Build output (rebuild with .\build.ps1)
+bin/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Claude Code session files
+.claude/
+
+# Models and data that live outside the repository (Hugging Face cache, %LOCALAPPDATA%\arcinfer)
+*.gguf
+*.experts
+*.lru
+
+# Large reference logits for the accuracy tests (19-20 MB each); remove this line to include them
+tests/data/*.bin
+
+# Python and editor leftovers
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+*.swp
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
