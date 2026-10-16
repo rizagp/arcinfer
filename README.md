@@ -338,8 +338,8 @@ Qwen3.8 Flash Next.
   (`nextn` tensors). Gemma 4: the assistant drafter `mtp-*.gguf` next to the model (found automatically), which
   reads the main model's KV cache. The drafts are verified in one main-model pass and the next token is still
   sampled from the model's distribution, so the output is unchanged (checked: identical answers at every draft
-  count). `--mtp-drafts N`: arcinferzero 1–7 (default 3 for the 4B, 27B and 35B, 2 for the 9B and Gemma; more than 3
-  is not faster yet), the OpenCL engine up to 2 (Qwen) / 3 (Gemma).
+  count). `--mtp-drafts N`: arcinferzero 1–7 (default 7 for the 27B, 5 for the 35B, 3 for the 4B, 2 for the 9B and
+  Gemma), the OpenCL engine up to 2 (Qwen) / 3 (Gemma).
 - `--dflash DIR` (arcinferzero: `serverz`, `runz`): speculative decoding with a DFlash2 block drafter, `DIR` being
   the folder with its `config.json` and `model.safetensors` (the snapshot folder of `hf download
   z-lab/Qwen3.8-27B-DFlash2` for the 27B, `hf download incoai/Qwen3.6-35B-A3B-DFlash2` for the 35B). It drafts a
@@ -348,10 +348,10 @@ Qwen3.8 Flash Next.
 
   | Model, text | plain | MTP alone | DFlash2 + MTP |
   |---|---|---|---|
-  | Qwen3.8 27B, Python code | 4.85 tok/s | ~8.9 | 11.5 |
-  | Qwen3.8 27B, Indonesian prose | 4.67 | ~5.8–6.3 | 5.6 |
-  | Qwen3.6 35B-A3B, Python code | 15.7 | 31.5 | 44.4 (98 % of drafts accepted) |
-  | Qwen3.6 35B-A3B, Indonesian prose | 17.0 | 22.3 | 22.5 |
+  | Qwen3.8 27B, Python code | 4.90 tok/s | 15.2 | 16.9 |
+  | Qwen3.8 27B, Indonesian prose | 4.46 | 6.8 | 6.1 |
+  | Qwen3.6 35B-A3B, Python code | 20.8 | 37.7 | 47.5 (99 % of drafts accepted) |
+  | Qwen3.6 35B-A3B, Indonesian prose | 20.7 | 22.2 | 22.2 |
 
   The drafters are trained mostly on English and code; on other text the MTP block does most of the work.
 - Images (`image_url` content parts, data URLs) and audio (`input_audio`, `/v1/audio/transcriptions`) when the

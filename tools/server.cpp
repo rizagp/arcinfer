@@ -2229,7 +2229,12 @@ static int list_models() {
             break;
           }
       }
+#ifdef ARC_ZERO
+      // (the engine's default: streamed experts 4096, Flash Next 2048; 35B 8K prompt: 620 tok/s at 2048, 750 at 4096)
+      int chunk = m.arch == "qwen4exp" ? 2048 : a.resident ? 512 : 4096;
+#else
       int chunk = moe ? 2048 : a.resident ? 512 : 4096;
+#endif
       if (gemma && m.vision) chunk = std::max(chunk, 2048);  // (an image is one chunk)
       d.set("chunk", chunk);
 #ifdef ARC_ZERO
