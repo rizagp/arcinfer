@@ -2950,6 +2950,20 @@ inline float q8sb_dot(__global const uchar* p, __local const float* x) {
   for (int j = 0; j < 16; ++j) acc += (float)(char)((w[j / 4] >> (8 * (j % 4))) & 0xFF) * x[16 * j + lane];
   return d * acc;
 }
+// q8sb_dot for a superblock holding nv < 256 values (the rest zero padding): lanes past them load nothing (the up
+// projection's 320 values in 512; hc_up1 905 -> 843 ms per 96 Flash Next tokens, bit-identical; returning 0 for
+// those lanes instead was 731 ms but changed the compiled arithmetic and with it the results)
+inline float q8sb_dot_v(__global const uchar* p, __local const float* x, int nv) {
+  const int lane = get_sub_group_local_id();
+  const bool on = 16 * lane < nv;  // (the same arithmetic for every lane, only the loads predicated)
+  const float d = on ? vload_half(lane / 2, (__global const half*)p) : 0.0f;
+  const uint4 q = on ? vload4(0, (__global const uint*)(p + 16 + 16 * lane)) : (uint4)0;
+  const uint w[4] = {q.x, q.y, q.z, q.w};
+  float acc = 0.0f;
+#pragma unroll
+  for (int j = 0; j < 16; ++j) acc += (float)(char)((w[j / 4] >> (8 * (j % 4))) & 0xFF) * x[16 * j + lane];
+  return d * acc;
+}
 // Partial sums of lo[n] = W_down[n] . xn over K slice ks (HCK / KS values; n < N: the low-rank and the inject rows),
 // xn = per-stream RMS norm of res row r0 times w; part [KS][N]; the streams' 1 / rms to rinv. grid (256 * ceil(N / 16),
 // KS), local (256, 1): a sub-group per (row, slice), so enough threads run (one row per sub-group over all of K: 21
@@ -3008,7 +3022,7 @@ __kernel void hc_up1(__global const float* res, int r0, __global const float* w,
   for (int c = 0; c < HC; ++c) {
     const int n = c * E + i;
     float acc = 0.0f;
-    for (int sb = 0; sb < nsb; ++sb) acc += q8sb_dot(wu + ((size_t)n * nsb + sb) * 272, xs + sb * 256);
+    for (int sb = 0; sb < nsb; ++sb) acc += q8sb_dot_v(wu + ((size_t)n * nsb + sb) * 272, xs + sb * 256, LR - sb * 256);
     const float g = sub_group_reduce_add(acc);
     m += xr[n] * rinv[c] * w[n] / (1.0f + exp(-g));
   }
