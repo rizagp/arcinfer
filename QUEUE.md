@@ -301,6 +301,11 @@ call lolos, jawaban gambar/audio sama. Tidak memenuhi = tidak dipakai (sakelar k
 - [ ] Server kadang lambat ±½ sepanjang umurnya (35B: 26 → 12 tok/s, log identik), terutama bila dijalankan
       tepat setelah server lain mati; jeda 5 dtk membantu. runz --bench-pp kini mencetak waktu per langkah (16 Okt:
       7 run E4B 32K stabil, lambat tidak muncul; dugaan: satu jeda besar, bukan GPU lambat terus).
+      17 Okt (F17): muncul lagi di runz 35B (sekitar 1 dari 5 run, 14-16 vs 21-23 tok/s, pekerjaan identik, hit
+      expert 100 %). Profil: semua kernel bobot dense (lm_head, qkv, z, ssm_out, q, o, drafter) ~2x lebih lambat,
+      kernel expert (pool 1 GB) normal; run lambat juga load-nya paling lama. Dugaan: penempatan halaman fisik
+      buffer bobot. Dicoba, tidak dipakai: arena 512 MB (35B +2 % dan lebih stabil, tapi prompt 27B -2..5 %),
+      alignment 2 MB, pangkas working set saat load (efek tidak terlihat; gejala tidak muncul tiap run).
 
 ## F17: kerja akhir pekan, Jumat 16 Okt malam → Senin 19 Okt 08:00 (laptop ditinggal)
 
