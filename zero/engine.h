@@ -3900,15 +3900,27 @@ class Engine {
     run("dfl", k, 2, gws, nullptr);
   }
   // With both drafters: DFlash2 while its drafts are taken (recent accepted drafts per pass >= ARC_DFL_MIN, default 2),
-  // else the MTP block, with a DFlash2 pass every 8th step to see whether that changed (code: DFlash2 takes ~6 of 7
-  // drafts; Indonesian prose ~1, where the MTP block does better).
-  bool dfl_used_ = false;
+  // else the MTP block, with a DFlash2 pass after 8 steps to see whether that changed (code: DFlash2 takes ~6 of 7
+  // drafts; Indonesian prose ~1, where the MTP block does better). Dense models: each probe that does not bring
+  // DFlash2 back doubles the wait, up to ARC_DFL_GAPMAX (32) steps, as their 8-row DFlash2 pass costs more than an MTP
+  // pass (27B, Indonesian prose: 6.2 -> 6.5 tok/s; runs of 8 / 32 / 64 / no probes 5.6-6.3 / 6.55 / 6.4-6.5 /
+  // 6.5-6.6); a probe that does resets it to 8. MoE models probe every 8 steps (35B: 22.5 vs 21.4-21.9 with 32).
+  bool dfl_used_ = false, dfl_probe_ = false;
   double dfl_ema_ = 4.0;
-  int dfl_wait_ = 0;
+  int dfl_wait_ = 0, dfl_gap_ = 8;
+  static double dfl_min_acc() {
+    static const double m = getenv("ARC_DFL_MIN") ? atof(getenv("ARC_DFL_MIN")) : 2.0;
+    return m;
+  }
   bool dfl_pick() {
-    static const double min_acc = getenv("ARC_DFL_MIN") ? atof(getenv("ARC_DFL_MIN")) : 2.0;
-    if (dfl_ema_ >= min_acc) return true;
-    if (++dfl_wait_ >= 8) { dfl_wait_ = 0; return true; }
+    static const int gap_env = getenv("ARC_DFL_GAPMAX") ? atoi(getenv("ARC_DFL_GAPMAX")) : 0;
+    const int gap_max = gap_env > 0 ? gap_env : hp.moe ? 8 : 32;
+    if (dfl_ema_ >= dfl_min_acc()) return true;
+    if (++dfl_wait_ >= std::min(dfl_gap_, gap_max)) {
+      dfl_wait_ = 0;
+      dfl_probe_ = true;
+      return true;
+    }
     return false;
   }
  public:
@@ -4223,6 +4235,10 @@ class Engine {
     if (dfl_) {  // DFlash: the context of the token and the accepted drafts (rows 0 .. accepted of the pass)
       dfl_commit(0, 0, accepted + 1, pos - accepted - 1);
       if (dfl_used_) dfl_ema_ = 0.75 * dfl_ema_ + 0.25 * accepted;
+      if (dfl_used_ && dfl_probe_) {
+        dfl_gap_ = dfl_ema_ >= dfl_min_acc() ? 8 : std::min(2 * dfl_gap_, 1 << 16);
+        dfl_probe_ = false;
+      }
       if (!mtp_block_) {
         last_drafts_.clear();
         return;
