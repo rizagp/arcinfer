@@ -332,14 +332,19 @@ Jadwal kasar (diubah sesuai hasil; pekerjaan yang gagal syarat dibatalkan, tidak
    (qwen4exp) + acuan CPU f32 sendiri. Expert dibaca langsung dari GGUF (C: sisa 81 GB). Perkiraan 20–30 jam.
    Syarat lolos: acuan CPU vs GPU (KL kecil, greedy sama), jawaban masuk akal (kode + Indonesia), server + Pi jalan,
    tidak ada crash 20 permintaan; ukur prompt dan generate (perkiraan 5–8 tok/s, prompt 150–250 tok/s).
-2. 17.1 + 17.2 (±6 jam): juga mempercepat 35B dan Flash Next.
-3. DFlash2 untuk 27B (17.3/17.4) dengan sisa waktu; bila belum selesai, dilanjutkan minggu berikutnya.
+2. DFlash2 untuk 27B (17.3/17.4) langsung setelah Flash Next (keputusan user: Flash Next + DFlash2 dulu).
+3. 17.1 + 17.2 (±6 jam) bila ada sisa waktu.
 4. 17.6 regresi + laporan (Senin 04:00–07:30).
+
+Minimalkan error (permintaan user): setiap tahap dicek terhadap acuan CPU sebelum lanjut; setelah mengubah kode
+bersama (zero/engine.h, kernels, server) model lama diuji ulang (4B, 27B, 35B, E4B: logit identik per bit vs sebelum,
+gambar/audio, MTP); yang gagal dibatalkan. Push ke GitHub diizinkan (user, 16 Okt siang) setiap tahap yang lolos,
+setelah cek path pribadi / rahasia / file besar / CRLF.
 
 Ukuran Flash Next (header part 1): 1.223 tensor, 51,0 GiB: expert 46,8 GiB (512 x 48 layer, ±2 MiB per expert),
 non-expert ±4,2 GiB (attn_qkv 0,66, output 0,49, ssm_out 0,41, attn_gate 0,35, token_embd 0,31, hc_* 4 x 0,29,
 attn_q 0,24, shared expert 0,14, router 0,12, ...). Part 2: per_layer_token_embd IQ4_NL [160, 320.001.536] 26,8 GiB.
 
-Keputusan user (16 Okt pagi): mulai nanti malam saat user bilang (server dipakai user sampai sore); commit lokal saja,
-push ke GitHub setelah user cek laporan Senin; Senin pagi server dibiarkan mati; laptop dijaga tetap menyala lewat
+Keputusan user (16 Okt pagi): mulai nanti malam saat user bilang (server dipakai user sampai sore); push ke GitHub
+setiap tahap yang lolos (diubah 16 Okt siang; awalnya commit lokal saja); Senin pagi server dibiarkan mati; laptop dijaga tetap menyala lewat
 aplikasi selama kerja.
