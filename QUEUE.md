@@ -240,7 +240,9 @@ Target (2026-10-15): E4B "minimal jago Pi" (semua tool Pi: read, bash, edit, wri
 - [ ] Slot tahap 1: beberapa cache percakapan, tidak dibagi rata: satu kolam, percakapan aktif memakai sesuai
       kebutuhan; kalau penuh, slot yang paling lama tidak dipakai disimpan ke SSD (bukan dibuang) dan dimuat lagi saat
       kembali. Di Level Zero (F13).
-- [ ] Slot tahap 2: decode batch (2 percakapan dalam satu langkah GPU; MTP/drafter per percakapan; prefill disela).
+- [ ] Slot tahap 2 = batch decode (continuous batching, seperti llama.cpp `-np` / vLLM; user 16 Okt: batch lebih umum
+      dari sekadar slot): beberapa permintaan dalam satu langkah GPU, bobot dibaca sekali (dense: total hampir 2x,
+      MoE: lebih kecil karena expert beda); MTP/drafter per permintaan; prefill disela. Tahap 1 (cache) jadi dasarnya.
 - [ ] Cek: web UI di browser headless Pi turun ke 4,9 tok/s (dugaan: GPU direbut render browser).
 
 ## Flash Next (qwen4exp): unduhan selesai 2026-10-15 13:02

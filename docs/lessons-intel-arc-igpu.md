@@ -41,6 +41,7 @@ Prompt processing (time to first token) is compute-bound; on this iGPU llama.cpp
 | Gemma 4: an int8 scale per 64 dims for q/K/V instead of per row | KL on code 0.23 -> 0.018 (a few large V dims swamped the row scale) |
 | Splitting head dims over sub-groups where registers spilled (Gemma head 512) | 1.25–1.4x |
 | **Large register file (`-cl-intel-256-GRF-per-thread`) on kernels that spilled** | Qwen prompt attention, last 4K-token chunk at 64K depth: 1,276 -> 926 ms per layer; Gemma E4B prompts 733 -> 827 tok/s after removing the last big spills |
+| Attention P·V: per-head divisions done once (lane r for head r) and the DP4a accumulating in place (`dot_acc_sat`, heads interleaved), found by reading the assembly with ocloc | same values; last 4K chunk at 64K depth: 4B/9B/35B shape 937 -> 775 ms per layer (spill 576 -> 0 B), 27B 1515 -> 1335 ms |
 | Gated DeltaNet recurrence with a whole 128-float state column per SIMD8 lane | 424 -> 145 ms (4B, 2.6K tokens) |
 | Vision encoders on the GPU (tiled attention, native_exp) | 1008-token image 1118 -> 588 ms |
 

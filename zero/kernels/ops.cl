@@ -579,33 +579,41 @@ inline uint4 pack_p(int q) {
 #ifdef P7
 #define PQMAX 127.0f
 #define PDOT(p, v) dot_4x8packed_ss_int(p, v)
+#define PDOT_ACC(p, v, a) dot_acc_sat_4x8packed_ss_int(p, v, a)
 #else
 #define PQMAX 255.0f
 #define PDOT(p, v) dot_4x8packed_us_int(p, v)
+#define PDOT_ACC(p, v, a) dot_acc_sat_4x8packed_us_int(p, v, a)
 #endif
 // o[r][i] += P . V[dim 16*i + lane] for the HS heads; vt points at the tile's V block ([HD dims][4 words]).
 // P * vscale(key, block) is quantized to 8 bits against the bound pb * max vscale of the tile and dotted with the
 // int8 V bytes (SageAttention-style block quantization of P); with SB = KC once per 64-dim block (dims 16*i..,
 // i in 4c..4c+3).
+// The HS divisions run once (lane r for head r; the bounds are equal in every lane), and the dot products
+// accumulate inside the DP4a with the heads interleaved (|sum| <= 16*255*128: never saturates). Same values;
+// 4B prompt attention at 64K 936 -> 777 ms per layer, spill 576 -> 0 bytes (16 Oct).
 #define PV_PACK(c, valid, sob)                                                          \
   const float vs = (valid) ? vsc[(sob) + (c) * 16] : 0.0f, vmt = sub_group_reduce_max(vs); \
   uint4 pw[HS];                                                                         \
   float ps[HS];                                                                         \
-  _Pragma("unroll") for (int r = 0; r < HS; ++r) {                                      \
-    const float pm = pb[r] * vmt;                                                       \
-    pw[r] = pack_p(convert_int_rte(pk[r] * vs * (pm > 0.0f ? PQMAX / pm : 0.0f)));      \
-    ps[r] = pm * (1.0f / PQMAX);                                                        \
+  {                                                                                     \
+    float pmv = 0.0f;                                                                   \
+    _Pragma("unroll") for (int r = 0; r < HS; ++r) pmv = lane == r ? pb[r] * vmt : pmv; \
+    const float invv = pmv > 0.0f ? PQMAX / pmv : 0.0f;                                 \
+    _Pragma("unroll") for (int r = 0; r < HS; ++r) {                                    \
+      pw[r] = pack_p(convert_int_rte(pk[r] * vs * sub_group_broadcast(invv, r)));       \
+      ps[r] = sub_group_broadcast(pmv, r) * (1.0f / PQMAX);                             \
+    }                                                                                   \
   }
 #define PV_DIM(vt, i)                                                                   \
   {                                                                                     \
     const uint4 v = vt[16 * (i) + lane];                                                \
-    _Pragma("unroll") for (int r = 0; r < HS; ++r) {                                    \
-      int a = PDOT(pw[r].x, v.x);                                                       \
-      a += PDOT(pw[r].y, v.y);                                                          \
-      a += PDOT(pw[r].z, v.z);                                                          \
-      a += PDOT(pw[r].w, v.w);                                                          \
-      o[r][i] = fma((float)a, ps[r], o[r][i]);                                          \
-    }                                                                                   \
+    int a[HS];                                                                          \
+    _Pragma("unroll") for (int r = 0; r < HS; ++r) a[r] = PDOT(pw[r].x, v.x);           \
+    _Pragma("unroll") for (int r = 0; r < HS; ++r) a[r] = PDOT_ACC(pw[r].y, v.y, a[r]); \
+    _Pragma("unroll") for (int r = 0; r < HS; ++r) a[r] = PDOT_ACC(pw[r].z, v.z, a[r]); \
+    _Pragma("unroll") for (int r = 0; r < HS; ++r) a[r] = PDOT_ACC(pw[r].w, v.w, a[r]); \
+    _Pragma("unroll") for (int r = 0; r < HS; ++r) o[r][i] = fma((float)a[r], ps[r], o[r][i]);\
   }
 #if SB == 1
 #define PV_TILE(vt, sob, valid)                                                         \
@@ -692,7 +700,12 @@ __kernel void attn_q8(__global const char* qi, __global const float* qsc, __glob
     const int key = t0 + lane;
     const bool valid = key <= hi && key >= lo;
 #ifndef ABL_NOQK  // ablations (timing experiments only: wrong results)
+#if HS == 4  // one address op per K load instead of two: 4 heads per sub-group spill 608 -> 0 bytes (3 heads: slower)
+    __local const uint* KL = Kt + lane;
+    QK_TILE(KL[(c * 16 + w) * 16], sob)
+#else
     QK_TILE(Kt[(c * 16 + w) * 16 + lane], sob)
+#endif
 #else
 #pragma unroll
     for (int r = 0; r < HS; ++r) sacc[r] = (float)(lane & 3) - (float)r + as_float(Kt[lane]) * 1e-30f;
