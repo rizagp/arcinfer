@@ -35,7 +35,19 @@ int main(int argc, char** argv) {
   }
   if (ts.empty()) { fprintf(stderr, "tensor not found\n"); return 1; }
   const uint32_t type = ts[0]->type;
-  const int K = (int)ts[0]->dims[0], N = (int)ts[0]->dims[1], nsb = K / 256, M = 16;
+  // (small-block types with K % 256 != 0, Qwen3.8 Flash Next's K = 640 down projections: rows padded with zero
+  //  blocks to the next multiple of 256, the activations with zeros, as the engine does)
+  const int K0 = (int)ts[0]->dims[0], K = is_small_block_type(type) ? padded_k(K0) : K0;
+  const int N = (int)ts[0]->dims[1], nsb = K / 256, M = 16;
+  std::vector<std::vector<uint8_t>> padded_src(ts.size());
+  if (K != K0)
+    for (size_t i = 0; i < ts.size(); ++i) {
+      int blk = 0, bytes = 0;
+      ggml_block_info(type, blk, bytes);
+      padded_src[i].resize((size_t)N * (K / blk) * bytes);
+      pad_small_block_rows(type, ts[i]->data, N, K0, padded_src[i].data());
+    }
+  auto src_of = [&](size_t i) { return K != K0 ? padded_src[i].data() : ts[i]->data; };
   const size_t bb = gguf_sb_bytes(type), bp = raw_padded_sb_bytes(type);
   printf("%s: %s [%d x %d], %zu matrices, %.1f MB each\n", tname.c_str(), ggml_type_name(type), N, K, ts.size(),
          ts[0]->nbytes / 1e6);
@@ -58,9 +70,9 @@ int main(int argc, char** argv) {
     }
     clFinish(cl.queue);
   }
-  for (auto* t : ts) {
+  for (size_t ti = 0; ti < ts.size(); ++ti) {
     std::vector<uint8_t> pad((size_t)N * nsb * bp + 256, 0);
-    for (size_t i = 0; i < (size_t)N * nsb; ++i) gpu_raw_sb(t->type, t->data + i * bb, &pad[i * bp]);
+    for (size_t i = 0; i < (size_t)N * nsb; ++i) gpu_raw_sb(type, src_of(ti) + i * bb, &pad[i * bp]);
     if (getenv("HOSTPTR")) {  // the engine's upload: CL_MEM_ALLOC_HOST_PTR + map
       cl_int err;
       cl_mem m = clCreateBuffer(cl.ctx, CL_MEM_READ_ONLY | CL_MEM_ALLOC_HOST_PTR, pad.size(), nullptr, &err);
@@ -79,6 +91,7 @@ int main(int argc, char** argv) {
   std::normal_distribution<float> nd(0.0f, 1.0f);
   std::vector<float> x(K), xq(K);
   for (auto& v : x) v = nd(rng) * (1.0f + 3.0f * (rng() % 97 == 0));
+  for (int i = K0; i < K; ++i) x[i] = 0.0f;
   std::vector<int8_t> aq((size_t)M * K, 0);
   std::vector<float> asc((size_t)(K / 32) * M, 0.0f);
   std::vector<uint16_t> absum((size_t)(K / 16) * M, 0);
@@ -149,7 +162,7 @@ int main(int argc, char** argv) {
   std::vector<float> row(K);
   const size_t rb = (size_t)nsb * bb;
   for (int n = 0; n < N; n += std::max(1, N / 4096)) {
-    dequant_row(type, ts[0]->data + (size_t)n * rb, K, row.data());
+    dequant_row(type, src_of(0) + (size_t)n * rb, K, row.data());
     double s = 0;
     for (int i = 0; i < K; ++i) s += (double)row[i] * xq[i];
     maxerr = std::max(maxerr, std::fabs(s - c[n]));

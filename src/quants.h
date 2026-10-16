@@ -552,7 +552,8 @@ inline void pad_small_block_rows(uint32_t type, const uint8_t* src, int N, int K
 inline bool is_w8_type(uint32_t t) {
   switch (t) {
     case GGML_Q2_K: case GGML_Q3_K: case GGML_Q4_K: case GGML_Q5_K: case GGML_Q6_K: case GGML_IQ2_XXS: case GGML_IQ2_XS:
-    case GGML_IQ2_S: case GGML_IQ3_XXS: case GGML_IQ3_S: case GGML_IQ1_M: case GGML_IQ4_XS: case GGML_Q8_0: case GGML_Q4_0: return true;
+    case GGML_IQ2_S: case GGML_IQ3_XXS: case GGML_IQ3_S: case GGML_IQ1_M: case GGML_IQ4_XS: case GGML_Q8_0: case GGML_Q4_0:
+    case GGML_IQ4_NL: case GGML_Q2_0: return true;
     default: return false;
   }
 }
@@ -565,7 +566,8 @@ inline bool w8_requant(uint32_t t) {
   return !mins && (t == GGML_Q2_K || t == GGML_Q4_K || t == GGML_Q5_K);
 }
 inline int w8_variant(uint32_t t) {
-  if (t == GGML_Q8_0 || t == GGML_Q4_0) return 4;  // per-32 f32 scales (the GEMM runs them as its native Q8_0 form)
+  if (t == GGML_Q8_0 || t == GGML_Q4_0 || t == GGML_IQ4_NL || t == GGML_Q2_0)
+    return 4;  // per-32 f32 scales (the GEMM runs them as its native Q8_0 form)
   const bool sc32 = t == GGML_IQ4_XS || t == GGML_IQ3_S || t == GGML_IQ3_XXS || t == GGML_IQ2_XXS ||
                     t == GGML_Q4_K || t == GGML_Q5_K;
   const bool mins = !w8_requant(t) && (t == GGML_Q2_K || t == GGML_Q4_K || t == GGML_Q5_K);
@@ -600,15 +602,19 @@ inline int raw_padded_sb_bytes(uint32_t type) { return (gguf_sb_bytes(type) + 7)
 inline bool gpu_d_last(uint32_t type) {
   return type == GGML_IQ2_XXS || type == GGML_IQ2_XS || type == GGML_IQ2_S || type == GGML_IQ3_XXS || type == GGML_IQ3_S;
 }
-inline bool gpu_regrouped(uint32_t type) { return type == GGML_Q4_0 || type == GGML_Q8_0 || gpu_d_last(type); }
+inline bool gpu_regrouped(uint32_t type) {
+  return type == GGML_Q4_0 || type == GGML_Q8_0 || type == GGML_IQ4_NL || type == GGML_Q2_0 || gpu_d_last(type);
+}
 // One superblock in its GPU raw form (dst: raw_padded_sb_bytes(type) bytes).
 inline void gpu_raw_sb(uint32_t type, const uint8_t* src, uint8_t* dst) {
   const size_t bb = gguf_sb_bytes(type), bp = raw_padded_sb_bytes(type);
-  if (type == GGML_Q4_0 || type == GGML_Q8_0) {  // 8 blocks (f16 d + quants) -> the 8 scales, then the quants
-    const int qb = type == GGML_Q4_0 ? 16 : 32;
-    for (int b = 0; b < 8; ++b) {
+  if (type == GGML_Q4_0 || type == GGML_Q8_0 || type == GGML_IQ4_NL || type == GGML_Q2_0) {
+    // nb blocks (f16 d + quants) -> the nb scales, then the quants (Q4_0 / Q8_0 / IQ4_NL: 8 blocks of 32;
+    // Q2_0: 4 blocks of 64, so its scales take 8 bytes)
+    const int qb = type == GGML_Q8_0 ? 32 : 16, nb = type == GGML_Q2_0 ? 4 : 8;
+    for (int b = 0; b < nb; ++b) {
       memcpy(dst + 2 * b, src + (2 + qb) * b, 2);
-      memcpy(dst + 16 + qb * b, src + (2 + qb) * b + 2, qb);
+      memcpy(dst + 2 * nb + qb * b, src + (2 + qb) * b + 2, qb);
     }
     return;
   }
