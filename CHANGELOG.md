@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-10-16 (evening): Qwen3.8 Flash Next on arcinferzero
+
+- New architecture `qwen4exp` (Qwen3.8 Flash Next, ISTA-DASLab GSQ-RCO IQ3_S, split GGUF of 2 parts) in arcinferzero:
+  4 hyper-connection streams with their mixers before every block, Gated DeltaNet with a sigmoid output gate, gated
+  attention, 512-expert MoE (10 active) streamed from the SSD with 640-wide experts (down rows padded to 768), the
+  PLE n-gram block (rows read from the 26.8 GiB table in part 2 per token, its conv history kept with the recurrent
+  state) and QSA sparse attention (indexer, pooled block keys, top 512 blocks per query; dense below ~2K tokens).
+- Accuracy against the CPU reference (`tools/ref_forward`, which now covers QSA and dumps per-block residuals):
+  short chat prompt KL 0.0014 ("Jakarta" 0.92 vs 0.93). On a 337-token raw text the KL is 0.15, the same as the
+  reference with int8 activations (0.13): this model is more sensitive to int8 activation quantization than the
+  others (every matrix group adds 0.02-0.10).
+- Speed (first numbers, 32 GB laptop, expert cache 7.9 GiB = 12 %): generation ~4 tok/s, short prompts 3-6 tok/s
+  while the cache is cold. The expert file (56 GB) is written once on the first start (~9.5 minutes).
+- Expert cache: with more than two record sizes (Flash Next has 5 type mixes) one pool of the largest record serves
+  every layer; separate pools each needed a whole layer and ran out of GPU memory.
+- `src/quants.h`: Q8_0 rows whose length is not a multiple of 256 dequantize fully (the CPU reference read only the
+  first 512 of 640 values of Flash Next's last shared expert).
+- 27B and 35B logits unchanged (bit-identical).
+
 ## 2026-10-16 (afternoon): extra model folders, kernel timings on Level Zero
 
 - Models can live on another drive: `%LOCALAPPDATA%\arcinfer\model-dirs.txt` (one folder per line) or

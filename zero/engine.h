@@ -42,7 +42,18 @@ struct Hparams {
   // mixture of experts (qwen35moe): routed experts (2-bit, kernels/moe.cl) + a sigmoid-gated shared expert
   bool moe = false, moe_std = false;  // moe_std: standard GGUF expert tensors (not GSQ)
   int n_expert = 0, n_expert_used = 0, n_ff_exp = 0, n_ff_shexp = 0;
+  int n_ff_exp_pad = 0;  // expert FFN width as the down projection reads it (Flash Next: 640 padded to 768)
   int router_rows() const { return (n_expert + 1 + 15) / 16 * 16; }  // router + shared-expert gate, padded
+  // Qwen3.8 Flash Next (qwen4exp): hyper-connections (hc_n residual streams of n_embd, low rank hc_lr) and the PLE
+  // n-gram embedding block at layer ple_layer (docs/flash-next-spec.md)
+  bool hc = false;
+  int hc_n = 1, hc_lr = 0, ple_layer = -1, ple_dim = 0, ple_ng = 0, ple_per = 0, ple_taps = 0;
+  int64_t ple_eos = -1;
+  std::vector<int64_t> ple_mult, ple_off, ple_voc;
+  // QSA sparse attention (Flash Next): block size per layer (0: dense), indexer heads / key size, keys selected
+  std::vector<int> qsa_ratio;
+  int qsa_heads = 0, qsa_dim = 0, qsa_topk = 0, n_qsa = 0;
+  int hce() const { return hc_n * n_embd; }  // residual floats per token
   int conv_dim() const { return 2 * ssm_nk * ssm_d_state + ssm_d_inner; }
   bool recurrent(int il) const { return !gemma && (il + 1) % full_attn_interval != 0; }
 };
@@ -108,7 +119,8 @@ class Engine {
       throw std::runtime_error("this is an arcinferzero package: it runs with expert streaming only (no --no-stream)");
     if (stream_ && !opt.dry) open_experts();
     // (streamed experts: 4096-token chunks, each chunk reads a layer's missing experts once)
-    max_chunk = o.chunk > 0 ? o.chunk : stream_ ? 4096 : hp.moe ? 2048 : (w8_resident ? 512 : 4096);
+    // (Flash Next: 2048, its residual is 4 streams wide)
+    max_chunk = o.chunk > 0 ? o.chunk : stream_ ? (hp.hc ? 2048 : 4096) : hp.moe ? 2048 : (w8_resident ? 512 : 4096);
     max_chunk = (std::max(max_chunk, o.min_chunk) + 127) / 128 * 128;
     if (!opt.dry) build_kernels();
     load_weights();
@@ -149,7 +161,7 @@ class Engine {
     if (hlast_) fill(hlast_, (size_t)hp.n_embd * 4);
     for (auto& L : layers_)
       if (hp.recurrent(L.il)) {
-        fill(L.conv_state, (size_t)3 * hp.conv_dim() * 4);
+        fill(L.conv_state, conv_bytes());
         fill(L.S, (size_t)hp.ssm_nv * hp.ssm_d_state * hp.ssm_d_state * 4);
       }
     clFinish(cl_.queue);
@@ -159,6 +171,7 @@ class Engine {
   const std::vector<float>& forward(const int* tokens, int n) {
     if (pos + n > ctx) throw std::runtime_error("context overflow");
     if (has_mtp) flush_mtp_pending();
+    if (hp.ple_layer >= 0) ple_sync();
     if ((!w8_resident || stream_) && n > max_chunk && !getenv("ARC_CHUNK_MAJOR") && !hp.n_ple) {
       // layer-major in segments of up to lm_seg_ tokens (each matrix is decoded once per segment)
       prog_total_ = n;
@@ -209,14 +222,18 @@ class Engine {
       if (cancelled()) throw Cancelled();  // (between segments)
       keep_block();
     }
+    cl_mem ple_saved = ple_emb_;
+    struct PleBack { cl_mem& p; cl_mem s; ~PleBack() { p = s; } } ple_back{ple_emb_, ple_saved};
     for (int c = 0; c < nch; ++c) {
       x_ = x_views_[c];
+      if (!ple_views_.empty()) ple_emb_ = ple_views_[c];
       embed(tokens + (size_t)c * max_chunk, chunk_T(c), chunk_Mp(c));
     }
     for (size_t li = 0; li < layers_.size(); ++li) {
       Layer& L = layers_[li];
       for (int c = 0; c < nch; ++c) {
         x_ = x_views_[c];
+        if (!ple_views_.empty()) ple_emb_ = ple_views_[c];
         cur_T_ = chunk_T(c);
         pos = pos0 + c * max_chunk;
         run_layer(L, cur_T_, chunk_Mp(c));
@@ -241,7 +258,7 @@ class Engine {
     cur_T_ = chunk_T(nch - 1);
     head(cur_T_);
     // leave the last chunk in x_ as the chunk-by-chunk path does (logits_at() reads its rows)
-    CL_CHECK(clEnqueueCopyBuffer(cl_.queue, x_, x_saved, 0, 0, (size_t)chunk_Mp(nch - 1) * hp.n_embd * 4, 0, nullptr,
+    CL_CHECK(clEnqueueCopyBuffer(cl_.queue, x_, x_saved, 0, 0, (size_t)chunk_Mp(nch - 1) * hp.hce() * 4, 0, nullptr,
                                  nullptr));
     x_ = x_saved;
     CL_CHECK(clEnqueueReadBuffer(cl_.queue, logits_, CL_TRUE, 0, (size_t)hp.n_vocab * 4, logits_host_.data(), 0,
@@ -331,7 +348,7 @@ class Engine {
   void snapshot(int slot) {
     if (slot >= (int)snaps_.size()) snaps_.resize(slot + 1);
     Snap& s = snaps_[slot];
-    const size_t sb = (size_t)hp.ssm_nv * hp.ssm_d_state * hp.ssm_d_state * 4, cb = (size_t)3 * hp.conv_dim() * 4;
+    const size_t sb = (size_t)hp.ssm_nv * hp.ssm_d_state * hp.ssm_d_state * 4, cb = conv_bytes();
     if (s.S.empty())
       for (auto& L : layers_)
         if (hp.recurrent(L.il)) { s.S.push_back(buf(sb)); s.conv.push_back(buf(cb)); }
@@ -354,7 +371,7 @@ class Engine {
   bool restore(int slot) {
     if (snapshot_pos(slot) < 0) return false;
     Snap& s = snaps_[slot];
-    const size_t sb = (size_t)hp.ssm_nv * hp.ssm_d_state * hp.ssm_d_state * 4, cb = (size_t)3 * hp.conv_dim() * 4;
+    const size_t sb = (size_t)hp.ssm_nv * hp.ssm_d_state * hp.ssm_d_state * 4, cb = conv_bytes();
     size_t k = 0;
     for (auto& L : layers_)
       if (hp.recurrent(L.il)) {
@@ -379,9 +396,10 @@ class Engine {
   size_t ctx_buf_bytes(int c) const {
     c = (c + 15) / 16 * 16;
     size_t n = 4 * (size_t)std::max(c / 256 + 1, 512) * hp.n_head * (hp.head_dim + 2) * 4;  // apart_
+    if (hp.n_qsa) n += (size_t)256 * qsa_blocks(c) * 4 + (size_t)max_chunk * qsa_mask_words(c) * 4;  // QSA scores, masks
     if (!w8_resident || stream_) {
-      const int seg = std::max(max_chunk, std::min(c, 16384) / max_chunk * max_chunk);
-      n += (size_t)(seg + max_chunk) * hp.n_embd * 4;  // x_all_
+      const int seg = lm_seg_for(c);
+      n += (size_t)(seg + max_chunk) * (hp.hce() + (hp.ple_layer >= 0 ? hp.n_embd : 0)) * 4;  // x_all_ (+ PLE rows)
     }
     return n;
   }
@@ -418,6 +436,7 @@ class Engine {
       int nl = has_mtp ? 1 : 0;
       for (const Layer& L : layers_) nl += !hp.recurrent(L.il);
       n += (size_t)nl * hp.n_head_kv * c * (2 * (size_t)hp.head_dim + 8);
+      n += (size_t)hp.n_qsa * qsa_blocks(c) * hp.qsa_dim * 4;  // QSA pooled keys
     }
     return n;
   }
@@ -616,6 +635,18 @@ class Engine {
     int kv_src = -1;            // shared KV: the layer whose cache this layer reads (no K/V of its own)
     GpuWeight ple_gate, ple_proj;
     cl_mem ple_post = nullptr;  // per-layer-embedding block
+    // Flash Next hyper-connection mixers before the attention / DeltaNet block (0) and the FFN (1): stream norm,
+    // low-rank down projection stacked with the inject rows (hc_lr + hc_n, padded), up projection (K padded to 512)
+    cl_mem hc_norm[2] = {};
+    GpuWeight hc_down[2], hc_up[2];
+    // Flash Next PLE block (its layer only): key / value projections, norms, depthwise conv weights [HCE][taps]
+    GpuWeight ple_key, ple_value;
+    cl_mem ple_nk = nullptr, ple_nq = nullptr, ple_nc = nullptr, ple_cw = nullptr;
+    // Flash Next QSA (attention layers): indexer key + query rows stacked, their norms, the pooled block keys
+    // ([ctx / qr][dim], by block: position-indexed like the KV cache), the raw keys of the tail block (state)
+    int qr = 0, qsa_i = -1;
+    GpuWeight ix;
+    cl_mem ix_kn = nullptr, ix_qn = nullptr, pk = nullptr, qtail = nullptr;
   };
 
   struct Snap {
@@ -664,7 +695,19 @@ class Engine {
   }
   int swa_lo_ = 0;  // sliding-window layers hold no K/V below this position (a loaded conversation, trimmed)
   size_t state_bytes() const { return (size_t)hp.ssm_nv * hp.ssm_d_state * hp.ssm_d_state * 4; }
-  size_t conv_bytes() const { return (size_t)3 * hp.conv_dim() * 4; }
+  // (DeltaNet conv history of 3 rows; Flash Next: every recurrent layer's state also has room for the PLE block's,
+  // used at its layer: ple_hist() rows of the conv input and the last two token ids, so snapshots, saved
+  // conversations and cancellation carry it like the other recurrent state)
+  int ple_hist() const { return hp.ple_layer >= 0 ? (hp.ple_taps - 1) * hp.ple_ng : 0; }
+  size_t ple_hist_off() const { return (size_t)3 * hp.conv_dim() * 4; }
+  size_t ple_tok_off() const { return ple_hist_off() + (size_t)ple_hist() * hp.hce() * 4; }
+  // (QSA: the raw keys of each QSA layer's tail block, 4 KB apart)
+  size_t qsa_tail_off(int i) const { return (ple_tok_off() + 16 + 4095) / 4096 * 4096 + (size_t)i * 4096; }
+  size_t conv_bytes() const {
+    return hp.n_qsa ? qsa_tail_off(hp.n_qsa) : ple_tok_off() + (hp.ple_layer >= 0 ? 16 : 0);
+  }
+  int qsa_blocks(int c) const { return hp.n_qsa ? (c + 15) / 16 * 16 / hp.qsa_ratio[hp.full_attn_interval - 1] : 0; }
+  int qsa_mask_words(int c) const { return (qsa_blocks(c) + 31) / 32; }
   std::vector<uint8_t> read_buf(cl_mem b, size_t n, size_t off = 0) {
     std::vector<uint8_t> v(n);
     if (n) CL_CHECK(clEnqueueReadBuffer(cl_.queue, b, CL_TRUE, off, n, v.data(), 0, nullptr, nullptr));
@@ -732,6 +775,9 @@ class Engine {
           if (n > first) v.push_back({b, base * unit, (size_t)(n - first) * unit});
         }
     }
+    if (hp.n_qsa && !br.empty())  // QSA pooled keys of the blocks below the saved positions (the KV blocks' range)
+      for (auto& L : layers_)
+        if (L.pk) v.push_back({L.pk, 0, (size_t)std::min(qsa_blocks(ctx), br[0].second * 16 / L.qr) * hp.qsa_dim * 4});
     for (auto& L : layers_)
       if (hp.recurrent(L.il)) {
         v.push_back({L.S, 0, state_bytes()});
@@ -855,6 +901,18 @@ class Engine {
   int conv_ct_ = 1;  // tokens per sub-group in gdn_conv (1 is fastest: more sub-groups in flight)
   GpuWeight lm_head_;
   cl_mem out_norm_ = nullptr, tabs_ = nullptr;
+  // Flash Next: the final mixer (the output norm), the mixers' buffers (normed streams, gates, low-rank + inject
+  // outputs, the block output / mixed input), the PLE block's n-gram embeddings (per chunk view in layer-major
+  // prefill) and the token ids before the current position (host copy of the ones kept in the PLE layer's state)
+  cl_mem out_hc_norm_ = nullptr, hc_xn_ = nullptr, hc_gate_ = nullptr, hc_lo_ = nullptr, hco_ = nullptr,
+         ple_emb_ = nullptr, ple_hist_ = nullptr;
+  GpuWeight out_hc_down_, out_hc_up_;
+  std::vector<cl_mem> ple_views_;
+  const GgufTensor* ple_table_ = nullptr;
+  int ple_prev_[2] = {-1, -1};
+  // QSA: indexer rows of the pass, normed / rotated queries, block scores of up to 256 rows, the selection masks
+  cl_mem qsa_ixo_ = nullptr, qsa_qx_ = nullptr, qsa_sc_ = nullptr, qsa_mask_ = nullptr;
+  int qsa_n_ = 0;
   const GgufTensor* tok_embd_ = nullptr;
   // activations
   cl_mem x_ = nullptr, aq_ = nullptr, asc_ = nullptr, absum_ = nullptr, big_ = nullptr, z_ = nullptr,
@@ -916,8 +974,9 @@ class Engine {
     const std::string a = f_.get_str("general.architecture");
     hp.arch = a;
     if (a == "gemma4") return load_hparams_gemma4();
-    if (a != "qwen35" && a != "qwen35moe") throw std::runtime_error("unsupported architecture: " + a);
-    hp.moe = a == "qwen35moe";
+    if (a != "qwen35" && a != "qwen35moe" && a != "qwen4exp") throw std::runtime_error("unsupported architecture: " + a);
+    hp.moe = a == "qwen35moe" || a == "qwen4exp";
+    hp.hc = a == "qwen4exp";
     auto I = [&](const std::string& k, int64_t def = -1) {
       int64_t v = f_.get_int(a + "." + k, def);
       if (v < 0) throw std::runtime_error("missing hparam " + k);
@@ -933,8 +992,51 @@ class Engine {
       hp.n_ff_shexp = I("expert_shared_feed_forward_length");
       // experts: GSQ 2-bit (tools/convert_gsq.py, kernels/moe.cl) or standard GGUF types (decode.cl moe_*_q)
       hp.moe_std = f_.get_str("arcinfer.expert_format", "") != "gsq2-v1";
-      if (hp.n_expert != 256 || hp.n_expert_used > 16 || hp.n_ff_exp % 256 || hp.n_ff_shexp % 256)
+      hp.n_ff_exp_pad = padded_k(hp.n_ff_exp);
+      // (Flash Next: FFN widths of 640, its down projections padded to 768 and its shared expert to 768 rows)
+      if (hp.hc) hp.n_ff_shexp = padded_k(hp.n_ff_shexp);
+      if ((hp.n_expert != 256 && !(hp.hc && hp.n_expert == 512)) || hp.n_expert_used > 16 ||
+          (hp.n_ff_exp % 256 && !hp.hc) || hp.n_ff_shexp % 256 || (hp.hc && !hp.moe_std))
         throw std::runtime_error("unsupported MoE dimensions");
+    }
+    if (hp.hc) {
+      hp.hc_n = I("hyper_connection.count");
+      hp.hc_lr = I("hyper_connection.low_rank");
+      if (const auto* pl = f_.get_ints(a + ".ple.layers"))
+        if (!pl->empty()) hp.ple_layer = (int)(*pl)[0];
+      if (hp.ple_layer >= 0) {
+        hp.ple_dim = I("embedding_length_per_layer_input");
+        hp.ple_ng = I("ple.ngram_size");
+        hp.ple_per = I("ple.heads_per_ngram");
+        hp.ple_taps = I("ple.conv_kernel");
+        hp.ple_eos = f_.get_int(a + ".ple.eos_token_id", -1);
+        for (auto [key, v] : {std::pair{"ple.layer_multipliers", &hp.ple_mult}, std::pair{"ple.head_offsets", &hp.ple_off},
+                              std::pair{"ple.head_vocab_sizes", &hp.ple_voc}})
+          if (const auto* x = f_.get_ints(a + "." + key)) v->assign(x->begin(), x->end());
+        const int nph = (hp.ple_ng - 1) * hp.ple_per;
+        if ((int)hp.ple_mult.size() < hp.ple_ng || (int)hp.ple_off.size() < nph || (int)hp.ple_voc.size() < nph ||
+            nph * hp.ple_dim != I("embedding_length") || hp.ple_taps != 4 || (hp.ple_taps - 1) * hp.ple_ng > 16)
+          throw std::runtime_error("unsupported PLE n-gram block");
+      }
+      hp.full_attn_interval = I("full_attention_interval", 4);
+      if (const auto* cr = f_.get_ints(a + ".attention.compress_ratios")) {
+        const int nl = I("block_count");
+        hp.qsa_ratio.assign(nl, 0);
+        for (int il = 0; il < nl && il < (int)cr->size(); ++il)
+          if (f_.find("blk." + std::to_string(il) + ".indexer.k_proj.weight")) hp.qsa_ratio[il] = (int)(*cr)[il];
+        for (int r : hp.qsa_ratio) hp.n_qsa += r > 0;
+        if (hp.n_qsa) {
+          hp.qsa_heads = I("attention.indexer.head_count");
+          hp.qsa_dim = I("attention.indexer.key_length");
+          hp.qsa_topk = I("attention.indexer.top_k");
+          if (const char* e = getenv("ARC_QSA_TOPK")) hp.qsa_topk = atoi(e);  // (tests: fewer keys, sparse sooner)
+          for (int r : hp.qsa_ratio)
+            if (r > 0 && (r < 2 || r > 8 || hp.qsa_topk % r || r != hp.qsa_ratio[hp.full_attn_interval - 1]))
+              throw std::runtime_error("unsupported QSA block size");
+          if (hp.qsa_dim != 128 || hp.qsa_heads < 1 || hp.qsa_heads > 16 || hp.ple_layer < 0)
+            throw std::runtime_error("unsupported QSA indexer");
+        }
+      }
     }
     hp.n_head = I("attention.head_count");
     hp.n_head_kv = I("attention.head_count_kv");
@@ -956,6 +1058,9 @@ class Engine {
     if (hp.head_dim != 256 || hp.ssm_d_state != 128 || hp.conv_k != 4 || hp.n_rot > 64 || hp.n_embd % 256 ||
         hp.n_ff % 256 || hp.ssm_d_inner % 256 || hp.n_head % hp.n_head_kv)
       throw std::runtime_error("unsupported Qwen3.5 dimensions");
+    if (hp.hc && (hp.hc_n < 1 || hp.hc_n > 16 || hp.hc_lr <= 0 || hp.hc_lr + hp.hc_n > 512 ||
+                  (hp.ple_layer >= 0 && !hp.recurrent(hp.ple_layer))))
+      throw std::runtime_error("unsupported hyper-connection shape");
   }
 
   void load_hparams_gemma4() {
@@ -1109,7 +1214,7 @@ class Engine {
                                       std::to_string(conv_ct_), "gdn_conv");
     }
     k_conv_upd_ = p("conv_state_update");
-    k_gnorm_ = p("gated_norm_quant");
+    k_gnorm_ = hp.hc ? kernel("ops", "-DGATE_SIGMOID", "gated_norm_quant") : p("gated_norm_quant");
     k_attn_prep_ = kernel("ops", sb_opt(256), "attn_prep");
     k_attn_gate_ = p("attn_gate_quant");
     k_gdn_gates_ = p("gdn_gates");
@@ -1304,6 +1409,50 @@ class Engine {
     dequant_row(t.type, t.data, (int)v.size(), v.data());
     return buf(v.size() * 4, v.data());
   }
+  // A matrix with its rows padded to Np rows of zeros and, for a type of small blocks (32 / 64: Q8_0, IQ4_NL, Q2_0)
+  // whose K is not whole superblocks, its columns to padded_k(K) (zero blocks): Flash Next's 640-wide shared expert as 768 (the extra outputs are 0).
+  GpuWeight load_w_pad(const std::string& name, int Np) {
+    const GgufTensor& t = f_.get(name);
+    const int K = (int)t.dims[0], N = (int)t.dims[1];
+    if (K % 256 == 0 && N == Np) return load_w(name);
+    int blk = 0, bytes = 0;
+    ggml_block_info(t.type, blk, bytes);
+    if (K % 256 && (blk >= 256 || K % blk)) throw std::runtime_error("unsupported row length: " + name);
+    const int Kp = padded_k(K);
+    const size_t prb = (size_t)Kp / blk * bytes;
+    std::vector<uint8_t> v((size_t)Np * prb, 0);
+    if (K % 256) pad_small_block_rows(t.type, t.data, N, K, v.data());
+    else memcpy(v.data(), t.data, (size_t)N * prb);
+    return make_weight(t.type, v.data(), v.size(), Np, Kp, weight_role(name));
+  }
+  // Flash Next mixer: the low-rank down rows [hc_lr][HCE] and the inject rows [hc_n][HCE] stacked (padded to 16 rows)
+  // as one Q8_0 matrix: the GEMM gives both from the same normed input.
+  GpuWeight load_hc_down(const std::string& down, const std::string& inject) {
+    const int K = hp.hce(), LR = hp.hc_lr, NI = inject.empty() ? 0 : hp.hc_n, N = (LR + NI + 15) / 16 * 16;
+    std::vector<float> v((size_t)N * K, 0.0f);
+    const GgufTensor& td = f_.get(down);
+    if ((int)td.dims[0] != K || (int)td.dims[1] != LR) throw std::runtime_error("unexpected tensor shape: " + down);
+    dequant_row(td.type, td.data, (int64_t)LR * K, v.data());
+    if (NI) {
+      const GgufTensor& ti = f_.get(inject);
+      if ((int)ti.dims[0] != K || (int)ti.dims[1] != NI) throw std::runtime_error("unexpected tensor shape: " + inject);
+      dequant_row(ti.type, ti.data, (int64_t)NI * K, v.data() + (size_t)LR * K);
+    }
+    auto q8 = quantize_rows_q8_0(v.data(), N, K);
+    return make_weight(GGML_Q8_0, q8.data(), q8.size(), N, K);
+  }
+  int hc_lr_pad() const { return padded_k(hp.hc_lr); }
+  // Flash Next mixer up projection [HCE][hc_lr], its K padded with zeros to a multiple of 256
+  GpuWeight load_hc_up(const std::string& name) {
+    const GgufTensor& t = f_.get(name);
+    const int K = hp.hc_lr, N = hp.hce(), KP = hc_lr_pad();
+    if ((int)t.dims[0] != K || (int)t.dims[1] != N) throw std::runtime_error("unexpected tensor shape: " + name);
+    std::vector<float> a((size_t)N * K), v((size_t)N * KP, 0.0f);
+    dequant_row(t.type, t.data, (int64_t)N * K, a.data());
+    for (int n = 0; n < N; ++n) memcpy(&v[(size_t)n * KP], &a[(size_t)n * K], (size_t)K * 4);
+    auto q8 = quantize_rows_q8_0(v.data(), N, KP);
+    return make_weight(GGML_Q8_0, q8.data(), q8.size(), N, KP);
+  }
 
   void load_weights() {
     // The output head first: the GPU reads a large buffer allocated late in the load (after gigabytes of other
@@ -1315,8 +1464,27 @@ class Engine {
       Layer& L = layers_[il];
       L.il = il;
       const std::string p = "blk." + std::to_string(il) + ".";
-      L.attn_norm = load_f32(p + "attn_norm.weight");
-      L.post_norm = load_f32(p + "post_attention_norm.weight");
+      if (hp.hc) {
+        for (int b = 0; b < 2; ++b) {
+          const std::string hp_ = p + (b ? "hc_ffn" : "hc_attn");
+          L.hc_norm[b] = load_f32(hp_ + "_norm.weight");
+          L.hc_down[b] = load_hc_down(hp_ + "_down.weight", hp_ + "_inject.weight");
+          L.hc_up[b] = load_hc_up(hp_ + "_up.weight");
+        }
+        if (il == hp.ple_layer) {
+          L.ple_key = load_w(p + "ple_key.weight");
+          L.ple_value = load_w(p + "ple_value.weight");
+          L.ple_nk = load_f32(p + "ple_norm_key.weight");
+          L.ple_nq = load_f32(p + "ple_norm_query.weight");
+          L.ple_nc = load_f32(p + "ple_norm_conv.weight");
+          L.ple_cw = load_f32(p + "ple_conv1d.weight");
+          if (L.ple_key.N != hp.hce() || L.ple_key.K != hp.n_embd || L.ple_value.N != hp.n_embd)
+            throw std::runtime_error("unexpected PLE block shape");
+        }
+      } else {
+        L.attn_norm = load_f32(p + "attn_norm.weight");
+        L.post_norm = load_f32(p + "post_attention_norm.weight");
+      }
       if (hp.recurrent(il)) {
         load_gdn_in(L, p);
         L.ssm_out = load_w(p + "ssm_out.weight");
@@ -1324,12 +1492,12 @@ class Engine {
         L.ssm_a = load_f32(p + "ssm_a");
         L.conv_w = load_f32(p + "ssm_conv1d.weight");
         L.ssm_norm = load_f32(p + "ssm_norm.weight");
-        L.conv_state = buf((size_t)3 * hp.conv_dim() * 4);
+        L.conv_state = buf(conv_bytes());
         L.S = buf((size_t)hp.ssm_nv * hp.ssm_d_state * hp.ssm_d_state * 4);
         if (opt.mtp && !hp.gemma) {
           const size_t g0 = gpu_bytes, rows = 1 + kMaxDrafts;
           L.S_next = buf((size_t)hp.ssm_nv * hp.ssm_d_state * hp.ssm_d_state * 4);
-          L.conv_pre = buf((size_t)3 * hp.conv_dim() * 4);
+          L.conv_pre = buf(conv_bytes());
           L.xin = buf(rows * hp.conv_dim() * 4);
           L.qkvin = buf(rows * hp.conv_dim() * 4);
           L.abin = buf(rows * 2 * hp.ssm_nv * 4);
@@ -1574,10 +1742,11 @@ class Engine {
       L.up_sh = view(NRP + Fs, Fs);
     } else {
       L.router = make_weight(GGML_Q8_0, q8.data(), q8.size(), NR, E);
-      L.gate_sh = load_w(p + "ffn_gate_shexp.weight");
-      L.up_sh = load_w(p + "ffn_up_shexp.weight");
+      L.gate_sh = load_w_pad(p + "ffn_gate_shexp.weight", Fs);
+      L.up_sh = load_w_pad(p + "ffn_up_shexp.weight", Fs);
     }
-    L.down_sh = load_w(p + "ffn_down_shexp.weight");
+    L.down_sh = load_w_pad(p + "ffn_down_shexp.weight", E);
+    if (L.gate_sh.N != Fs || L.down_sh.K != Fs) throw std::runtime_error("unexpected shared expert shape");
     const char* names[3] = {"gate", "up", "down"};
     const uint64_t per_expert = (uint64_t)hp.n_ff_exp * E;  // weights of one expert matrix
     if (hp.moe_std) {
@@ -1585,12 +1754,13 @@ class Engine {
         const GgufTensor& t = f_.get(p + "ffn_" + names[i] + "_exps.weight");
         const uint64_t K = t.dims[0];
         if (t.dims.size() != 3 || t.dims[2] != (uint64_t)hp.n_expert || t.nelements() != per_expert * hp.n_expert ||
-            K != (i == 2 ? (uint64_t)hp.n_ff_exp : (uint64_t)E) || K % 256)
+            K != (i == 2 ? (uint64_t)hp.n_ff_exp : (uint64_t)E) || (K % 256 && !is_small_block_type(t.type)))
           throw std::runtime_error("unexpected expert tensor " + t.name);
         if (!is_w8_type(t.type))
           throw std::runtime_error("unsupported expert tensor " + t.name + " (" + ggml_type_name(t.type) + ")");
+        if (K % 256 && !stream_) throw std::runtime_error("this model runs with expert streaming only");
         if (!stream_) L.ex_q[i] = upload_padded(t.type, t.data, t.nbytes);
-        else stream_bytes_ += t.nbytes / gguf_sb_bytes(t.type) * raw_padded_sb_bytes(t.type);
+        else stream_bytes_ += t.dims[1] * t.dims[2] * (padded_k((int)K) / 256) * raw_padded_sb_bytes(t.type);
         L.ex_type[i] = t.type;
       }
       if (L.ex_type[0] != L.ex_type[1]) throw std::runtime_error("MoE: gate and up experts of different types");
@@ -1628,6 +1798,22 @@ class Engine {
         for (cl_mem m : {L.kc, L.vc}) fill(m, opt.attn_int8 ? 64 : kvb);
         for (cl_mem m : {L.kq, L.vq}) fill(m, kvi / 2);
         for (cl_mem m : {L.ksc, L.vsc}) fill(m, scb);
+      }
+    }
+    if (hp.hc && L.il < (int)hp.qsa_ratio.size() && hp.qsa_ratio[L.il] > 0) {
+      L.qr = hp.qsa_ratio[L.il];
+      L.ix = load_q8_concat(p + "indexer.k_proj.weight", p + "indexer.q_proj.weight");
+      L.ix_kn = load_f32(p + "indexer.k_norm.weight");
+      L.ix_qn = load_f32(p + "indexer.q_norm.weight");
+      if (L.ix.N != (1 + hp.qsa_heads) * hp.qsa_dim) throw std::runtime_error("unexpected QSA indexer shape");
+      L.pk = buf((size_t)qsa_blocks(ctx) * hp.qsa_dim * 4 + 64);
+      L.qsa_i = qsa_n_++;
+      if (!opt.dry) {  // its tail raw keys inside the PLE layer's recurrent state (see conv_bytes)
+        cl_buffer_region r{qsa_tail_off(L.qsa_i), (size_t)(L.qr - 1) * hp.qsa_dim * 4};
+        cl_int err;
+        L.qtail = clCreateSubBuffer(layers_[hp.ple_layer].conv_state, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &r, &err);
+        CL_CHECK(err);
+        mems_.push_back(L.qtail);
       }
     }
   }
@@ -1810,7 +1996,17 @@ class Engine {
   }
 
   void load_head() {
-    out_norm_ = load_f32("output_norm.weight");
+    if (hp.hc) {
+      out_hc_norm_ = load_f32("output_hc_norm.weight");
+      out_hc_down_ = load_hc_down("output_hc_down.weight", "");
+      out_hc_up_ = load_hc_up("output_hc_up.weight");
+      if (hp.ple_layer >= 0) {
+        ple_table_ = &f_.get("per_layer_token_embd.weight");
+        if ((int)ple_table_->dims[0] != hp.ple_dim) throw std::runtime_error("unexpected PLE table shape");
+      }
+    } else {
+      out_norm_ = load_f32("output_norm.weight");
+    }
     // lm_head is only ever a GEMV on the last token: keep just the raw rows.
     const GgufTensor& lt = f_.find("output.weight") ? f_.get("output.weight") : *tok_embd_;
     lm_head_.N = (int)lt.dims[1];
@@ -1829,11 +2025,35 @@ class Engine {
 
   void alloc_buffers() {
     const size_t M = max_chunk;
-    const int maxK = std::max({hp.n_embd, hp.n_ff, hp.ssm_d_inner, hp.n_head * hp.head_dim});
+    const int maxK = std::max({hp.n_embd, hp.n_ff, hp.ssm_d_inner, hp.n_head * hp.head_dim, hp.hce(), hp.n_ff_exp_pad});
     const int ldq = hp.n_head * hp.head_dim * 2 + 2 * hp.n_head_kv * hp.head_dim;
     const int big_w = std::max({hp.conv_dim(), 2 * hp.n_ff, ldq});
-    x_ = buf(M * hp.n_embd * 4);
+    x_ = buf(M * hp.hce() * 4);
     aq_ = buf(M * maxK);
+    if (hp.hc) {
+      hc_xn_ = buf(M * hp.hce() * 4);
+      hc_gate_ = buf(M * hp.hce() * 4);
+      hc_lo_ = buf(M * (size_t)std::max(layers_[0].hc_down[0].N, out_hc_down_.N) * 4);
+      hco_ = buf(M * hp.n_embd * 4);
+      if (hp.n_qsa) {
+        qsa_ixo_ = buf(M * (size_t)(1 + hp.qsa_heads) * hp.qsa_dim * 4);
+        qsa_qx_ = buf(M * (size_t)hp.qsa_heads * hp.qsa_dim * 4);
+        qsa_sc_ = buf((size_t)256 * qsa_blocks(ctx) * 4 + 64);
+        qsa_mask_ = buf(M * (size_t)qsa_mask_words(ctx) * 4 + 64);
+      }
+      if (hp.ple_layer >= 0) {
+        ple_emb_ = buf(M * hp.n_embd * 4);
+        ple_host_.resize(M * hp.n_embd);
+        if (!opt.dry) {  // the PLE conv history inside the PLE layer's recurrent state (see conv_bytes)
+          cl_buffer_region r{ple_hist_off(), (size_t)ple_hist() * hp.hce() * 4};
+          cl_int err;
+          ple_hist_ = clCreateSubBuffer(layers_[hp.ple_layer].conv_state, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION,
+                                        &r, &err);
+          CL_CHECK(err);
+          mems_.push_back(ple_hist_);
+        }
+      }
+    }
     asc_ = buf(M * (maxK / 32) * 4);
     absum_ = buf(M * (maxK / 16) * 2);
     if (hp.gemma) {  // 16 padded rows, as single-token and verification passes use
@@ -1861,7 +2081,7 @@ class Engine {
       return m;
     };
     if (share) {
-      const size_t S = M * hp.n_expert_used, hb = S * hp.n_ff_exp * 4, yb = S * hp.n_embd * 4;
+      const size_t S = M * hp.n_expert_used, hb = S * hp.n_ff_exp_pad * 4, yb = S * hp.n_embd * 4;
       cl_mem a = buf(std::max(z_bytes, hb));
       z_ = sub(a, 0, z_bytes);
       mh_ = sub(a, 0, hb);
@@ -1903,7 +2123,7 @@ class Engine {
     apart_ = buf((size_t)4 * std::max(ctx / 256 + 1, 512) * hp.n_head * (hp.head_dim + 2) * 4);
     logits_ = buf((size_t)hp.n_vocab * 4 * (1 + max_drafts()));  // rows of a speculative verification pass
     if (hp.moe) {
-      const size_t S = M * hp.n_expert_used, F = hp.n_ff_exp, NE = hp.n_expert;
+      const size_t S = M * hp.n_expert_used, F = hp.n_ff_exp_pad, NE = hp.n_expert;
       slots_ = (int)S;
       rl_ = buf(M * hp.router_rows() * 4);
       if (has_rgu_) {  // stacked router + shared gate / up output; the gate / up part as its own (aligned) buffer
@@ -1996,23 +2216,32 @@ class Engine {
       }
     if (!w8_resident || stream_) {
       // residual stream of a layer-major segment (+ one chunk of padding rows)
-      lm_seg_ = std::max(max_chunk, std::min(ctx, 16384) / max_chunk * max_chunk);
+      lm_seg_ = lm_seg_for(ctx);
       const size_t rows = (size_t)lm_seg_ + max_chunk;
-      x_all_ = buf(rows * hp.n_embd * 4);
+      x_all_ = buf(rows * hp.hce() * 4);
+      cl_mem ple_all = hp.ple_layer >= 0 ? buf(rows * hp.n_embd * 4) : nullptr;
       for (size_t r0 = 0; r0 + max_chunk <= rows; r0 += max_chunk) {
-        cl_buffer_region reg{r0 * hp.n_embd * 4, (size_t)max_chunk * hp.n_embd * 4};
+        cl_buffer_region reg{r0 * hp.hce() * 4, (size_t)max_chunk * hp.hce() * 4};
         cl_int err;
         if (opt.dry) continue;
         x_views_.push_back(clCreateSubBuffer(x_all_, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &reg, &err));
         mems_.push_back(x_views_.back());
         CL_CHECK(err);
+        if (ple_all) {
+          cl_buffer_region rp{r0 * hp.n_embd * 4, (size_t)max_chunk * hp.n_embd * 4};
+          ple_views_.push_back(clCreateSubBuffer(ple_all, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &rp, &err));
+          mems_.push_back(ple_views_.back());
+          CL_CHECK(err);
+        }
       }
     }
-    fill(x_, M * hp.n_embd * 4);
+    fill(x_, M * hp.hce() * 4);
     logits_host_.resize(hp.n_vocab);
     if (has_mtp) spec_logits_host_.resize((size_t)hp.n_vocab * (1 + max_drafts()));
-    x_host_.resize(M * hp.n_embd);
+    x_host_.resize(M * hp.hce());
   }
+  // tokens per layer-major prompt segment (Flash Next: 8192, its residual rows are 4 streams wide)
+  int lm_seg_for(int c) const { return std::max(max_chunk, std::min(c, hp.hc ? 8192 : 16384) / max_chunk * max_chunk); }
 
   // ---------------------------------------------------------------- dispatch helpers
   void run(const char* name, cl_kernel k, int dims, const size_t* gws, const size_t* lws) {
@@ -2237,6 +2466,20 @@ class Engine {
     cur_T_ = T;
     attn_in_ready_ = ffn_in_ready_ = false;
     const size_t row_bytes = tok_embd_->nbytes / hp.n_vocab;
+    if (hp.hc) {  // Flash Next: hc_n copies of the embedding per row
+      const int W = hp.hce(), E = hp.n_embd;
+      std::fill(x_host_.begin(), x_host_.begin() + (size_t)Mp * W, 0.0f);
+#pragma omp parallel for if (T > 64)
+      for (int t = 0; t < T; ++t) {
+        if (tokens[t] < 0 || tokens[t] >= hp.n_vocab) continue;
+        float* r = &x_host_[(size_t)t * W];
+        dequant_row(tok_embd_->type, tok_embd_->data + (size_t)tokens[t] * row_bytes, E, r);
+        for (int c = 1; c < hp.hc_n; ++c) memcpy(r + (size_t)c * E, r, (size_t)E * 4);
+      }
+      CL_CHECK(clEnqueueWriteBuffer(cl_.queue, x_, CL_TRUE, 0, (size_t)Mp * W * 4, x_host_.data(), 0, nullptr, nullptr));
+      if (hp.ple_layer >= 0) ple_embed(tokens, T);
+      return;
+    }
     std::fill(x_host_.begin(), x_host_.begin() + (size_t)Mp * hp.n_embd, 0.0f);
 #pragma omp parallel for if (T > 64)
     for (int t = 0; t < T; ++t) {
@@ -2275,6 +2518,29 @@ class Engine {
       layer_gemma_ffn(L, T, Mp);
       return;
     }
+    if (hp.hc) {  // Flash Next: each block reads the mixed streams and adds its output to every stream
+      if (L.il == hp.ple_layer) ple_block(L, T, Mp);
+      hc_mix(L.hc_norm[0], L.hc_down[0], L.hc_up[0], T, Mp, act32_for(false), 0);
+      if (hp.recurrent(L.il)) layer_gdn(L, T, Mp);
+      else layer_attn(L, T, Mp);
+      hc_combine(L.hc_down[0].N, T);
+      if (dbg_rows) dbg_row(T - 1);
+      hc_mix(L.hc_norm[1], L.hc_down[1], L.hc_up[1], T, Mp, 1, 0);
+      static const int dbg_mix = getenv("ARC_DBG_MOE") ? atoi(getenv("ARC_DBG_MOE")) : -1;
+      if (L.il == dbg_mix && T > 1) {  // (debug: the FFN mixer's output and inject logits of the last row)
+        const int E = hp.n_embd, LD = L.hc_down[1].N;
+        std::vector<float> a(E), b(LD);
+        CL_CHECK(clEnqueueReadBuffer(cl_.queue, hco_, CL_TRUE, (size_t)(T - 1) * E * 4, E * 4, a.data(), 0, nullptr, nullptr));
+        CL_CHECK(clEnqueueReadBuffer(cl_.queue, hc_lo_, CL_TRUE, (size_t)(T - 1) * LD * 4, LD * 4, b.data(), 0, nullptr, nullptr));
+        FILE* f = fopen("mix_dbg_gpu.bin", "wb");
+        fwrite(a.data(), 4, E, f); fwrite(b.data() + hp.hc_lr, 4, hp.hc_n, f); fwrite(b.data(), 4, hp.hc_lr, f);
+        fclose(f);
+      }
+      layer_moe(L, T, Mp);
+      hc_combine(L.hc_down[1].N, T);
+      if (dbg_rows) dbg_row(T - 1);
+      return;
+    }
     if (hp.recurrent(L.il)) layer_gdn(L, T, Mp);
     else layer_attn(L, T, Mp);
     if (dbg_rows) dbg_row(T - 1);
@@ -2288,8 +2554,8 @@ class Engine {
   std::vector<std::vector<float>> dbg_;
  private:
   void dbg_row(int r) {
-    std::vector<float> v(hp.n_embd);
-    CL_CHECK(clEnqueueReadBuffer(cl_.queue, x_, CL_TRUE, (size_t)r * hp.n_embd * 4, v.size() * 4, v.data(), 0, nullptr,
+    std::vector<float> v(hp.hce());
+    CL_CHECK(clEnqueueReadBuffer(cl_.queue, x_, CL_TRUE, (size_t)r * hp.hce() * 4, v.size() * 4, v.data(), 0, nullptr,
                                  nullptr));
     dbg_.push_back(std::move(v));
   }
@@ -2643,11 +2909,125 @@ class Engine {
     }
   }
 
+  // ---------------------------------------------------------------- Flash Next hyper-connections and PLE
+  // The mixer of rows r0 .. r0 + T - 1 of the residual streams x_: per-stream norm, low-rank down (+ inject logits,
+  // into hc_lo_), silu(lo / hc_n), up to the stream gates, then the gated mean over the streams = the block input
+  // (f32 in hco_, quantized in aq_ / asc_ / absum_ with Mp rows)
+  void hc_mix(cl_mem normw, const GpuWeight& down, const GpuWeight& up, int T, int Mp, int act32, int r0) {
+    const int E = hp.n_embd, HC = hp.hc_n, W = hp.hce(), LD = down.N, LR = hp.hc_lr, KP = hc_lr_pad();
+    float eps = hp.eps;
+    {
+      cl_kernel k = kernel("ops", "", "hc_norm_quant");
+      int rr = r0, e = E, hc = HC, mm = Mp, tt = T, a32 = act32;
+      set_args(k, 0, x_, rr, normw, e, hc, mm, tt, eps, hc_xn_, aq_, asc_, absum_, a32);
+      size_t gws[2] = {256, (size_t)Mp}, lws[2] = {256, 1};
+      run("hc_norm", k, 2, gws, lws);
+    }
+    matmul("hc_down", down, Mp, hc_lo_, LD, 0, 0, act32);
+    {
+      cl_kernel k = kernel("ops", "", "hc_lo_quant");
+      int lr = LR, ld = LD, kp = KP, hc = HC, mm = Mp, tt = T, a32 = act32;
+      set_args(k, 0, hc_lo_, lr, ld, kp, hc, mm, tt, aq_, asc_, absum_, a32);
+      size_t gws[2] = {(size_t)16 * KP / 256, (size_t)Mp}, lws[2] = {16, 1};
+      run("hc_lo", k, 2, gws, lws);
+    }
+    matmul("hc_up", up, Mp, hc_gate_, W, 0, 0, act32);
+    {
+      cl_kernel k = kernel("ops", "", "hc_gate_mean_quant");
+      int e = E, hc = HC, mm = Mp, tt = T, a32 = act32;
+      set_args(k, 0, hc_xn_, hc_gate_, e, hc, mm, tt, hco_, aq_, asc_, absum_, a32);
+      size_t gws[2] = {256, (size_t)Mp}, lws[2] = {256, 1};
+      run("hc_mix", k, 2, gws, lws);
+    }
+  }
+  // x_ streams += 2 sigmoid(inject / hc_n) * block output (hco_), inject = columns hc_lr.. of hc_lo_ (row stride ld)
+  void hc_combine(int ld, int T) {
+    cl_kernel k = kernel("ops", "", "hc_combine");
+    int l = ld, off = hp.hc_lr, e = hp.n_embd, hc = hp.hc_n;
+    set_args(k, 0, x_, hco_, hc_lo_, l, off, e, hc);
+    size_t gws[2] = {(size_t)hp.hce(), (size_t)T};
+    run("hc_combine", k, 2, gws, nullptr);
+  }
+  // the token ids before the current position, from the PLE layer's state (restored with snapshots / sessions)
+  void ple_sync() {
+    int32_t v[2] = {0, 0};
+    CL_CHECK(clEnqueueReadBuffer(cl_.queue, layers_[hp.ple_layer].conv_state, CL_TRUE, ple_tok_off(), 8, v, 0, nullptr,
+                                 nullptr));
+    ple_prev_[0] = v[0] - 1;  // (stored + 1: a reset state of zeros reads as "no token")
+    ple_prev_[1] = v[1] - 1;
+  }
+  // n-gram rows of the chunk's tokens (host hash, rows read from the table in the GGUF) into ple_emb_; advances the
+  // token history (host and the PLE layer's state). llama.cpp qwen4exp: predecessors that are missing (sequence
+  // start) or an EOS cut the window; everything at or before the cut reads as EOS.
+  void ple_embed(const int* tokens, int T) {
+    const int ng = hp.ple_ng, per = hp.ple_per, dim = hp.ple_dim, E = hp.n_embd;
+    const int64_t eos = hp.ple_eos;
+    const size_t prb = ple_table_->nbytes / ple_table_->dims[1];
+    const int p0 = ple_prev_[0], p1 = ple_prev_[1];
+#pragma omp parallel for if (T > 16)
+    for (int t = 0; t < T; ++t) {
+      int64_t ctxv[8];
+      ctxv[0] = tokens[t];
+      bool cut = false;
+      for (int sft = 1; sft < ng; ++sft) {
+        const int j = t - sft;
+        const int64_t tk = cut ? -1 : j >= 0 ? tokens[j] : j == -1 ? p0 : j == -2 ? p1 : -1;
+        cut = cut || tk < 0 || tk == eos;
+        ctxv[sft] = cut ? eos : tk;
+      }
+      for (int n = 2; n <= ng; ++n) {
+        uint64_t mixed = (uint64_t)ctxv[0] * (uint64_t)hp.ple_mult[0];
+        for (int j = 1; j < n; ++j) mixed ^= (uint64_t)ctxv[j] * (uint64_t)hp.ple_mult[j];
+        for (int g = 0; g < per; ++g) {
+          const int h = (n - 2) * per + g;
+          const uint64_t row = mixed % (uint64_t)hp.ple_voc[h] + (uint64_t)hp.ple_off[h];
+          dequant_row(ple_table_->type, ple_table_->data + row * prb, dim, &ple_host_[(size_t)t * E + (size_t)h * dim]);
+        }
+      }
+    }
+    CL_CHECK(clEnqueueWriteBuffer(cl_.queue, ple_emb_, CL_TRUE, 0, (size_t)T * E * 4, ple_host_.data(), 0, nullptr, nullptr));
+    ple_prev_[1] = T >= 2 ? tokens[T - 2] : ple_prev_[0];
+    ple_prev_[0] = tokens[T - 1];
+    const int32_t v[2] = {ple_prev_[0] + 1, ple_prev_[1] + 1};
+    CL_CHECK(clEnqueueWriteBuffer(cl_.queue, layers_[hp.ple_layer].conv_state, CL_TRUE, ple_tok_off(), 8, v, 0, nullptr,
+                                  nullptr));
+  }
+  // the PLE block on the residual streams (before the layer's first mixer): gates from the key / query match, then
+  // the dilated causal conv over the normed gated values (history in the layer's state)
+  void ple_block(Layer& L, int T, int Mp) {
+    const int E = hp.n_embd, W = hp.hce(), a32 = act32_for(false);
+    quant_rows(ple_emb_, E, Mp, T, a32);
+    matmul("ple_key", L.ple_key, Mp, hc_gate_, W, 0, 0, a32);
+    matmul("ple_value", L.ple_value, Mp, hco_, E, 0, 0, a32);
+    float eps = hp.eps;
+    {
+      cl_kernel k = kernel("ops", "", "ple_gate");
+      int e = E, hc = hp.hc_n;
+      set_args(k, 0, hc_gate_, hco_, x_, L.ple_nk, L.ple_nq, L.ple_nc, e, hc, eps, hc_xn_, big_);
+      size_t gws[2] = {256, (size_t)T}, lws[2] = {256, 1};
+      run("ple", k, 2, gws, lws);
+    }
+    {
+      cl_kernel k = kernel("ops", "", "ple_conv_add");
+      int w = W, nt = hp.ple_taps, dil = hp.ple_ng, hist = ple_hist();
+      set_args(k, 0, x_, hc_xn_, big_, ple_hist_, L.ple_cw, w, nt, dil, hist);
+      size_t gws[2] = {(size_t)W, (size_t)T};
+      run("ple", k, 2, gws, nullptr);
+    }
+    {
+      cl_kernel k = kernel("ops", "", "ple_hist_update");
+      int w = W, tt = T, hist = ple_hist();
+      set_args(k, 0, ple_hist_, big_, w, tt, hist);
+      size_t g1 = W;
+      run("ple", k, 1, &g1, nullptr);
+    }
+  }
+
   void layer_gdn(Layer& L, int T, int Mp) {
     const int E = hp.n_embd, C = hp.conv_dim(), nv = hp.ssm_nv, nk = hp.ssm_nk, Di = hp.ssm_d_inner;
     float eps = hp.eps;
     const int a_in = act32_for(false);
-    rmsnorm_quant(x_, 0, L.attn_norm, E, Mp, T, a_in);
+    if (!hp.hc) rmsnorm_quant(x_, 0, L.attn_norm, E, Mp, T, a_in);
     // (one token with the stacked weights: one GEMV, the outputs are views of qz_out_)
     cl_mem bigc = big_, zc = z_, gbc = gb_;
     if (cur_T_ == 1 && L.qz.raw) {
@@ -2692,14 +3072,109 @@ class Engine {
       size_t gws[2] = {256, (size_t)Mp}, lws[2] = {256, 1};
       run("gated_norm_quant", k_gnorm_, 2, gws, lws);
     }
-    matmul("gemm_ssm_out", L.ssm_out, Mp, x_, E, 0, true, a_out);
+    matmul("gemm_ssm_out", L.ssm_out, Mp, hp.hc ? hco_ : x_, E, 0, hp.hc ? 0 : 1, a_out);
+  }
+
+  // ---- Flash Next QSA. The indexer rows of the pass (one GEMM over the block input), the pooled keys of the blocks it
+  // completes, the tail state, the queries; when some row sees more blocks than it may select, its scores and mask.
+  // Returns whether the attention must use the masks (else it is dense, as while every block is selected).
+  bool qsa_prepare(Layer& L, int T, int Mp, int a_in) {
+    const int QR = L.qr, D = hp.qsa_dim, H = hp.qsa_heads, ldx = (1 + H) * D, ntop = hp.qsa_topk / QR;
+    const std::string defs = "-DQR=" + std::to_string(QR) + " -DQH=" + std::to_string(H);
+    matmul("qsa_ix", L.ix, Mp, qsa_ixo_, ldx, 0, 0, a_in);
+    float eps = hp.eps, ts = std::pow(hp.rope_base, -2.0f / hp.n_rot);
+    int p0 = pos, ld = ldx, nr = hp.n_rot;
+    const int b0 = pos / QR, b1 = (pos + T) / QR;
+    if (b1 > b0) {
+      cl_kernel k = kernel("ops", defs, "qsa_pool");
+      int bb = b0;
+      set_args(k, 0, qsa_ixo_, ld, p0, L.qtail, L.ix_kn, bb, eps, ts, nr, L.pk);
+      size_t g1 = (size_t)16 * (b1 - b0), l1 = 16;
+      run("qsa", k, 1, &g1, &l1);
+    }
+    {
+      cl_kernel k = kernel("ops", defs, "qsa_tail");
+      int tt = T;
+      set_args(k, 0, qsa_ixo_, ld, p0, tt, L.qtail);
+      size_t g1 = D, l1 = D;
+      run("qsa", k, 1, &g1, &l1);
+    }
+    if (b1 <= ntop && !getenv("ARC_QSA_ALWAYS")) return false;  // every row sees at most ntop blocks: dense
+    {
+      cl_kernel k = kernel("ops", defs, "qsa_q");
+      set_args(k, 0, qsa_ixo_, ld, p0, L.ix_qn, eps, ts, nr, qsa_qx_);
+      size_t gws[2] = {(size_t)16 * H, (size_t)T}, lws[2] = {16, 1};
+      run("qsa", k, 2, gws, lws);
+    }
+    int lds = b1, qmw = qsa_mask_words(ctx), nt = ntop;
+    for (int r0 = 0; r0 < T; r0 += 256) {
+      const int R = std::min(256, T - r0);
+      int rr = r0;
+      {
+        cl_kernel k = kernel("ops", defs, "qsa_score");
+        set_args(k, 0, qsa_qx_, L.pk, rr, p0, qsa_sc_, lds);
+        size_t gws[2] = {(size_t)(lds + 63) / 64 * 64, (size_t)R}, lws[2] = {64, 1};
+        run("qsa", k, 2, gws, lws);
+      }
+      {
+        cl_kernel k = kernel("ops", defs, "qsa_select");
+        set_args(k, 0, qsa_sc_, lds, rr, p0, nt, qsa_mask_, qmw);
+        size_t gws[2] = {256, (size_t)R}, lws[2] = {256, 1};
+        run("qsa", k, 2, gws, lws);
+      }
+      static const int dbg_qsa = getenv("ARC_DBG_QSA") ? atoi(getenv("ARC_DBG_QSA")) : -1;
+      if (L.il == dbg_qsa && T > 1 && r0 + R == T) {  // (debug: scores and mask of the last row)
+        std::vector<float> sc(lds);
+        std::vector<uint32_t> mk(qmw);
+        CL_CHECK(clEnqueueReadBuffer(cl_.queue, qsa_sc_, CL_TRUE, (size_t)(R - 1) * lds * 4, (size_t)lds * 4, sc.data(), 0, nullptr, nullptr));
+        CL_CHECK(clEnqueueReadBuffer(cl_.queue, qsa_mask_, CL_TRUE, (size_t)(T - 1) * qmw * 4, (size_t)qmw * 4, mk.data(), 0, nullptr, nullptr));
+        FILE* f = fopen("qsa_dbg_gpu.bin", "wb");
+        fwrite(sc.data(), 4, lds, f);
+        for (int b = 0; b < lds; ++b) { const float v = (float)((mk[b / 32] >> (b % 32)) & 1); fwrite(&v, 4, 1, f); }
+        fclose(f);
+      }
+    }
+    return true;
+  }
+  // attention with the QSA masks: attn_q8 for prompt chunks, attn_decode row by row (key splits as attn_decode_rows)
+  void qsa_attention(Layer& L, int T) {
+    const int nh = hp.n_head, nkv = hp.n_head_kv, hd = hp.head_dim, hpg = nh / nkv, QR = L.qr;
+    const std::string q = " -DQSA -DQR=" + std::to_string(QR);
+    int qmw = qsa_mask_words(ctx);
+    if (T > 8) {
+      const std::string att = "-cl-intel-256-GRF-per-thread -DHPG=" + std::to_string(hpg) + " -DHS=" + std::to_string(attn_hs()) +
+                              " -DTPW=" + std::to_string(attn_tpw()) + sb_opt(256) + q;
+      cl_kernel k = kernel("ops", att, "attn_q8");
+      int p0 = pos, cx = ctx, nn = nh, TT = T, win = 0, nlo = -1, nhi = -1;
+      set_args(k, 0, qi_, qsc_, L.kq, L.ksc, L.vq, L.vsc, cx, nn, p0, TT, o_, win, nlo, nhi, qsa_mask_, qmw);
+      const int tpw = attn_tpw();
+      size_t gws[2] = {(size_t)(T + tpw - 1) / tpw * 512, (size_t)nkv}, lws[2] = {512, 1};
+      run("attention", k, 2, gws, lws);
+      return;
+    }
+    const int hs = attn_hs_for(hpg), nsp = hpg / hs;
+    cl_kernel kd = kernel("ops", "-cl-intel-256-GRF-per-thread -DHD=" + std::to_string(hd) + " -DHPG=" + std::to_string(hpg) +
+                                     " -DHS=" + std::to_string(hs) + " -DTPW=1" + sb_opt(hd) + q, "attn_decode");
+    int nn = nh, hdd = hd, cp = ctx, w = 0;
+    for (int t = 0; t < T; ++t) {
+      const int p = pos + t;
+      int S = 256;
+      while (S > 32 && (p / S + 1) * nkv * nsp < 512) S /= 2;
+      int kstart = 0, ns = p / S + 1, pp = p, row = t, prow = 0;
+      set_args(kd, 0, qi_, qsc_, L.kq, L.ksc, L.vq, L.vsc, cp, nn, pp, apart_, row, w, kstart, S, qsa_mask_, qmw);
+      size_t gws[2] = {(size_t)ns * 16, (size_t)(nkv * nsp)}, lws[2] = {16, (size_t)nsp};
+      run("attention", kd, 2, gws, lws);
+      set_args(k_attn_comb_, 0, apart_, ns, nn, o_, row, hdd, prow);
+      size_t g1 = (size_t)nn * hd, l1 = 64;
+      run("attn_combine", k_attn_comb_, 1, &g1, &l1);
+    }
   }
 
   void layer_attn(Layer& L, int T, int Mp) {
     const int E = hp.n_embd, nh = hp.n_head, nkv = hp.n_head_kv, hd = hp.head_dim;
     const int ldq = nh * hd * 2 + 2 * nkv * hd;
     const int a_in = act32_for(false);
-    rmsnorm_quant(x_, 0, L.attn_norm, E, Mp, T, a_in);
+    if (!hp.hc) rmsnorm_quant(x_, 0, L.attn_norm, E, Mp, T, a_in);
     matmul("gemm_q", L.wq, Mp, big_, ldq, 0, false, a_in);
     matmul("gemm_k", L.wk, Mp, big_, ldq, nh * hd * 2, false, a_in);
     matmul("gemm_v", L.wv, Mp, big_, ldq, nh * hd * 2 + nkv * hd, false, a_in);
@@ -2712,7 +3187,10 @@ class Engine {
       size_t gws[2] = {(size_t)(nh + nkv) * 16, (size_t)T}, lws[2] = {16, 1};
       run("attn_prep", k_attn_prep_, 2, gws, lws);
     }
-    if (opt.attn_int8 && T <= 8) {
+    const bool qsa = L.qr > 0 && qsa_prepare(L, T, Mp, a_in);
+    if (qsa) {
+      qsa_attention(L, T);
+    } else if (opt.attn_int8 && T <= 8) {
       // flash-decoding, token by token (single tokens and speculative verification): split the keys over many
       // sub-groups, then merge
       attn_decode_rows("attention", L, ctx, nkv, nh / nkv, hd, pos, T, 0);
@@ -2748,7 +3226,7 @@ class Engine {
       size_t gws[2] = {256, (size_t)Mp}, lws[2] = {256, 1};
       run("attn_gate_quant", k_attn_gate_, 2, gws, lws);
     }
-    matmul("gemm_o", L.wo, Mp, x_, E, 0, true, a_out);
+    matmul("gemm_o", L.wo, Mp, hp.hc ? hco_ : x_, E, 0, hp.hc ? 0 : 1, a_out);
   }
 
   void layer_ffn(Layer& L, int T, int Mp) {
@@ -2781,7 +3259,8 @@ class Engine {
     zrt::note_layer = L.il;
     zrt::note_T = T;
     const int E = hp.n_embd, F = hp.n_ff_exp, Fs = hp.n_ff_shexp, NR = hp.router_rows(), NU = hp.n_expert_used;
-    rmsnorm_quant(x_, 0, L.post_norm, E, Mp, T, 1);
+    const int Fp = hp.n_ff_exp_pad;  // (the experts' h rows and down input width: Flash Next 640 padded to 768)
+    if (!hp.hc) rmsnorm_quant(x_, 0, L.post_norm, E, Mp, T, 1);
     // router + shared expert gate/up (prompt chunks fuse silu(gate) * up into the up GEMM); one token: one GEMV
     // over the stacked rows when the layer has them (router logits at rgu_out_[0], gate / up in rgu_gu_)
     const int fused = cur_T_ > 8 ? 1 : 0;
@@ -2804,7 +3283,9 @@ class Engine {
     static const int tm_std = getenv("ARC_MOE_TM") ? atoi(getenv("ARC_MOE_TM")) : 16;  // (standard experts: slots per decoded weight; 2048-token prompt: TM 8 416, 16 473, 32 423, 64 187 tok/s)
     const int tm = T == 1 ? 1 : hp.moe_std ? tm_std : 16, n = T * NU;
     const std::string defs = "-cl-intel-256-GRF-per-thread -DNE=" + std::to_string(hp.n_expert) +
-                             " -DNU=" + std::to_string(NU) + " -DTM=" + std::to_string(tm);
+                             " -DNU=" + std::to_string(NU) + " -DTM=" + std::to_string(tm) +
+                             (Fp != F ? " -DFV=" + std::to_string(F) : std::string());
+    const std::string hld = Fp != F ? " -DHLD=" + std::to_string(Fp) : std::string();
     if (T == 1) {  // one token: its NU experts are the tiles
       cl_kernel k = kernel("moe", defs, "moe_route1");
       set_args(k, 0, rl, sgate_, mtiles_, stok_, swt_, minv_);
@@ -2867,7 +3348,7 @@ class Engine {
     } else if (hp.moe_std) {  // standard expert types (kernels/decode.cl moe_gateup_q)
       const int grows = gr_gu;
       cl_kernel k = kernel("decode", grf_env("ARC_MOE_GRF") + "-DMOE_Q -DQT=" + std::to_string(L.ex_type[0]) + " -DGROWS=" +
-                                         std::to_string(grows) + " -DTM=" + std::to_string(tm) + xdef, "moe_gateup_q");
+                                         std::to_string(grows) + " -DTM=" + std::to_string(tm) + xdef + hld, "moe_gateup_q");
       int M = Mp, K = E, FF = F;
       if (xc_) {
         set_args(k, 0, xc_->xtab[L.il], xc_->xtab[L.il], FF, K, tabs_, aq_, asc_, M, mtiles_, stok_, mh_, xc_->xtab[L.il],
@@ -2886,8 +3367,9 @@ class Engine {
     }
     {
       cl_kernel k = kernel("moe", defs, "moe_quant");
-      set_args(k, 0, mh_, F, slots_, mhq_, mhsc_);
-      size_t gws[2] = {(size_t)16 * F / 256, (size_t)n}, lws[2] = {16, 1};
+      int FF = Fp;
+      set_args(k, 0, mh_, FF, slots_, mhq_, mhsc_);
+      size_t gws[2] = {(size_t)16 * Fp / 256, (size_t)n}, lws[2] = {16, 1};
       run("moe_quant", k, 2, gws, lws);
     }
     // shared expert down: its quantized input replaces the FFN input in aq_ (the expert GEMM above has read it)
@@ -2904,7 +3386,7 @@ class Engine {
       const int grows = T == 1 ? gr_dn : 1;
       cl_kernel k = kernel("decode", "-DMOE_Q -DQT=" + std::to_string(L.ex_type[2]) + " -DGROWS=" + std::to_string(grows) +
                                          " -DTM=" + std::to_string(tm) + xdef, "moe_down_q");
-      int NN = E, K = F, S = slots_;
+      int NN = E, K = Fp, S = slots_;
       if (xc_)
         set_args(k, 0, xc_->xtab[L.il], NN, K, tabs_, mhq_, mhsc_, S, mtiles_, swt_, my_, xc_->xtab[L.il], xoff(L, 2));
       else
@@ -2919,9 +3401,21 @@ class Engine {
     }
     {
       cl_kernel k = kernel("moe", defs, "moe_combine");
-      set_args(k, 0, x_, msh_, sgate_, my_, minv_, E);
+      if (hp.hc) fill(hco_, (size_t)T * E * 4);  // (Flash Next: the block output alone, combined into the streams after)
+      set_args(k, 0, hp.hc ? hco_ : x_, msh_, sgate_, my_, minv_, E);
       size_t gws[2] = {(size_t)E, (size_t)T}, lws[2] = {256, 1};
       run("moe_combine", k, 2, gws, lws);
+    }
+    // (debug, ARC_DBG_MOE=layer: that layer's shared-expert output, its gate and the FFN output of the last row)
+    static const int dbg_moe = getenv("ARC_DBG_MOE") ? atoi(getenv("ARC_DBG_MOE")) : -1;
+    if (L.il == dbg_moe && hp.hc && T > 1) {
+      std::vector<float> a(E), b(E), g(1);
+      CL_CHECK(clEnqueueReadBuffer(cl_.queue, msh_, CL_TRUE, (size_t)(T - 1) * E * 4, E * 4, a.data(), 0, nullptr, nullptr));
+      CL_CHECK(clEnqueueReadBuffer(cl_.queue, sgate_, CL_TRUE, (size_t)(T - 1) * 4, 4, g.data(), 0, nullptr, nullptr));
+      CL_CHECK(clEnqueueReadBuffer(cl_.queue, hco_, CL_TRUE, (size_t)(T - 1) * E * 4, E * 4, b.data(), 0, nullptr, nullptr));
+      FILE* f = fopen("moe_dbg_gpu.bin", "wb");
+      fwrite(a.data(), 4, E, f); fwrite(g.data(), 4, 1, f); fwrite(b.data(), 4, E, f);
+      fclose(f);
     }
   }
 
@@ -2979,6 +3473,12 @@ class Engine {
   void head_rows(int r0, int n, cl_mem normw, cl_mem hout) {
     const int saved = cur_T_;
     cur_T_ = n;
+    if (hp.hc) {  // Flash Next: the final mixer of the streams is the output norm
+      hc_mix(out_hc_norm_, out_hc_down_, out_hc_up_, n, 16, 1, r0);
+      matmul("lm_head", lm_head_, 16, logits_, hp.n_vocab, 0, 0, true);
+      cur_T_ = saved;
+      return;
+    }
     float eps = hp.eps;
     int E = hp.n_embd, M = 16, nn = n, wh = hout ? 1 : 0, a32 = 1;
     set_args(k_rmsnorm_, 0, x_, r0, normw, E, M, nn, eps, aq_, asc_, absum_, hout ? hout : big_, wh, a32);

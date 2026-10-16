@@ -479,6 +479,16 @@ inline void dequant_row(uint32_t type, const uint8_t* row, int K, float* out) {
     }
     return;
   }
+  if (type == GGML_Q8_0 && K % 256) {  // blocks of 32 (f16 scale + 32 int8), for rows that are not whole superblocks
+    for (int b = 0; b < K / 32; ++b) {
+      const uint8_t* p = row + (size_t)b * 34;
+      uint16_t h;
+      memcpy(&h, p, 2);
+      const float d = fp16_to_f32(h);
+      for (int j = 0; j < 32; ++j) out[b * 32 + j] = d * (float)(int8_t)p[2 + j];
+    }
+    return;
+  }
   if (type == GGML_IQ4_NL) {  // blocks of 32: f16 scale, low nibbles = elements 0..15, high = 16..31, via the IQ4 table
     for (int b = 0; b < K / 32; ++b) {
       const uint8_t* p = row + (size_t)b * 18;

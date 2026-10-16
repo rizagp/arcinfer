@@ -139,6 +139,14 @@ struct XCache {
       pool_of[l] = p;
       stage_rec = std::max(stage_rec, r);
     }
+    // Many record sizes (Qwen3.8 Flash Next: 5 type mixes) would each need a pool of at least a layer's experts (see
+    // min_bytes): more than the GPU memory. Then one pool of the largest record serves every layer (a smaller record
+    // leaves the rest of its slot unused).
+    if (pools.size() > 2) {
+      pools.assign(1, Pool{});
+      pools[0].rec = stage_rec;
+      for (int l = 0; l < NL; ++l) if (pool_of[l] >= 0) pool_of[l] = 0;
+    }
     stage_bytes = 2 * stage_rec * S;
     for (int h = 0; h < 2; ++h) {
       stage[h] = (char*)zrt::host_alloc(stage_rec * S);

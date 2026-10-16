@@ -251,6 +251,11 @@ __kernel void gdn_recur(__global const float* x, int C, __global const float* ab
 
 // y = rmsnorm_head(o) * w * silu(z) per 128-dim head, quantized (K = nv*128). grid (256, M).
 __attribute__((intel_reqd_sub_group_size(SG)))
+#ifdef GATE_SIGMOID  // (Qwen3.8 Flash Next: the DeltaNet output gate is a sigmoid)
+#define GDN_GATE(z) (1.0f / (1.0f + exp(-(z))))
+#else
+#define GDN_GATE(z) silu(z)
+#endif
 __kernel void gated_norm_quant(__global const float* o, __global const float* z, __global const float* w, int K,
                                int M, int M_valid, float eps, __global char* aq, __global float* asc,
                                __global ushort* absum, int act32) {
@@ -271,7 +276,7 @@ __kernel void gated_norm_quant(__global const float* o, __global const float* z,
     ss += intel_sub_group_shuffle_xor(ss, 4);
     const float r = rsqrt(ss / 128.0f + eps);
 #pragma unroll
-    for (int i = 0; i < 16; ++i) v[i] = valid ? v[i] * r * w[d0 + i] * silu(z[(size_t)m * K + base + i]) : 0.0f;
+    for (int i = 0; i < 16; ++i) v[i] = valid ? v[i] * r * w[d0 + i] * GDN_GATE(z[(size_t)m * K + base + i]) : 0.0f;
     quant_store16(v, s, m, M, K, aq, asc, absum, act32);
   }
 }
@@ -630,9 +635,16 @@ inline uint4 pack_p(int q) {
 #endif
 
 __attribute__((intel_reqd_sub_group_size(SG)))
+#ifdef QSA  // Flash Next sparse attention: a query sees the keys of its selected blocks and of its tail block
+#define QSA_ARGS , __global const uint* qmask, int qmw
+// (block size QR; mask row `row`: bit b of word b / 32 = block b)
+#define QSA_KEEP(row, qpos, key) ((key) >= ((qpos) + 1) / QR * QR || ((qmask[(size_t)(row) * qmw + ((key) / QR) / 32] >> (((key) / QR) & 31)) & 1u))
+#else
+#define QSA_ARGS
+#endif
 __kernel void attn_q8(__global const char* qi, __global const float* qsc, __global const uint* kq,
                       __global const float* ksc, __global const uint4* vq, __global const float* vsc, int cap,
-                      int nh, int pos0, int M_valid, __global float* out, int win, int nc_lo, int nc_hi) {
+                      int nh, int pos0, int M_valid, __global float* out, int win, int nc_lo, int nc_hi QSA_ARGS) {
   // double-buffered tile: [K BLK_U uints | V BLK_U uints]; the next tile is fetched into registers while the current
   // one is processed. The per-key scales are read by every sub-group straight from the cache (L1): keeping them out
   // of SLM leaves an HD=512 tile pair at exactly 32 KB, so two work-groups fit an Xe-core's 64 KB.
@@ -698,7 +710,12 @@ __kernel void attn_q8(__global const char* qi, __global const float* qsc, __glob
     __local const uint4* Vt = (__local const uint4*)(tb + BLK_U);
     const size_t sob = ((size_t)g * nbc + (size_t)(b % nbc)) * SB * 16 + lane;  // this tile's scales
     const int key = t0 + lane;
+#ifdef QSA
+    const bool valid = key <= hi && key >= lo && QSA_KEEP(m, pos, key);
+    if (sub_group_all(!valid)) continue;  // (no key of the tile selected: nothing to add)
+#else
     const bool valid = key <= hi && key >= lo;
+#endif
 #ifndef ABL_NOQK  // ablations (timing experiments only: wrong results)
 #if HS == 4  // one address op per K load instead of two: 4 heads per sub-group spill 608 -> 0 bytes (3 heads: slower)
     __local const uint* KL = Kt + lane;
@@ -1050,7 +1067,7 @@ __kernel void attn_split(__global const char* qi, __global const float* qsc, __g
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void attn_decode(__global const char* qi, __global const float* qsc, __global const uint* kq,
                           __global const float* ksc, __global const uint4* vq, __global const float* vsc, int cap,
-                          int nh, int pos, __global float* part, int qrow, int win, int kstart, int slen) {
+                          int nh, int pos, __global float* part, int qrow, int win, int kstart, int slen QSA_ARGS) {
   const int lane = get_sub_group_local_id(), split = get_global_id(0) / SG;
   const int g = get_global_id(1) / NSP, h0 = g * HPG + (get_global_id(1) % NSP) * HS;
   const int lo = win > 0 ? max(0, pos - win + 1) : 0;
@@ -1080,7 +1097,12 @@ __kernel void attn_decode(__global const char* qi, __global const float* qsc, __
     const int bs = (t0 / 16) % nbc;
     const size_t b = blk0 + bs, sob = b * SB * 16 + lane;
     const int key = t0 + lane;
+#ifdef QSA
+    const bool valid = key < k1 && key >= lo && QSA_KEEP(qrow, pos, key);
+    if (sub_group_all(!valid)) continue;  // (no key of the tile selected: its K/V are not read)
+#else
     const bool valid = key < k1 && key >= lo;
+#endif
     QK_TILE(intel_sub_group_block_read(kq + (b * KW + c * 16 + w) * 16), sob)
 #pragma unroll
     for (int r = 0; r < HS; ++r) {
@@ -2427,14 +2449,14 @@ __kernel void a4_glu_dw(__global const float* h, int E, int K, __global const fl
 // one stream.
 
 // xn = per-stream RMS norm of res times w ([HC][E]), stored as f32 and quantized for the low-rank down projection
-// (K = HC*E). grid (256, M), local (256, 1); rows >= M_valid store zeros.
+// (K = HC*E); source rows r0 + m. grid (256, M), local (256, 1); rows >= M_valid store zeros.
 __attribute__((intel_reqd_sub_group_size(SG)))
-__kernel void hc_norm_quant(__global const float* res, __global const float* w, int E, int HC, int M, int M_valid,
-                            float eps, __global float* xn, __global char* aq, __global float* asc,
+__kernel void hc_norm_quant(__global const float* res, int r0, __global const float* w, int E, int HC, int M,
+                            int M_valid, float eps, __global float* xn, __global char* aq, __global float* asc,
                             __global ushort* absum, int act32) {
   const int m = get_group_id(1), HCE = HC * E, lane = get_sub_group_local_id(), sg = get_sub_group_id();
   const bool valid = m < M_valid;
-  __global const float* xr = res + (size_t)m * HCE;
+  __global const float* xr = res + (size_t)(r0 + m) * HCE;
   __local float rs[16];
   for (int c = 0; c < HC; ++c) {
     float ss = 0.0f;
@@ -2456,10 +2478,10 @@ __kernel void hc_norm_quant(__global const float* res, __global const float* w, 
   }
 }
 
-// silu(lo / HC) of the low-rank activations ([M][LR]), padded with zeros to KP (a multiple of 256) and quantized
+// silu(lo / HC) of the low-rank activations ([M][LR], row stride LD), padded with zeros to KP (a multiple of 256) and quantized
 // for the up projection. grid (16 * KP / 256, M), local (16, 1).
 __attribute__((intel_reqd_sub_group_size(SG)))
-__kernel void hc_lo_quant(__global const float* lo, int LR, int KP, int HC, int M, int M_valid, __global char* aq,
+__kernel void hc_lo_quant(__global const float* lo, int LR, int LD, int KP, int HC, int M, int M_valid, __global char* aq,
                           __global float* asc, __global ushort* absum, int act32) {
   const int m = get_global_id(1), s = get_group_id(0), lane = get_sub_group_local_id();
   const float inv_hc = 1.0f / (float)HC;
@@ -2467,7 +2489,7 @@ __kernel void hc_lo_quant(__global const float* lo, int LR, int KP, int HC, int 
 #pragma unroll
   for (int i = 0; i < 16; ++i) {
     const int k = s * 256 + 16 * lane + i;
-    v[i] = m < M_valid && k < LR ? silu(lo[(size_t)m * LR + k] * inv_hc) : 0.0f;
+    v[i] = m < M_valid && k < LR ? silu(lo[(size_t)m * LD + k] * inv_hc) : 0.0f;
   }
   quant_store16(v, s, m, M, KP, aq, asc, absum, act32);
 }
@@ -2498,10 +2520,230 @@ __kernel void hc_gate_mean_quant(__global const float* xn, __global const float*
   }
 }
 
-// res[m][c] += 2 sigmoid(inject[m][c] / HC) * out[m] for rows < M_valid. grid (HC * E, M_valid).
-__kernel void hc_combine(__global float* res, __global const float* out, __global const float* inject, int E,
-                         int HC) {
+// res[m][c] += 2 sigmoid(inject[m][c] / HC) * out[m] for rows < M_valid (inject logits: column off of rows of stride
+// ld). grid (HC * E, M_valid).
+__kernel void hc_combine(__global float* res, __global const float* out, __global const float* inject, int ld,
+                         int off, int E, int HC) {
   const int j = get_global_id(0), m = get_global_id(1), c = j / E, i = j % E;
-  const float w = 2.0f / (1.0f + exp(-inject[(size_t)m * HC + c] / (float)HC));
+  const float w = 2.0f / (1.0f + exp(-inject[(size_t)m * ld + off + c] / (float)HC));
   res[(size_t)m * HC * E + j] += w * out[(size_t)m * E + i];
+}
+
+// ---- Flash Next PLE (n-gram embedding block of one layer; docs/flash-next-spec.md, llama.cpp qwen4exp)
+// Per row m < M_valid and stream c: s = <rmsnorm(key_c) * wk_c, rmsnorm(res_c) * wq_c> / sqrt(E), gate =
+// sigmoid(sign(s) * sqrt(max(|s|, 1e-6))), gated_c = value * gate, nrm_c = rmsnorm(gated_c) * wc_c.
+// key [M][HC*E], value [M][E], res [M][HC*E]; gated, nrm [M][HC*E]. grid (256, M_valid), local (256, 1).
+__kernel void ple_gate(__global const float* key, __global const float* value, __global const float* res,
+                       __global const float* wk, __global const float* wq, __global const float* wc, int E, int HC,
+                       float eps, __global float* gated, __global float* nrm) {
+  const int m = get_group_id(1), HCE = HC * E, li = get_local_id(0), ls = get_local_size(0);
+  __global const float* kr = key + (size_t)m * HCE;
+  __global const float* qr = res + (size_t)m * HCE;
+  __global const float* vr = value + (size_t)m * E;
+  for (int c = 0; c < HC; ++c) {
+    float kk = 0.0f, qq = 0.0f, kq = 0.0f;
+    for (int i = li; i < E; i += ls) {
+      const float a = kr[c * E + i], b = qr[c * E + i];
+      kk += a * a;
+      qq += b * b;
+      kq += a * wk[c * E + i] * b * wq[c * E + i];
+    }
+    kk = work_group_reduce_add(kk);
+    qq = work_group_reduce_add(qq);
+    kq = work_group_reduce_add(kq);
+    const float s = kq * rsqrt(kk / E + eps) * rsqrt(qq / E + eps) / sqrt((float)E);
+    const float g = 1.0f / (1.0f + exp(-(s < 0.0f ? -1.0f : s > 0.0f ? 1.0f : 0.0f) * sqrt(fmax(fabs(s), 1e-6f))));
+    float gg = 0.0f;
+    for (int i = li; i < E; i += ls) {
+      const float v = vr[i] * g;
+      gated[(size_t)m * HCE + c * E + i] = v;
+      gg += v * v;
+    }
+    gg = work_group_reduce_add(gg);
+    const float r = rsqrt(gg / E + eps);
+    for (int i = li; i < E; i += ls) nrm[(size_t)m * HCE + c * E + i] = vr[i] * g * r * wc[c * E + i];
+  }
+}
+
+// res[m][ch] += gated[m][ch] + silu(sum_k w[ch][k] * nrm(m - (NTAP-1-k) * DIL)[ch]) for rows < T: a depthwise causal
+// conv over the rows of this chunk and, before them, the history hist [HIST][HCE] (the last HIST rows of earlier
+// positions, oldest first; zeros at the start of a sequence). grid (HCE, T).
+__kernel void ple_conv_add(__global float* res, __global const float* gated, __global const float* nrm,
+                           __global const float* hist, __global const float* w, int HCE, int NTAP, int DIL, int HIST) {
+  const int ch = get_global_id(0), m = get_global_id(1);
+  float acc = 0.0f;
+  for (int k = 0; k < NTAP; ++k) {
+    const int t = m - (NTAP - 1 - k) * DIL;
+    const float v = t >= 0 ? nrm[(size_t)t * HCE + ch] : t + HIST >= 0 ? hist[(size_t)(t + HIST) * HCE + ch] : 0.0f;
+    acc += w[(size_t)ch * NTAP + k] * v;
+  }
+  res[(size_t)m * HCE + ch] += gated[(size_t)m * HCE + ch] + acc / (1.0f + exp(-acc));
+}
+
+// hist = the last HIST rows of [hist; nrm[0..T)], in place (each work-item owns one channel). grid (HCE).
+__kernel void ple_hist_update(__global float* hist, __global const float* nrm, int HCE, int T, int HIST) {
+  const int ch = get_global_id(0);
+  float h[16];
+  for (int j = 0; j < HIST; ++j) {
+    const int t = T - HIST + j;  // row of the combined sequence relative to the chunk start
+    h[j] = t >= 0 ? nrm[(size_t)t * HCE + ch] : hist[(size_t)(t + HIST) * HCE + ch];
+  }
+  for (int j = 0; j < HIST; ++j) hist[(size_t)j * HCE + ch] = h[j];
+}
+
+// ---- Flash Next QSA (sparse attention, llama.cpp qwen4exp build_qsa_sel; docs/flash-next-spec.md). The indexer keys
+// of blocks of QR consecutive positions are pooled (mean of the raw keys, RMS norm, RoPE at the block's first
+// position); a query scores every complete block it can see (sum over the indexer heads of relu(q . k) / sqrt(dim))
+// and attends to the keys of its top blocks and of its incomplete tail block. Indexer rows ixo [M][ldx]: raw key
+// (QD floats) at column 0, the QH query heads after it. A lane holds dims lane + 16 j (QD = 128): RoPE pairs (i, i +
+// n_rot / 2) are then in one lane.
+#ifndef QD
+#define QD 128
+#endif
+#ifndef QR  // (block size and indexer heads: the engine passes the model's)
+#define QR 4
+#endif
+#ifndef QH
+#define QH 4
+#endif
+#define QJ (QD / 16)
+inline void qsa_norm_rope(float* v, __global const float* w, float eps, int p, float theta_scale, int n_rot) {
+  const int lane = get_sub_group_local_id();
+  float ss = 0.0f;
+#pragma unroll
+  for (int j = 0; j < QJ; ++j) ss += v[j] * v[j];
+  const float r = rsqrt(sub_group_reduce_add(ss) / QD + eps);
+#pragma unroll
+  for (int j = 0; j < QJ; ++j) v[j] *= r * w[lane + 16 * j];
+  const int jh = n_rot / 32;  // (pairs (i, i + n_rot / 2): lane values j, j + jh; n_rot a multiple of 32)
+#pragma unroll
+  for (int j = 0; j < QJ; ++j)
+    if (j < jh) {
+      const float theta = (float)p * pow(theta_scale, (float)(lane + 16 * j));
+      const float c = cos(theta), sn = sin(theta), a = v[j], b = v[j + jh];
+      v[j] = a * c - b * sn;
+      v[j + jh] = a * sn + b * c;
+    }
+}
+// pooled keys of the blocks b0 .. b0 + get_num_groups(0) - 1 (complete within positions < pos0 + T); positions
+// before pos0 come from the tail state (positions pos0 / QR * QR .. pos0 - 1). grid (16 * blocks), local (16).
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void qsa_pool(__global const float* ixo, int ldx, int pos0, __global const float* tail, __global const float* kn,
+                       int b0, float eps, float theta_scale, int n_rot, __global float* pk) {
+  const int b = b0 + get_group_id(0), lane = get_sub_group_local_id(), t0 = pos0 / QR * QR;
+  float v[QJ];
+#pragma unroll
+  for (int j = 0; j < QJ; ++j) v[j] = 0.0f;
+  for (int i = 0; i < QR; ++i) {
+    const int p = b * QR + i;
+#pragma unroll
+    for (int j = 0; j < QJ; ++j) v[j] += p >= pos0 ? ixo[(size_t)(p - pos0) * ldx + lane + 16 * j] : tail[(p - t0) * QD + lane + 16 * j];
+  }
+#pragma unroll
+  for (int j = 0; j < QJ; ++j) v[j] *= 1.0f / QR;
+  qsa_norm_rope(v, kn, eps, b * QR, theta_scale, n_rot);
+#pragma unroll
+  for (int j = 0; j < QJ; ++j) pk[(size_t)b * QD + lane + 16 * j] = v[j];
+}
+// the tail state after the chunk: raw keys of positions (pos0 + T) / QR * QR .. pos0 + T - 1. grid (QD), one group.
+__kernel void qsa_tail(__global const float* ixo, int ldx, int pos0, int T, __global float* tail) {
+  const int d = get_global_id(0), t0 = pos0 / QR * QR, n0 = (pos0 + T) / QR * QR;
+  float h[QR];
+  for (int i = 0; i < QR - 1; ++i) {
+    const int p = n0 + i;
+    h[i] = p >= pos0 + T ? 0.0f : p >= pos0 ? ixo[(size_t)(p - pos0) * ldx + d] : tail[(p - t0) * QD + d];
+  }
+  for (int i = 0; i < QR - 1; ++i) tail[i * QD + d] = h[i];
+}
+// indexer queries: RMS norm + RoPE per head. grid (16 * QH, T), local (16, 1).
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void qsa_q(__global const float* ixo, int ldx, int pos0, __global const float* qn, float eps, float theta_scale,
+                    int n_rot, __global float* qx) {
+  const int m = get_global_id(1), hh = get_group_id(0), lane = get_sub_group_local_id();
+  float v[QJ];
+#pragma unroll
+  for (int j = 0; j < QJ; ++j) v[j] = ixo[(size_t)m * ldx + QD + hh * QD + lane + 16 * j];
+  qsa_norm_rope(v, qn, eps, pos0 + m, theta_scale, n_rot);
+#pragma unroll
+  for (int j = 0; j < QJ; ++j) qx[((size_t)m * QH + hh) * QD + lane + 16 * j] = v[j];
+}
+// scores of rows r0 .. r0 + R - 1 against the blocks they see (else -1). grid (blocks rounded to 64, R), local (64, 1).
+__kernel void qsa_score(__global const float* qx, __global const float* pk, int r0, int pos0, __global float* sc, int lds) {
+  const int b = get_global_id(0), i = get_global_id(1), m = r0 + i, nv = (pos0 + m + 1) / QR;
+  __local float q[QH * QD];
+  for (int k = get_local_id(0); k < QH * QD; k += get_local_size(0)) q[k] = qx[(size_t)m * QH * QD + k];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (b >= lds) return;
+  float s = -1.0f;
+  if (b < nv) {
+    __global const float4* kp = (__global const float4*)(pk + (size_t)b * QD);
+    s = 0.0f;
+    for (int hh = 0; hh < QH; ++hh) {
+      float d = 0.0f;
+      for (int k = 0; k < QD / 4; ++k) {
+        const float4 kv = kp[k];
+        d += q[hh * QD + 4 * k] * kv.x + q[hh * QD + 4 * k + 1] * kv.y + q[hh * QD + 4 * k + 2] * kv.z + q[hh * QD + 4 * k + 3] * kv.w;
+      }
+      s += fmax(d, 0.0f);
+    }
+    s *= rsqrt((float)QD);
+  }
+  sc[(size_t)i * lds + b] = s;
+}
+// the mask of row r0 + i: its top `ntop` visible blocks (ties: the lower blocks), all of them when it sees no more.
+// Exact selection by a radix select on the score bits (scores >= 0, so their bits sort as the values). mask
+// [M][qmw] words, bit b = block b. grid (256, R), local (256, 1).
+__kernel void qsa_select(__global const float* sc, int lds, int r0, int pos0, int ntop, __global uint* mask, int qmw) {
+  const int i = get_group_id(1), m = r0 + i, lid = get_local_id(0), nv = (pos0 + m + 1) / QR;
+  __global const uint* su = (__global const uint*)(sc + (size_t)i * lds);
+  __local uint hist[256];
+  __local uint sel[2];  // prefix, rank left
+  uint prefix = 0, pmask = 0, k = (uint)ntop;
+  const bool all = nv <= ntop;
+  if (!all)
+    for (int shift = 24; shift >= 0; shift -= 8) {
+      hist[lid] = 0;
+      barrier(CLK_LOCAL_MEM_FENCE);
+      for (int b = lid; b < nv; b += 256) {
+        const uint u = su[b];
+        if ((u & pmask) == prefix) atomic_inc(&hist[(u >> shift) & 255]);
+      }
+      barrier(CLK_LOCAL_MEM_FENCE);
+      if (lid == 0) {
+        uint cum = 0;
+        int bin = 255;
+        for (; bin > 0; --bin) {
+          if (cum + hist[bin] >= k) break;
+          cum += hist[bin];
+        }
+        sel[0] = prefix | ((uint)bin << shift);
+        sel[1] = k - cum;
+      }
+      barrier(CLK_LOCAL_MEM_FENCE);
+      prefix = sel[0];
+      k = sel[1];
+      pmask |= 255u << shift;
+      barrier(CLK_LOCAL_MEM_FENCE);
+    }
+  // prefix = the ntop-th largest score; k = how many of the scores equal to it are taken (the lowest blocks)
+  const int nw = (nv + 31) / 32, per = (nw + 255) / 256, w0 = lid * per, w1 = min(nw, w0 + per);
+  uint eq = 0;
+  if (!all)
+    for (int b = w0 * 32; b < min(nv, w1 * 32); ++b) eq += su[b] == prefix;
+  uint before = work_group_scan_exclusive_add(eq);
+  for (int w = w0; w < w1; ++w) {
+    uint bits = 0;
+    for (int j = 0; j < 32; ++j) {
+      const int b = w * 32 + j;
+      if (b >= nv) break;
+      bool take = all;
+      if (!all) {
+        const uint u = su[b];
+        take = u > prefix;
+        if (u == prefix) { take = before < k; ++before; }
+      }
+      bits |= (take ? 1u : 0u) << j;
+    }
+    mask[(size_t)m * qmw + w] = bits;
+  }
 }

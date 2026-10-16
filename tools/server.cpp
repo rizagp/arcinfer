@@ -1859,6 +1859,9 @@ static std::vector<ModelInfo> scan_models() {
       drafter = drafter || f.rfind("mtp-", 0) == 0;
     }
     m.supported = m.arch == "qwen35" || m.arch == "qwen35moe" || m.arch == "gemma4";  // (MoE: GSQ or standard experts)
+#ifdef ARC_ZERO
+    m.supported = m.supported || m.arch == "qwen4exp";  // (Qwen3.8 Flash Next: arcinferzero only, experts streamed)
+#endif
     (void)gsq;
     m.vision = mmproj;  // (Gemma 4 12B: gemma4uv; E2B / E4B: gemma4v)
     m.mtp = (m.arch == "gemma4" && drafter) || nextn > 0;
@@ -2138,7 +2141,7 @@ static int list_models() {
     j.set("ctx", a.ctx);
     if (m.supported) {  // the values the server picks for this variant when not given (the launcher fills them in)
       Json d = Json::object();
-      const bool moe = m.arch == "qwen35moe", gemma = m.arch == "gemma4";
+      const bool moe = m.arch == "qwen35moe" || m.arch == "qwen4exp", gemma = m.arch == "gemma4";
       int64_t n_embd = 0;
       std::string pt;  // image projector type
       try {

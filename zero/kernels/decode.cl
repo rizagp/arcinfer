@@ -1342,6 +1342,9 @@ inline float moe_term(uint8 a8, const uint* w, float d, float dmin, int sc0, int
 #endif
 }
 
+#ifndef HLD  // row stride of h (Flash Next: F = 640 rows, stored in rows of 768 for the padded down projection)
+#define HLD F
+#endif
 // h[slot][F] = silu(x W_gate_e^T) * (x W_up_e^T); x rows are the slots' tokens (aq [token][K], per-32 scales asc
 // [K/32][M]); rg / ru: [NE * F] rows of K.
 __attribute__((intel_reqd_sub_group_size(16)))
@@ -1416,7 +1419,7 @@ __kernel void moe_gateup_q(__global const uchar* rg, __global const uchar* ru, i
     for (int m = 0; m < TM; ++m) {
       const float g = sub_group_reduce_add(ag[r][m]), u = sub_group_reduce_add(au[r][m]);
       const int n = n0 + r;
-      if (lane == 0 && n < F && m < nr) h[(size_t)(r0 + m) * F + n] = g / (1.0f + exp(-g)) * u;
+      if (lane == 0 && n < F && m < nr) h[(size_t)(r0 + m) * HLD + n] = g / (1.0f + exp(-g)) * u;
     }
 }
 

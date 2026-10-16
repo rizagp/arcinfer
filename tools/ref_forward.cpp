@@ -369,6 +369,9 @@ static void qwen4exp_layers(const std::vector<int>& toks, std::vector<float>& x)
   }
 
   std::vector<float> mixed, inject, out;
+  // (REF_DUMP=file: the residual streams of the last token after each block, as runz ARC_DUMP_ROWS writes them)
+  FILE* fdump = getenv("REF_DUMP") ? fopen(getenv("REF_DUMP"), "wb") : nullptr;
+  auto dump_res = [&]() { if (fdump) fwrite(&res[(size_t)(T - 1) * HD], 4, HD, fdump); };
   for (int il = 0; il < nl; ++il) {
     const std::string p = "blk." + std::to_string(il) + ".";
     if (il == ple_layer) {
@@ -486,20 +489,81 @@ static void qwen4exp_layers(const std::vector<int>& toks, std::vector<float>& x)
           rope(d, t);
         }
       }
+      // QSA (llama.cpp qwen4exp build_qsa_sel): the indexer scores blocks of `ratio` cells (pooled raw keys, normed and
+      // rotated at the block's first position) per query; a query attends to the cells of its top (top_k / ratio)
+      // complete blocks and to the cells of its incomplete tail block. While every block is selected this is dense.
+      std::vector<uint8_t> allow;  // [T][T], empty: dense
+      const auto* cr = F->get_ints(A + ".attention.compress_ratios");
+      const int ratio = cr && il < (int)cr->size() ? (int)(*cr)[il] : 0;
+      if (ratio > 0 && F->find(p + "indexer.k_proj.weight") && !getenv("REF_DENSE")) {
+        const int ih = hp("attention.indexer.head_count"), id = hp("attention.indexer.key_length");
+        const int ntop = (getenv("REF_TOPK") ? atoi(getenv("REF_TOPK")) : hp("attention.indexer.top_k")) / ratio, nb = T / ratio;
+        std::vector<float> kr, qi;
+        matmul(p + "indexer.k_proj.weight", h, T, kr);
+        matmul(p + "indexer.q_proj.weight", h, T, qi);
+        auto ikn = vecf(p + "indexer.k_norm.weight"), iqn = vecf(p + "indexer.q_norm.weight");
+        std::vector<float> pk((size_t)nb * id, 0.0f);
+        for (int b = 0; b < nb; ++b) {
+          float* d = &pk[(size_t)b * id];
+          for (int j = 0; j < ratio; ++j)
+            for (int i = 0; i < id; ++i) d[i] += kr[(size_t)(b * ratio + j) * id + i];
+          for (int i = 0; i < id; ++i) d[i] /= (float)ratio;
+          rmsnorm(d, id, ikn.data(), eps);
+          rope(d, b * ratio);
+        }
+        for (int t = 0; t < T; ++t)
+          for (int hh = 0; hh < ih; ++hh) {
+            float* d = &qi[((size_t)t * ih + hh) * id];
+            rmsnorm(d, id, iqn.data(), eps);
+            rope(d, t);
+          }
+        allow.assign((size_t)T * T, 0);
+#pragma omp parallel for
+        for (int t = 0; t < T; ++t) {
+          const int nv = (t + 1) / ratio;  // complete blocks visible to t
+          std::vector<std::pair<double, int>> sc(nv);
+          for (int b = 0; b < nv; ++b) {
+            double acc = 0;
+            for (int hh = 0; hh < ih; ++hh) {
+              double dd = 0;
+              for (int i = 0; i < id; ++i) dd += (double)qi[((size_t)t * ih + hh) * id + i] * pk[(size_t)b * id + i];
+              acc += std::max(dd, 0.0);
+            }
+            sc[b] = {acc / std::sqrt((double)id), b};
+          }
+          // the top blocks, ties to the lower block (any choice is the model's: llama.cpp's top_k is unordered)
+          if (t == T - 1 && getenv("REF_DBG_QSA") && atoi(getenv("REF_DBG_QSA")) == il) {
+            FILE* f = fopen("qsa_dbg_ref.bin", "wb");
+            for (auto& x : sc) { const float v = (float)x.first; fwrite(&v, 4, 1, f); }
+            std::vector<std::pair<double, int>> s2 = sc;
+            std::stable_sort(s2.begin(), s2.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+            std::vector<float> on(nv, 0.0f);
+            for (int k = 0; k < std::min(nv, ntop); ++k) on[s2[k].second] = 1.0f;
+            fwrite(on.data(), 4, nv, f);
+            fclose(f);
+          }
+          std::stable_sort(sc.begin(), sc.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+          for (int k = 0; k < std::min(nv, ntop); ++k)
+            for (int j = 0; j < ratio; ++j) allow[(size_t)t * T + sc[k].second * ratio + j] = 1;
+          for (int u = nv * ratio; u <= t; ++u) allow[(size_t)t * T + u] = 1;
+        }
+      }
       std::vector<float> att((size_t)T * nh * hd);
+#pragma omp parallel for collapse(2) schedule(dynamic, 4)
       for (int t = 0; t < T; ++t)
         for (int hh = 0; hh < nh; ++hh) {
           const int g = hh / (nh / nkv);
           std::vector<double> sc(t + 1);
           double mx = -1e300;
           for (int u = 0; u <= t; ++u) {
+            if (!allow.empty() && !allow[(size_t)t * T + u]) { sc[u] = -1e300; continue; }
             double s = 0;
             for (int i = 0; i < hd; ++i) s += (double)q[((size_t)t * nh + hh) * hd + i] * kk[(size_t)u * nkv * hd + g * hd + i];
             sc[u] = s / std::sqrt((double)hd);
             mx = std::max(mx, sc[u]);
           }
           double zz = 0;
-          for (auto& s : sc) { s = std::exp(s - mx); zz += s; }
+          for (auto& s : sc) { s = s <= -1e299 ? 0.0 : std::exp(s - mx); zz += s; }
           for (int i = 0; i < hd; ++i) {
             double acc = 0;
             for (int u = 0; u <= t; ++u) acc += sc[u] * vv[(size_t)u * nkv * hd + g * hd + i];
@@ -510,14 +574,21 @@ static void qwen4exp_layers(const std::vector<int>& toks, std::vector<float>& x)
       matmul(p + "attn_output.weight", att, T, out);
     }
     hc_combine(out, inject);
+    dump_res();
 
     // MoE: router softmax top-k (renormalized) + the sigmoid-gated shared expert
     hc_mix(p + "hc_ffn", mixed, &inject);
+    if (getenv("REF_DBG_MOE") && atoi(getenv("REF_DBG_MOE")) == il) {
+      FILE* f = fopen("mix_dbg_ref.bin", "wb");
+      fwrite(&mixed[(size_t)(T - 1) * E], 4, E, f); fwrite(&inject[(size_t)(T - 1) * HC], 4, HC, f);
+      fclose(f);
+    }
     std::vector<float> g, u, d;
     matmul(p + "ffn_gate_shexp.weight", h, T, g);
     matmul(p + "ffn_up_shexp.weight", h, T, u);
     for (size_t i = 0; i < g.size(); ++i) g[i] = silu(g[i]) * u[i];
     matmul(p + "ffn_down_shexp.weight", g, T, d);
+    const std::vector<float> d_sh = d;
     const int NE = hp("expert_count"), NU = hp("expert_used_count"), Fe = hp("expert_feed_forward_length");
     auto sgw = vecf(p + "ffn_gate_inp_shexp.weight");
     std::vector<float> rl;
@@ -547,9 +618,20 @@ static void qwen4exp_layers(const std::vector<int>& toks, std::vector<float>& x)
         for (int i = 0; i < E; ++i) dt[i] += w * de[i];
       }
     }
+    if (getenv("REF_DBG_MOE") && atoi(getenv("REF_DBG_MOE")) == il) {
+      const float* ht = &h[(size_t)(T - 1) * E];
+      double sg = 0;
+      for (int i = 0; i < E; ++i) sg += (double)sgw[i] * ht[i];
+      const float sgf = (float)sig(sg);
+      FILE* f = fopen("moe_dbg_ref.bin", "wb");
+      fwrite(&d_sh[(size_t)(T - 1) * E], 4, E, f); fwrite(&sgf, 4, 1, f); fwrite(&d[(size_t)(T - 1) * E], 4, E, f);
+      fclose(f);
+    }
     hc_combine(d, inject);
+    dump_res();
     fprintf(stderr, "\rlayer %d/%d", il + 1, nl);
   }
+  if (fdump) fclose(fdump);
   // the final mixer is the output norm
   hc_mix("output_hc", mixed, nullptr);
   x = mixed;

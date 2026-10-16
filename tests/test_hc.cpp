@@ -51,7 +51,8 @@ int main(int argc, char** argv) {
     cl_kernel k = cl.kernel(prog, "hc_norm_quant");
     int e = E, hc = HC, mm = M, mv = Mv, a32 = 1;
     float ep = eps;
-    set_args(k, 0, bres, bw, e, hc, mm, mv, ep, bxn, baq, basc, babs, a32);
+    int r0 = 0;
+    set_args(k, 0, bres, r0, bw, e, hc, mm, mv, ep, bxn, baq, basc, babs, a32);
     size_t gws[2] = {256, (size_t)M}, lws[2] = {256, 1};
     CL_CHECK(clEnqueueNDRangeKernel(cl.queue, k, 2, nullptr, gws, lws, 0, nullptr, nullptr));
     std::vector<int8_t> aq((size_t)M * HD);
@@ -79,7 +80,7 @@ int main(int argc, char** argv) {
     cl_mem basc = cl.buffer(CL_MEM_READ_WRITE, (size_t)(KP / 32) * M * 4), babs = cl.buffer(CL_MEM_READ_WRITE, (size_t)(KP / 16) * M * 2);
     cl_kernel k = cl.kernel(prog, "hc_lo_quant");
     int lr = LR, kp = KP, hc = HC, mm = M, mv = Mv, a32 = 1;
-    set_args(k, 0, blo, lr, kp, hc, mm, mv, baq, basc, babs, a32);
+    set_args(k, 0, blo, lr, lr, kp, hc, mm, mv, baq, basc, babs, a32);
     size_t gws[2] = {(size_t)16 * KP / 256, (size_t)M}, lws[2] = {16, 1};
     CL_CHECK(clEnqueueNDRangeKernel(cl.queue, k, 2, nullptr, gws, lws, 0, nullptr, nullptr));
     std::vector<int8_t> aq((size_t)M * KP);
@@ -131,7 +132,8 @@ int main(int argc, char** argv) {
     cl_mem bi = cl.buffer(CL_MEM_READ_ONLY, inj.size() * 4, inj.data());
     cl_kernel k = cl.kernel(prog, "hc_combine");
     int e = E, hc = HC;
-    set_args(k, 0, bres, bo, bi, e, hc);
+    int ld = HC, off = 0;
+    set_args(k, 0, bres, bo, bi, ld, off, e, hc);
     size_t gws[2] = {(size_t)HD, (size_t)Mv};
     CL_CHECK(clEnqueueNDRangeKernel(cl.queue, k, 2, nullptr, gws, nullptr, 0, nullptr, nullptr));
     std::vector<float> got(res.size());
@@ -145,6 +147,70 @@ int main(int argc, char** argv) {
     const double er = rel_err(got, ref);
     printf("hc_combine: rel err %.2e %s\n", er, er < 1e-6 ? "OK" : "FAIL");
     fails += !(er < 1e-6);
+  }
+  // PLE block: ple_gate, then ple_conv_add over two chunks (the second reads the history the first left)
+  {
+    const int T1 = 5, T2 = 6, TT = T1 + T2, NTAP = 4, DIL = 3, HIST = 9;
+    auto key = rnd((size_t)TT * HD, 1.5f), val = rnd((size_t)TT * E, 1.0f), rs = rnd((size_t)TT * HD, 2.0f);
+    auto wk = rnd(HD, 0.2f), wq = rnd(HD, 0.2f), wc = rnd(HD, 0.2f), cw = rnd((size_t)HD * NTAP, 0.5f);
+    for (auto* v : {&wk, &wq, &wc}) for (auto& x : *v) x += 1.0f;
+    // CPU reference over all TT rows at once
+    std::vector<double> gated((size_t)TT * HD), nrm((size_t)TT * HD), want(rs.begin(), rs.end());
+    for (int m = 0; m < TT; ++m)
+      for (int c = 0; c < HC; ++c) {
+        const float* k = &key[(size_t)m * HD + c * E];
+        const float* q = &rs[(size_t)m * HD + c * E];
+        double kk = 0, qq = 0;
+        for (int i = 0; i < E; ++i) { kk += (double)k[i] * k[i]; qq += (double)q[i] * q[i]; }
+        const double rk = 1.0 / std::sqrt(kk / E + eps), rq = 1.0 / std::sqrt(qq / E + eps);
+        double sdot = 0;
+        for (int i = 0; i < E; ++i) sdot += k[i] * rk * wk[c * E + i] * q[i] * rq * wq[c * E + i];
+        sdot /= std::sqrt((double)E);
+        const double g = 1.0 / (1.0 + std::exp(-(sdot < 0 ? -1.0 : sdot > 0 ? 1.0 : 0.0) * std::sqrt(std::max(std::fabs(sdot), 1e-6))));
+        double gg = 0;
+        for (int i = 0; i < E; ++i) { gated[(size_t)m * HD + c * E + i] = val[(size_t)m * E + i] * g; gg += std::pow(val[(size_t)m * E + i] * g, 2); }
+        const double r = 1.0 / std::sqrt(gg / E + eps);
+        for (int i = 0; i < E; ++i) nrm[(size_t)m * HD + c * E + i] = gated[(size_t)m * HD + c * E + i] * r * wc[c * E + i];
+      }
+    for (int m = 0; m < TT; ++m)
+      for (int ch = 0; ch < HD; ++ch) {
+        double acc = 0;
+        for (int k = 0; k < NTAP; ++k) { const int t = m - (NTAP - 1 - k) * DIL; if (t >= 0) acc += cw[(size_t)ch * NTAP + k] * nrm[(size_t)t * HD + ch]; }
+        want[(size_t)m * HD + ch] += gated[(size_t)m * HD + ch] + acc / (1.0 + std::exp(-acc));
+      }
+    cl_mem bk = cl.buffer(CL_MEM_READ_ONLY, key.size() * 4, key.data()), bv = cl.buffer(CL_MEM_READ_ONLY, val.size() * 4, val.data());
+    cl_mem bres = cl.buffer(CL_MEM_READ_WRITE, rs.size() * 4, rs.data());
+    cl_mem bwk = cl.buffer(CL_MEM_READ_ONLY, HD * 4, wk.data()), bwq = cl.buffer(CL_MEM_READ_ONLY, HD * 4, wq.data()),
+           bwc = cl.buffer(CL_MEM_READ_ONLY, HD * 4, wc.data()), bcw = cl.buffer(CL_MEM_READ_ONLY, cw.size() * 4, cw.data());
+    cl_mem bg = cl.buffer(CL_MEM_READ_WRITE, (size_t)TT * HD * 4), bn = cl.buffer(CL_MEM_READ_WRITE, (size_t)TT * HD * 4);
+    std::vector<float> zero((size_t)HIST * HD, 0.0f);
+    cl_mem bh = cl.buffer(CL_MEM_READ_WRITE, zero.size() * 4, zero.data());
+    cl_kernel kg = cl.kernel(prog, "ple_gate"), kc = cl.kernel(prog, "ple_conv_add"), ku = cl.kernel(prog, "ple_hist_update");
+    for (int part = 0; part < 2; ++part) {
+      const int m0 = part ? T1 : 0, n = part ? T2 : T1;
+      cl_buffer_region rk{(size_t)m0 * HD * 4, (size_t)n * HD * 4}, rv{(size_t)m0 * E * 4, (size_t)n * E * 4};
+      cl_int err;
+      cl_mem sk = clCreateSubBuffer(bk, CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &rk, &err);
+      cl_mem sv = clCreateSubBuffer(bv, CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &rv, &err);
+      cl_mem sr = clCreateSubBuffer(bres, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &rk, &err);
+      int e = E, hc = HC, hcd = HD, nt = NTAP, dil = DIL, hist = HIST, tt = n;
+      float ep = eps;
+      set_args(kg, 0, sk, sv, sr, bwk, bwq, bwc, e, hc, ep, bg, bn);
+      size_t g1[2] = {256, (size_t)n}, l1[2] = {256, 1};
+      CL_CHECK(clEnqueueNDRangeKernel(cl.queue, kg, 2, nullptr, g1, l1, 0, nullptr, nullptr));
+      set_args(kc, 0, sr, bg, bn, bh, bcw, hcd, nt, dil, hist);
+      size_t g2[2] = {(size_t)HD, (size_t)n};
+      CL_CHECK(clEnqueueNDRangeKernel(cl.queue, kc, 2, nullptr, g2, nullptr, 0, nullptr, nullptr));
+      set_args(ku, 0, bh, bn, hcd, tt, hist);
+      size_t g3 = HD;
+      CL_CHECK(clEnqueueNDRangeKernel(cl.queue, ku, 1, nullptr, &g3, nullptr, 0, nullptr, nullptr));
+      CL_CHECK(clFinish(cl.queue));
+    }
+    std::vector<float> got(rs.size());
+    CL_CHECK(clEnqueueReadBuffer(cl.queue, bres, CL_TRUE, 0, got.size() * 4, got.data(), 0, nullptr, nullptr));
+    const double er = rel_err(got, want);
+    printf("ple_gate + ple_conv_add (2 chunks): rel err %.2e %s\n", er, er < 1e-5 ? "OK" : "FAIL");
+    fails += !(er < 1e-5);
   }
   printf(fails ? "SOME FAILED\n" : "ALL OK\n");
   return fails ? 1 : 0;

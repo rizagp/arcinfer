@@ -224,13 +224,16 @@ __kernel void moe_gateup(__global const uint* wg, __global const ushort* sg, __g
 
 // int8 rows with per-32 scales of h (slots x F), as rmsnorm_quant's act32 layout with row stride S.
 // grid (16 * F / 256, n), local (16, 1): one sub-group per 256 values of a row.
+#ifndef FV  // columns that hold values (Flash Next: 640 of each 768-wide row; the rest quantize as zeros)
+#define FV F
+#endif
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void moe_quant(__global const float* h, int F, int S, __global char* hq, __global float* hsc) {
   const int s = get_group_id(0), r = get_group_id(1), lane = get_sub_group_local_id();
   const int base = s * 256 + 16 * lane;
   float v[16];
 #pragma unroll
-  for (int i = 0; i < 16; ++i) v[i] = h[(size_t)r * F + base + i];
+  for (int i = 0; i < 16; ++i) v[i] = base + i < FV ? h[(size_t)r * F + base + i] : 0.0f;
   float amax = 0.0f;
 #pragma unroll
   for (int i = 0; i < 16; ++i) amax = fmax(amax, fabs(v[i]));

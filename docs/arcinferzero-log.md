@@ -369,3 +369,22 @@ Spesifikasi: docs/flash-next-spec.md (dari llama.cpp src/models/qwen4exp.cpp). S
   hc_gate_mean_quant, hc_combine): tests/test_hc.cpp vs CPU, err 2e-8..6e-8, int8 tidak meleset > 1 langkah.
 Berikutnya: engine qwen4exp di zero/engine.h (bobot BF16 hc_* / router sebagai Q8_0 dengan K tambalan, alur layer,
 MoE 512 expert dengan streaming langsung dari GGUF + tambalan baris down, PLE di host), lalu QSA untuk konteks panjang.
+
+### Flash Next jalan di GPU (16 Okt sore-malam)
+
+- Engine qwen4exp di zero/engine.h: residual 4 aliran (x_ [M][4x2560]), mixer hc sebelum tiap blok (norm per aliran,
+  down + inject ditumpuk satu matriks Q8_0 336 baris, silu(lo/4), up dengan K 320 ditambal 512, rata-rata bergerbang),
+  keluaran blok ke hco_ lalu hc_combine; DeltaNet gate sigmoid (-DGATE_SIGMOID); MoE 512/10, F 640 disimpan per baris
+  768 (HLD/FV di moe_gateup_q / moe_quant); shared expert ditambal ke 768 baris; PLE di host (hash n-gram, 16 baris
+  IQ4_NL dari part 2) + ple_gate / ple_conv_add / ple_hist_update di GPU; riwayat conv PLE dan 2 token terakhir
+  disimpan di state rekuren layer 1 (ikut snapshot / sesi / batal).
+- QSA: indexer (k + q ditumpuk), kunci blok di-pool (rata-rata 4 kunci, norm, RoPE di posisi awal blok) per
+  layer attention, ekor blok di state; skor + radix select top 512 blok per baris -> mask; attn_q8 / attn_decode
+  dengan -DQSA (tile yang tak terpilih dilewati). Di bawah ~2K token tetap padat (identik). Uji top-k 64: skor GPU vs
+  CPU korelasi 0,9998, pilihan blok layer 3 sama persis.
+- Akurasi: prompt chat pendek KL 0,0014. Teks 337 token KL 0,15 = sama dengan acuan CPU yang aktivasinya dikuantisasi
+  int8 (0,13); model ini peka int8 di semua matriks (hc 0,098, attn 0,087, ssm 0,052, router 0,034, shexp 0,017 bila
+  sendiri-sendiri). Bug acuan CPU ditemukan lewat dump per blok: dequant_row Q8_0 dengan K 640 hanya 512 nilai.
+- Server: jawaban benar (Tokyo, fungsi is_prime). Generate ±4 tok/s, cache expert 7,9 GiB (12 %; satu pool karena
+  5 ukuran record: pool terpisah butuh 1 layer penuh masing-masing -> GPU kehabisan memori). File expert 56 GB.
+- 27B / 35B logit identik per bit setelah semua perubahan.

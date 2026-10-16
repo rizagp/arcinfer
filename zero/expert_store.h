@@ -75,7 +75,9 @@ struct ExpertStore {
       for (int i = 0; i < 3; ++i) {
         const GgufTensor& t = f.get(prefixes[l] + "ffn_" + names[i] + "_exps.weight");
         L.type[i] = t.type;
-        const uint64_t rows = t.dims[1], nsb = t.dims[0] / 256;
+        // (a small-block type whose rows are not whole superblocks, Flash Next's K = 640 down rows, is padded with
+        // zero blocks to padded_k: quants.h pad_small_block_rows)
+        const uint64_t rows = t.dims[1], nsb = (uint64_t)padded_k((int)t.dims[0]) / 256;
         L.part[i] = rows * nsb * (uint64_t)raw_padded_sb_bytes(t.type);
         sum += L.part[i];
       }
@@ -210,7 +212,18 @@ struct ExpertStore {
             const uint32_t ty = L.type[i];
             const size_t bb = gguf_sb_bytes(ty), bp = raw_padded_sb_bytes(ty);
             const size_t nsb = L.part[i] / bp;  // superblocks of one expert matrix
-            const uint8_t* src = t[i]->data + (size_t)(e0 + j) * nsb * bb;
+            const int K = (int)t[i]->dims[0], rows = (int)t[i]->dims[1];
+            const uint8_t* src;
+            std::vector<uint8_t> padded;
+            if (K % 256) {  // rows padded to whole superblocks first
+              int blk = 0, bytes = 0;
+              ggml_block_info(ty, blk, bytes);
+              padded.resize(nsb * bb);
+              pad_small_block_rows(ty, t[i]->data + (size_t)(e0 + j) * rows * (K / blk) * bytes, rows, K, padded.data());
+              src = padded.data();
+            } else {
+              src = t[i]->data + (size_t)(e0 + j) * nsb * bb;
+            }
             for (size_t s = 0; s < nsb; ++s) gpu_raw_sb(ty, src + s * bb, dst + s * bp);
             dst += L.part[i];
           }

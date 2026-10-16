@@ -295,7 +295,16 @@ static int run_main(int argc, char** argv) {
     if (feed_step > 0)
       for (size_t i = 0; i + feed_step < toks.size(); i += feed_step) eng.forward(toks.data() + i, feed_step);
     const size_t rest0 = feed_step > 0 ? (toks.size() - 1) / feed_step * feed_step : 0;
+    // (ARC_DUMP_ROWS=file: the residual row of the last prompt token after each block, f32, for tools/ref_forward REF_DUMP)
+    const char* dump_rows = getenv("ARC_DUMP_ROWS");
+    eng.dbg_rows = dump_rows != nullptr;
     const auto& lg = eng.forward(toks.data() + rest0, (int)(toks.size() - rest0));
+    if (dump_rows) {
+      FILE* fd = fopen(dump_rows, "wb");
+      for (const auto& r : eng.dbg_) fwrite(r.data(), 4, r.size(), fd);
+      fclose(fd);
+      eng.dbg_rows = false;
+    }
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     printf("prompt: %zu tokens | time to first token %.1f ms (%.1f t/s)\n", toks.size(), ms, toks.size() / ms * 1000.0);
     std::vector<std::pair<int, float>> tk;
