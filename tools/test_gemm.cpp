@@ -29,21 +29,38 @@ int main(int argc, char** argv) {
   const int M = atoi(argv[2]);
   Ctx X;
   if (!X.cl.init()) return 1;
-  X.gsrc = read_file("kernels/gemm.cl");
-  X.dsrc = read_file("kernels/decode.cl");
-  X.g8src = read_file("kernels/gemm8.cl");
+  // (TG_KDIR: another kernel folder, e.g. zero/kernels for arcinferzero's copy)
+  const std::string kdir = getenv("TG_KDIR") ? getenv("TG_KDIR") : "kernels";
+  X.gsrc = read_file(kdir + "/gemm.cl");
+  X.dsrc = read_file(kdir + "/decode.cl");
+  X.g8src = read_file(kdir + "/gemm8.cl");
   auto tabs = build_iq_tables();
   X.tabs = X.cl.buffer(CL_MEM_READ_ONLY, tabs.size() * 4, tabs.data());
   bool all_ok = true;
 
   for (int ti = 3; ti < argc; ++ti) {
     const GgufTensor& t = f.get(argv[ti]);
-    const int K = (int)t.dims[0], N = (int)t.dims[1];
+    // the first N rows (an expert tensor: expert 0); small-block types with K % 256 != 0 (Qwen3.8 Flash Next's
+    // K = 640 down projections) padded with zero blocks to the next multiple of 256, the activations with zeros
+    const int K0 = (int)t.dims[0], N = (int)t.dims[1], K = is_small_block_type(t.type) ? padded_k(K0) : K0;
+    int tblk = 0, tbytes_blk = 0;
+    ggml_block_info(t.type, tblk, tbytes_blk);
+    std::vector<uint8_t> padsrc;
+    const uint8_t* tdata = t.data;
+    size_t tbytes = (size_t)N * (K0 / tblk) * tbytes_blk;
+    if (K != K0) {
+      padsrc.resize((size_t)N * (K / tblk) * tbytes_blk);
+      pad_small_block_rows(t.type, t.data, N, K0, padsrc.data());
+      tdata = padsrc.data();
+      tbytes = padsrc.size();
+    }
     std::mt19937 rng(7);
     std::normal_distribution<float> nd(0.0f, 1.0f);
     std::vector<float> x((size_t)M * K);
     for (auto& v : x) v = nd(rng);
-    for (int i = 0; i < M; ++i) x[(size_t)i * K + (rng() % K)] *= 20.0f;  // a few outliers, like real activations
+    for (int i = 0; i < M; ++i) x[(size_t)i * K + (rng() % K0)] *= 20.0f;  // a few outliers, like real activations
+    for (int i = 0; i < M; ++i)
+      for (int k = K0; k < K; ++k) x[(size_t)i * K + k] = 0.0f;
 
     // CPU reference rows for sampled outputs
     std::vector<std::pair<int, int>> samples;
@@ -52,7 +69,7 @@ int main(int argc, char** argv) {
     for (auto& [m, n] : samples)
       if (!wrows.count(n)) {
         wrows[n].resize(K);
-        dequant_row(t.type, t.data + (size_t)n * (t.nbytes / N), K, wrows[n].data());
+        dequant_row(t.type, tdata + (size_t)n * (tbytes / N), K, wrows[n].data());
       }
 
     for (int act32 = 0; act32 < 2; ++act32) {
@@ -74,12 +91,12 @@ int main(int argc, char** argv) {
         int qtype;
         if (path == 0) {
           RepackedWeight rw;
-          repack_rows(t.type, t.data, K, 0, N, rw);
+          repack_rows(t.type, tdata, K, 0, N, rw);
           bwq = X.cl.buffer(CL_MEM_READ_ONLY, rw.wq.size() * 4, rw.wq.data());
           bwh = X.cl.buffer(CL_MEM_READ_ONLY, rw.wh.size() * 4, rw.wh.data());
           qtype = (int)t.type;
         } else {
-          auto padded = pad_raw_rows(t.type, t.data, t.nbytes);
+          auto padded = pad_raw_rows(t.type, tdata, tbytes);
           auto braw = X.cl.buffer(CL_MEM_READ_ONLY, padded.size(), padded.data());
           bwq = X.cl.buffer(CL_MEM_READ_WRITE, w8_bytes_q(N, K));
           bwh = X.cl.buffer(CL_MEM_READ_WRITE, w8_bytes_h(N, K));
@@ -108,7 +125,7 @@ int main(int argc, char** argv) {
           while (wgy < WGYmax && (M / 16) % (wgy * 2) == 0) wgy *= 2;
           gws[0] = (size_t)N * (M / 16 / wgy); gws[1] = wgy; lws[0] = 16 * (getenv("ARC_CG") ? atoi(getenv("ARC_CG")) : 1); lws[1] = wgy;
         } else if (!getenv("ARC_G8")) {
-          k = X.kernel("gemm", "-cl-intel-256-GRF-per-thread -DTM=" + std::to_string(TMv) + " -DCG=" + std::string(getenv("ARC_CG") ? getenv("ARC_CG") : "1") + " -DQTYPE=" + std::to_string(100 + qtype) + aopt, "gemm");
+          k = X.kernel("gemm", "-cl-intel-256-GRF-per-thread -DTM=" + std::to_string(TMv) + " -DCG=" + std::string(getenv("ARC_CG") ? getenv("ARC_CG") : "1") + " -DQTYPE=" + std::to_string(qtype == 4 ? (int)GGML_Q8_0 : 100 + qtype) + aopt, "gemm");  // (variant 4: the native Q8_0 form, as the engine)
           while (wgy < WGYmax && (M / TMv) % (wgy * 2) == 0) wgy *= 2;
           gws[0] = (size_t)N * (M / TMv / wgy); gws[1] = wgy; lws[0] = 16 * (getenv("ARC_CG") ? atoi(getenv("ARC_CG")) : 1); lws[1] = wgy;
         } else {
@@ -161,7 +178,7 @@ int main(int argc, char** argv) {
       }
       if (act32) {
         // GEMV on raw rows (token 0), checked against the same reference
-        auto padded = pad_raw_rows(t.type, t.data, t.nbytes);
+        auto padded = pad_raw_rows(t.type, tdata, tbytes);
         auto braw = X.cl.buffer(CL_MEM_READ_ONLY, padded.size(), padded.data());
         const int GR = getenv("ARC_GROWS") ? atoi(getenv("ARC_GROWS")) : 4;
         auto kg = X.kernel("decode", "-DQT=" + std::to_string(t.type) + " -DGROWS=" + std::to_string(GR), "gemv");
@@ -189,7 +206,7 @@ int main(int argc, char** argv) {
         const double e = std::sqrt(num / den);
         all_ok &= e < 1e-4;
         printf("%-26s %-7s gemv   act32 N=%-6d K=%-5d | %7.3f ms %6.1f GB/s | q-ref err %.1e %s\n", t.name.c_str(),
-               ggml_type_name(t.type), N, K, best, t.nbytes / best * 1e-6, e, e < 1e-4 ? "OK" : "FAIL");
+               ggml_type_name(t.type), N, K, best, tbytes / best * 1e-6, e, e < 1e-4 ? "OK" : "FAIL");
         clReleaseMemObject(braw);
       }
       for (cl_mem b : {baq, basc, babs, bc}) clReleaseMemObject(b);

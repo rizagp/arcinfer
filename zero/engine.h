@@ -1201,8 +1201,9 @@ class Engine {
       return w;
     }
     if (!is_w8_type(type)) throw std::runtime_error(std::string("unsupported weight type ") + ggml_type_name(type));
-    // Q4_0 decodes into the native Q8_0 GEMM form (per-32 f32 scales; there is no such W8 variant)
-    w.gemm_qtype = type == GGML_Q4_0 ? (int)GGML_Q8_0 : 100 + w8_variant(type);
+    // per-32-scale types (Q4_0, IQ4_NL, Q2_0) decode into the native Q8_0 GEMM form (per-32 f32 scales; there is no
+    // such W8 variant)
+    w.gemm_qtype = w8_variant(type) == 4 ? (int)GGML_Q8_0 : 100 + w8_variant(type);
     const size_t qb = w8_bytes_q(N, K), hb = w8_bytes_h(N, K);
     if (w8_resident) {
       w.wq = buf(qb);
