@@ -105,7 +105,29 @@ IQ4_XS / Q4_K reach ±62 in the same profile; codebook types need more arithmeti
 | Opting out of Windows power throttling (EcoQoS) | no measurable effect |
 | Larger GPU pages / Level Zero virtual memory | the driver already uses 2 MiB pages; mapping physical memory is refused |
 
-## 6. Mistakes worth avoiding
+## 6. Compiler flags that this driver honors (tested 16 Oct, driver 32.0.101.9033)
+
+Options go to clBuildProgram (the same binaries then run through Level Zero). The driver rejects unknown options
+with a build error, so "accepted" means recognized. Tested on a kernel that spills 1.7 KB at the default:
+
+| Option | Accepted | Effect seen |
+|---|---|---|
+| `-cl-intel-256-GRF-per-thread` / `-ze-opt-large-register-file` | yes | spill 1728 -> 0 B; 4 threads per EU instead of 7 |
+| `-cl-intel-reqd-eu-thread-count=4` | yes | same as 256 GRF (spill 0); 5, 6, 7, 8 behave like the default: Xe-LPG has only two register modes, no middle ground |
+| `-cl-intel-128-GRF-per-thread`, `-cl-intel-num-thread-per-eu N` | yes | the default |
+| `-cl-intel-enable-auto-large-GRF-mode` | yes | no change: the heuristic kept 128 GRF on a spilling kernel; choose per kernel yourself |
+| `-cl-intel-no-prera-scheduling`, `-cl-uniform-work-group-size`, `-cl-no-subgroup-ifp`, `-cl-fast-relaxed-math` | yes | no change in spill; speed effect must be measured per kernel (`-cl-fast-relaxed-math` changes results) |
+| `-cl-intel-greater-than-4GB-buffer-required` | yes | slightly different code (spill 1728 -> 1664 B) |
+| `-igc_opts '...'` | yes | passes internal IGC flags; the dump flags (`ShaderDumpEnable`) do nothing on the release driver |
+| `-cl-intel-fail-on-spill`, `-cl-intel-no-spill`, `-cl-intel-exp-register-file-size=N` | **rejected** | internal-only options |
+| `IGC_*` environment variables | ignored | no shader dumps on the release driver |
+
+Sub-group size is fixed in the source with `__attribute__((intel_reqd_sub_group_size(16)))`. To read the generated
+assembly you need Intel's offline compiler `ocloc` (not shipped with the driver). Practical rule: keep 128 GRF where a
+kernel does not spill (more threads hide memory latency); use 256 GRF per kernel where it spills and measure, since a
+small spill can cost less than losing 3 of 7 threads per EU.
+
+## 7. Mistakes worth avoiding
 
 - **Check what the compiler actually received.** I once concluded that Level Zero ignores the 256-register flag;
   my own environment switch had come out empty, so the flag was never passed. Print each kernel's build options and
@@ -115,11 +137,14 @@ IQ4_XS / Q4_K reach ±62 in the same profile; codebook types need more arithmeti
 - **Do not measure next to another GPU process.** A CPU reference running alongside, a second server, or a server
   started while Windows was still releasing the previous one's memory (half speed for its whole life) all distorted
   numbers. Wait a few seconds between runs, alternate A/B runs, and take the best of two.
+- **The first run after a kernel source change includes JIT compiles.** A 27B generation right after a 32K prompt
+  took 18.4 s for its first step (a dozen decode-attention variants compiled), then 238 ms per step; averages over
+  short generations hide this, so report the median step (runz prints it).
 - **Small-matrix benchmarks lie about GB/s**: kernel launch time dominates; measure on matrices that stream from memory.
 - **Logit differences at ~0.0003 KL are noise** from int8 rounding flips (±15–30 % run to run); judge accuracy over
   many positions and prompts.
 
-## 7. Correctness discipline that kept this sane
+## 8. Correctness discipline that kept this sane
 
 - An independent f32 CPU reference for every architecture (`tools/ref_forward`), compared by KL over all prompt
   positions, and greedy output compared with llama.cpp.
