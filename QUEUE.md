@@ -341,6 +341,10 @@ bersama (zero/engine.h, kernels, server) model lama diuji ulang (4B, 27B, 35B, E
 gambar/audio, MTP); yang gagal dibatalkan. Push ke GitHub diizinkan (user, 16 Okt siang) setiap tahap yang lolos,
 setelah cek path pribadi / rahasia / file besar / CRLF.
 
+Model kecil (4B, 9B, 12B, E4B) hanya di D:\models (flashdisk, kadang putus setelah sleep; daftar model melewatinya bila
+tidak menjawab 2 dtk). Regresi model kecil dibaca dari D:; bila D: putus, dilewati dan dicatat di laporan (user: tidak
+disalin ke C:). Ruang C: 82 GB: cukup bahkan bila Flash Next ternyata butuh file expert terpisah (±47 GB).
+
 Ukuran Flash Next (header part 1): 1.223 tensor, 51,0 GiB: expert 46,8 GiB (512 x 48 layer, ±2 MiB per expert),
 non-expert ±4,2 GiB (attn_qkv 0,66, output 0,49, ssm_out 0,41, attn_gate 0,35, token_embd 0,31, hc_* 4 x 0,29,
 attn_q 0,24, shared expert 0,14, router 0,12, ...). Part 2: per_layer_token_embd IQ4_NL [160, 320.001.536] 26,8 GiB.
