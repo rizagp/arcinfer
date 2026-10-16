@@ -3431,7 +3431,16 @@ class Engine {
     // per chunk, so shorter chunks keep the per-tile kernels (Qwen3.6 35B: 1024 tokens 499 vs 490 tok/s, 2048 tokens
     // 476 -> 642 tok/s; 512: 450 vs 310)
     static const int gemm_min = getenv("ARC_MOE_GEMM_MIN") ? atoi(getenv("ARC_MOE_GEMM_MIN")) : 1152;
-    const bool use_gemm = moe_group_ > 0 && tm == 16 && T >= gemm_min && moe_gemm_layer_ok(L);
+    // prompt chunks of rg_min .. rg_max tokens: moe_rg, the int8 GEMM on the raw expert rows (the results of decode +
+    // GEMM, bit for bit, so a prompt's logits no longer depend on its chunk size there, without the decode pass).
+    // Qwen3.6 35B: 384 / 512 / 768 / 1024 / 1152 tokens 412 -> 424, 440 -> 459, 449 -> 511, 486 -> 520, 529 -> 548
+    // tok/s; 256 tokens: 369 vs 359 with the per-tile kernels, 1536: 595 vs 565 with decode + GEMM (each expert's rows
+    // are decoded once per 16-token tile here, once per chunk there). ARC_NO_MOE_RG=1: those two only.
+    static const int rg_min = getenv("ARC_MOE_RG_MIN") ? atoi(getenv("ARC_MOE_RG_MIN")) : 320,
+                     rg_max = getenv("ARC_MOE_RG_MAX") ? atoi(getenv("ARC_MOE_RG_MAX")) : 1280;
+    static const bool no_rg = getenv("ARC_NO_MOE_RG") != nullptr;
+    const bool use_rg = !no_rg && hp.moe_std && tm == 16 && T >= rg_min && T < rg_max && Fp == F && moe_rg_layer_ok(L);
+    const bool use_gemm = !use_rg && moe_group_ > 0 && tm == 16 && T >= gemm_min && moe_gemm_layer_ok(L);
     const std::string xdef = xc_ ? " -DXCACHE" : "";
     // standard expert types, per tile (kernels/decode.cl moe_gateup_q / moe_down_q): the tiles in `tiles`
     auto gateup_q = [&](cl_mem tiles) {
@@ -3501,7 +3510,9 @@ class Engine {
       }
     }
     if (xc_) stream_layer(L, T, use_gemm, tl1.empty() ? nullptr : tl1.data());
-    if (use_gemm) {
+    if (use_rg) {
+      moe_rg(L, 0, Mp, max_tiles);
+    } else if (use_gemm) {
       moe_gemm(L, 0, Mp);
     } else if (hp.moe_std) {
       gateup_q(tiles);
@@ -3521,7 +3532,9 @@ class Engine {
       run("swiglu_quant", k_swiglu_, 2, gws, lws);
     }
     matmul("gemm_down_sh", L.down_sh, Mp, msh_, E, 0, 0, true);
-    if (use_gemm) {
+    if (use_rg) {
+      moe_rg(L, 2, Mp, max_tiles);
+    } else if (use_gemm) {
       moe_gemm(L, 2, Mp);
     } else if (hp.moe_std) {
       down_q(tiles);
@@ -3562,6 +3575,40 @@ class Engine {
     for (const Layer& L : layers_)
       if (!moe_gemm_layer_ok(L)) return false;
     return true;
+  }
+  // moe_rg's types: no per-block mins, not requantized by decode_w8, not the per-32 float types (IQ1_M: its own
+  // scale layout)
+  static bool moe_rg_type(uint32_t t) {
+    return t == GGML_IQ4_XS || t == GGML_IQ3_S || t == GGML_IQ3_XXS || t == GGML_IQ2_XXS || t == GGML_IQ2_XS ||
+           t == GGML_IQ2_S || t == GGML_Q6_K || t == GGML_Q3_K;
+  }
+  static bool moe_rg_layer_ok(const Layer& L) {
+    for (int i = 0; i < 3; ++i)
+      if (!moe_rg_type(L.ex_type[i])) return false;
+    return true;
+  }
+  // Experts of a prompt chunk through kernels/decode.cl moe_rg (the int8 GEMM of kernels/gemm.cl on the raw rows,
+  // decoded in registers): part 0 = gate, then up with the fused SwiGLU into mh_; part 2 = down, routing-weighted,
+  // into my_. All the chunk's tiles in one launch per matrix (work-groups past the tile count exit at once).
+  void moe_rg(Layer& L, int part, int Mp, size_t max_tiles) {
+    const int E = hp.n_embd, F = hp.n_ff_exp, NE = hp.n_expert;
+    static const int ny_env = getenv("ARC_MOE_RG_NY") ? atoi(getenv("ARC_MOE_RG_NY")) : 0;
+    const std::string xd = xc_ ? " -DXCACHE" : "";
+    for (int i = part; i < (part == 0 ? 2 : 3); ++i) {
+      cl_kernel k = kernel("decode", "-cl-intel-256-GRF-per-thread -DMOE_RG -DQT=" + std::to_string(L.ex_type[i]) + xd,
+                           "moe_rg");
+      int N = i == 2 ? E : F, K = i == 2 ? F : E, M = i == 2 ? slots_ : Mp, ldc = N, acc = i == 1 ? 2 : 0, ne = NE,
+          um = i == 2 ? 0 : 1, us = i == 2 ? 1 : 0;
+      cl_mem a = i == 2 ? mhq_ : aq_, as = i == 2 ? mhsc_ : asc_, c = i == 2 ? my_ : mh_;
+      if (xc_)
+        set_args(k, 0, xc_->xtab[L.il], N, K, tabs_, a, as, c, M, ldc, acc, mtiles_, mtstart_, ne, stok_, um, swt_, us,
+                 xc_->xtab[L.il], xoff(L, i));
+      else
+        set_args(k, 0, L.ex_q[i], N, K, tabs_, a, as, c, M, ldc, acc, mtiles_, mtstart_, ne, stok_, um, swt_, us);
+      const size_t ny = ny_env > 0 ? (size_t)ny_env : max_tiles;
+      size_t gws[2] = {(size_t)N, ny}, lws[2] = {16, 1};
+      run(i == 2 ? "moe_down" : "moe_gateup", k, 2, gws, lws);
+    }
   }
   // Experts of a prompt chunk through the int8 GEMM: part 0 = gate + up (h = silu(x Wg^T) * x Wu^T into mh_),
   // part 2 = down (routing-weighted into my_). Per group of moe_group_ experts: decode to W8, then one GEMM over

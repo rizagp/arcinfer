@@ -1783,3 +1783,152 @@ __kernel void moe_down_q(__global const uchar* rd, int N, int K, __global const 
 }
 
 #endif  // MOE_Q
+
+// ---- Mixture-of-experts prompt chunks straight from the raw expert rows (-DMOE_RG): the per-tile int8 GEMM of
+// kernels/gemm.cl (-DMOE_TILES, W8 layouts 101 = per-32 and 100 = per-16 scales) with each lane decoding its own
+// weight row's superblocks in registers instead of reading decode_w8's copy. The same int8 weights and scales and the
+// same order of operations, so the results are those of decode_w8 + gemm, bit for bit, without the decode pass and
+// its writes. Lanes = 16 rows of one expert; a tile's tokens are broadcast as in the GEMM. Types without per-block
+// mins that decode_w8 does not requantize (not Q2_K / Q4_K / Q5_K, nor the per-32 float types).
+// C[r][gc * 16 + lane] for the tiles tstart[0] .. tstart[ne] (moe_scan), looped with the launch's y size as stride;
+// accumulate: 0 store, 1 add, 2 C = silu(C) * result. grid (N, ny), local (16, 1).
+#ifdef MOE_RG
+#define RG_SC32 (QT == IQ4_XS || QT == IQ3_S || QT == IQ3_XXS || QT == IQ2_XXS)
+#ifndef RG_TP
+#define RG_TP 4  // tokens per step (no spills with 256 registers for IQ3_XXS / IQ4_XS / Q3_K; 8 or 16 spill)
+#endif
+#define RG_TM 16
+#define RG_B(x, i) intel_sub_group_shuffle((x), (i))
+#ifdef XCACHE
+#define XARGS_RG , __global const ulong* xaddr, int xoff
+#else
+#define XARGS_RG
+#endif
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void moe_rg(__global const uchar* raw, int N, int K, __global const uint* tabs, __global const char* restrict aq,
+                     __global const float* restrict asc, __global float* restrict C, int M, int ldc, int accumulate,
+                     __global const int* restrict tiles, __global const int* restrict tstart, int ne,
+                     __global const int* restrict rowmap, int use_map, __global const float* restrict rowscale,
+                     int use_scale XARGS_RG) {
+  const int gy = get_group_id(1), ngy = get_num_groups(1);
+  if (tstart[0] + gy >= tstart[ne]) return;  // (no tile for this work-group: before the staging)
+#ifdef GRID_OFF
+  __local uint lgrid[GRID_N];
+  for (int i = get_local_id(0); i < GRID_N; i += get_local_size(0)) lgrid[i] = tabs[GRID_OFF + i];
+  const uint* grid = lgrid;
+#else
+  const uint* grid = tabs;
+#endif
+#ifdef AUX_OFF
+  __local uint laux[AUX_N];
+  for (int i = get_local_id(0); i < AUX_N; i += get_local_size(0)) laux[i] = tabs[AUX_OFF + i];
+  const uint* aux = laux;
+#else
+  const uint* aux = tabs;
+#endif
+  barrier(CLK_LOCAL_MEM_FENCE);
+  const int lane = get_sub_group_local_id(), gc = get_group_id(0), nsb = K / 256, t_end = tstart[ne];
+  for (int t = tstart[0] + gy; t < t_end; t += ngy) {
+    const int e = tiles[1 + 3 * t], r0 = tiles[2 + 3 * t], nr = tiles[3 + 3 * t];
+    const int rl = r0 + min(lane, nr - 1);  // this lane's slot (rows past the tile repeat its last slot)
+    const int tokl = use_map ? rowmap[rl] : rl;
+    const int n = gc * 16 + lane;  // this lane's weight row
+#ifdef XCACHE
+    __global const uchar* wrow = (__global const uchar*)xaddr[e] + xoff + (size_t)n * nsb * BBP;
+#else
+    __global const uchar* wrow = raw + ((size_t)e * N + n) * nsb * BBP;
+#endif
+    float res[RG_TM];
+#pragma unroll
+    for (int m = 0; m < RG_TM; ++m) res[m] = 0.0f;
+    for (int s = 0; s < nsb; ++s) {
+      uint sbu[BBP / 4];
+      {
+        __global const uint* src = (__global const uint*)(wrow + (size_t)s * BBP);
+#pragma unroll
+        for (int i = 0; i < BBP / 8; ++i) {
+          const uint2 v = vload2(i, src);
+          sbu[2 * i] = v.x;
+          sbu[2 * i + 1] = v.y;
+        }
+      }
+      const uchar* p = (const uchar*)sbu;
+      float tq[RG_TM];
+#pragma unroll
+      for (int m = 0; m < RG_TM; ++m) tq[m] = 0.0f;
+      float d = 0.0f;
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        uint lo[8], hi[8];
+        int a0, a1, b0, b1, mn0, mn1;
+        float dl, dmin;
+        decode32(p, 2 * j, grid, aux, lo, &a0, &a1, &mn0, &mn1, &dl, &dmin);
+        decode32(p, 2 * j + 1, grid, aux, hi, &b0, &b1, &mn0, &mn1, &d, &dmin);
+        // the decoded scales as the W8 header holds them (int8)
+        a0 = (int)(char)a0; a1 = (int)(char)a1; b0 = (int)(char)b0; b1 = (int)(char)b1;
+        const float avl = asc[((size_t)s * 8 + 2 * j) * M + tokl], avh = asc[((size_t)s * 8 + 2 * j + 1) * M + tokl];
+#pragma unroll
+        for (int mg = 0; mg < RG_TM; mg += RG_TP) {
+          uint aw[RG_TP];
+#pragma unroll
+          for (int q = 0; q < RG_TP; ++q)
+            aw[q] = intel_sub_group_block_read((__global const uint*)(aq + (size_t)RG_B(tokl, mg + q) * K + s * 256 + j * 64));
+#if RG_SC32
+          int c0[RG_TP], c1[RG_TP];
+#pragma unroll
+          for (int q = 0; q < RG_TP; ++q) c0[q] = c1[q] = 0;
+#pragma unroll
+          for (int w = 0; w < 8; ++w)
+#pragma unroll
+            for (int q = 0; q < RG_TP; ++q) {
+              c0[q] += dot_4x8packed_ss_int(RG_B(aw[q], w), lo[w]);
+              c1[q] += dot_4x8packed_ss_int(RG_B(aw[q], w + 8), hi[w]);
+            }
+#pragma unroll
+          for (int q = 0; q < RG_TP; ++q) {
+            const int m = mg + q;
+            const int plo = c0[q] * (short)a0, phi = c1[q] * (short)b0;
+            tq[m] = fma(RG_B(avl, m), (float)plo, fma(RG_B(avh, m), (float)phi, tq[m]));
+          }
+#else
+          int c0[RG_TP], c1[RG_TP], c2[RG_TP], c3[RG_TP];
+#pragma unroll
+          for (int q = 0; q < RG_TP; ++q) c0[q] = c1[q] = c2[q] = c3[q] = 0;
+#pragma unroll
+          for (int w = 0; w < 4; ++w)
+#pragma unroll
+            for (int q = 0; q < RG_TP; ++q) {
+              c0[q] += dot_4x8packed_ss_int(RG_B(aw[q], w), lo[w]);
+              c1[q] += dot_4x8packed_ss_int(RG_B(aw[q], w + 4), lo[w + 4]);
+              c2[q] += dot_4x8packed_ss_int(RG_B(aw[q], w + 8), hi[w]);
+              c3[q] += dot_4x8packed_ss_int(RG_B(aw[q], w + 12), hi[w + 4]);
+            }
+#pragma unroll
+          for (int q = 0; q < RG_TP; ++q) {
+            const int m = mg + q;
+            const int plo = c0[q] * (short)a0 + c1[q] * (short)a1, phi = c2[q] * (short)b0 + c3[q] * (short)b1;
+            tq[m] = fma(RG_B(avl, m), (float)plo, fma(RG_B(avh, m), (float)phi, tq[m]));
+          }
+#endif
+        }
+      }
+#pragma unroll
+      for (int m = 0; m < RG_TM; ++m) res[m] = fma(d, tq[m], res[m]);
+    }
+    const float rsc = use_scale ? rowscale[rl] : 1.0f;
+#pragma unroll
+    for (int m = 0; m < RG_TM; ++m) {
+      if (m >= nr) break;
+      __global uint* cp = (__global uint*)(C + (size_t)(r0 + m) * ldc + gc * 16);
+      float v = res[m] * RG_B(rsc, m);
+      if (accumulate == 1) {
+        v += as_float(intel_sub_group_block_read(cp));
+      } else if (accumulate == 2) {
+        const float g = as_float(intel_sub_group_block_read(cp));
+        v *= g / (1.0f + exp(-g));
+      }
+      intel_sub_group_block_write(cp, as_uint(v));
+    }
+  }
+}
+#endif  // MOE_RG
