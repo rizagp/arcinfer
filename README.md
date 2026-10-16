@@ -17,6 +17,7 @@ Two engines share the kernels and the server code:
 Target hardware it was built and tuned on: Intel Core Ultra 5 125H (Arc iGPU, 7 Xe-cores / 112 EUs, no XMX),
 32 GB LPDDR5x-6400, Windows 11.
 
+- **What made LLM inference fast on this iGPU, and what did not:** [docs/lessons-intel-arc-igpu.md](docs/lessons-intel-arc-igpu.md)
 - Results and the story of the build: [docs/review.html](docs/review.html) (EN / ID)
 - Current speed per model (Level Zero, 2026-10-16): [docs/performa-zero-2026-10-16.html](docs/performa-zero-2026-10-16.html)
 - arcinferzero development log: [docs/arcinferzero-log.md](docs/arcinferzero-log.md) (Indonesian)
