@@ -876,7 +876,7 @@ class Engine {
   cl_kernel k_rmsnorm_ = nullptr, k_swiglu_ = nullptr, k_gdn_conv_ = nullptr, k_conv_upd_ = nullptr,
             k_gdn_recur_ = nullptr, k_gnorm_ = nullptr, k_attn_prep_ = nullptr, k_attn_ = nullptr,
             k_attn_gate_ = nullptr, k_gdn_gates_ = nullptr, k_attn_q8_ = nullptr, k_attn_dec_ = nullptr,
-            k_attn_comb_ = nullptr;
+            k_attn_comb_ = nullptr, k_gdn_recur1_ = nullptr;
   std::vector<Layer> layers_;
   cl_kernel k_add_norm_ = nullptr, k_ple_gate_ = nullptr, k_ple_comb_ = nullptr, k_add_nq_ = nullptr;
   cl_kernel k_rope_tab_ = nullptr;
@@ -1239,6 +1239,7 @@ class Engine {
     const std::string big = "-cl-intel-256-GRF-per-thread -DGQ=" + std::to_string(gq());
     k_attn_ = kernel("ops", big, "attn_fa");
     k_gdn_recur_ = kernel("ops", big, "gdn_recur");
+    k_gdn_recur1_ = p("gdn_recur1");  // (T = 1: 128 GRF, 4 lanes per state column)
     const std::string att = "-cl-intel-256-GRF-per-thread -DHPG=" + std::to_string(hp.n_head / hp.n_head_kv) +
                             " -DHS=" + std::to_string(attn_hs()) + " -DTPW=" + std::to_string(attn_tpw()) + sb_opt(256);
     k_attn_q8_ = kernel("ops", att, "attn_q8");
@@ -3113,9 +3114,14 @@ class Engine {
       run("conv_state_update", k_conv_upd_, 1, &g1, &l1);
     }
     {
-      set_args(k_gdn_recur_, 0, conv_out_, C, gbc, nk, nv, L.S, T, o_, spec_ ? L.S_next : L.S);
-      size_t g1 = (size_t)nv * 128, l1 = 64;
-      run("gdn_recur", k_gdn_recur_, 1, &g1, &l1);
+      // (ARC_GDN1=1: a T = 1 kernel with 4 lanes per state column and 128 GRF; bit-identical but slower: 35B 248-341
+      //  vs 226-254 ms per 96 tokens for gdn_recur with vector state loads, which was 316)
+      static const bool use1 = getenv("ARC_GDN1") && atoi(getenv("ARC_GDN1")) != 0;
+      const bool one = T == 1 && use1;
+      cl_kernel k = one ? k_gdn_recur1_ : k_gdn_recur_;
+      set_args(k, 0, conv_out_, C, gbc, nk, nv, L.S, T, o_, spec_ ? L.S_next : L.S);
+      size_t g1 = (size_t)nv * (one ? 512 : 128), l1 = 64;
+      run(one ? "gdn_recur1" : "gdn_recur", k, 1, &g1, &l1);
     }
     const int a_out = act32_for(true);
     {

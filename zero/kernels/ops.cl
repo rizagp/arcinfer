@@ -179,13 +179,7 @@ __kernel void gdn_recur(__global const float* x, int C, __global const float* ab
                         __global const float* S, int M_valid, __global float* o, __global float* Sout) {
   const int col = get_global_id(0), lane = get_sub_group_local_id();
   const int h = col / 128, j = col % 128, kh = h % nk, jb = j - lane;
-  __global const float* sp = S + ((size_t)h * 128 + j) * 128;
-  float s[128];
-#pragma unroll
-  for (int i = 0; i < 128; i += 4) {
-    const float4 v4 = vload4(i / 4, sp);
-    s[i] = v4.s0; s[i + 1] = v4.s1; s[i + 2] = v4.s2; s[i + 3] = v4.s3;
-  }
+  // the first token's operands are requested before the state, so their latency hides under the state loads
   const int qo = kh * 128, ko = nk * 128 + kh * 128, vo = 2 * nk * 128 + h * 128 + jb;
   uint8 kn0 = 0, kn1 = 0, qn0 = 0, qn1 = 0;
   uint vn = 0;
@@ -199,6 +193,35 @@ __kernel void gdn_recur(__global const float* x, int C, __global const float* ab
     dn = ab[h];
     bn = ab[nv + h];
   }
+  float s[128];
+#ifdef GDN_LINE_SWAP
+  // lanes 2c and 2c+1 move the two 32-byte halves of one 64-byte line (message 0: the even lane's row, message 1:
+  // the odd lane's row) and swap 8 floats with each other
+  const int hf = lane & 1;
+  const float8 hm = (float8)(as_float(-(uint)hf));  // all ones on odd lanes: bitselect(a, b, hm) = hf ? b : a
+  __global const float* sp0 = S + ((size_t)h * 128 + (j & ~1)) * 128 + 8 * hf;
+#pragma unroll
+  for (int q = 0; q < 8; ++q) {
+    const float8 e0 = vload8(0, sp0 + 16 * q), e1 = vload8(0, sp0 + 128 + 16 * q);
+    const float8 r = intel_sub_group_shuffle_xor(bitselect(e1, e0, hm), 1);
+    const float8 lo = bitselect(e0, r, hm), hi = bitselect(r, e1, hm);
+    s[16 * q] = lo.s0; s[16 * q + 1] = lo.s1; s[16 * q + 2] = lo.s2; s[16 * q + 3] = lo.s3;
+    s[16 * q + 4] = lo.s4; s[16 * q + 5] = lo.s5; s[16 * q + 6] = lo.s6; s[16 * q + 7] = lo.s7;
+    s[16 * q + 8] = hi.s0; s[16 * q + 9] = hi.s1; s[16 * q + 10] = hi.s2; s[16 * q + 11] = hi.s3;
+    s[16 * q + 12] = hi.s4; s[16 * q + 13] = hi.s5; s[16 * q + 14] = hi.s6; s[16 * q + 15] = hi.s7;
+  }
+#else
+  // 32 bytes per lane and message (vload16 = two d32x8 messages): all 16 state loads fit the 16 send tokens
+  __global const float* sp = S + ((size_t)h * 128 + j) * 128;
+#pragma unroll
+  for (int i = 0; i < 128; i += 16) {
+    const float16 v16 = vload16(i / 16, sp);
+    s[i] = v16.s0; s[i + 1] = v16.s1; s[i + 2] = v16.s2; s[i + 3] = v16.s3;
+    s[i + 4] = v16.s4; s[i + 5] = v16.s5; s[i + 6] = v16.s6; s[i + 7] = v16.s7;
+    s[i + 8] = v16.s8; s[i + 9] = v16.s9; s[i + 10] = v16.sa; s[i + 11] = v16.sb;
+    s[i + 12] = v16.sc; s[i + 13] = v16.sd; s[i + 14] = v16.se; s[i + 15] = v16.sf;
+  }
+#endif
   for (int t = 0; t < M_valid; ++t) {
     const float kr[16] = {as_float(kn0.s0), as_float(kn0.s1), as_float(kn0.s2), as_float(kn0.s3),
                           as_float(kn0.s4), as_float(kn0.s5), as_float(kn0.s6), as_float(kn0.s7),
@@ -244,9 +267,94 @@ __kernel void gdn_recur(__global const float* x, int C, __global const float* ab
     intel_sub_group_block_write((__global uint*)(o + (size_t)t * nv * 128 + h * 128 + jb),
                                 as_uint((b0 + b1) + (b2 + b3)));
   }
+#ifdef GDN_LINE_SWAP
+  __global float* so0 = Sout + ((size_t)h * 128 + (j & ~1)) * 128 + 8 * hf;
+#pragma unroll
+  for (int q = 0; q < 8; ++q) {
+    const float8 lo = (float8)(s[16 * q], s[16 * q + 1], s[16 * q + 2], s[16 * q + 3], s[16 * q + 4], s[16 * q + 5],
+                               s[16 * q + 6], s[16 * q + 7]);
+    const float8 hi = (float8)(s[16 * q + 8], s[16 * q + 9], s[16 * q + 10], s[16 * q + 11], s[16 * q + 12],
+                               s[16 * q + 13], s[16 * q + 14], s[16 * q + 15]);
+    const float8 r = intel_sub_group_shuffle_xor(bitselect(hi, lo, hm), 1);
+    vstore8(bitselect(lo, r, hm), 0, so0 + 16 * q);
+    vstore8(bitselect(r, hi, hm), 0, so0 + 128 + 16 * q);
+  }
+#else
   __global float* so = Sout + ((size_t)h * 128 + j) * 128;
 #pragma unroll
-  for (int i = 0; i < 128; i += 4) vstore4((float4)(s[i], s[i + 1], s[i + 2], s[i + 3]), i / 4, so);
+  for (int i = 0; i < 128; i += 16)
+    vstore16((float16)(s[i], s[i + 1], s[i + 2], s[i + 3], s[i + 4], s[i + 5], s[i + 6], s[i + 7], s[i + 8], s[i + 9],
+                       s[i + 10], s[i + 11], s[i + 12], s[i + 13], s[i + 14], s[i + 15]), i / 16, so);
+#endif
+}
+
+// gdn_recur for a single token (M_valid = 1), 128 GRF (8 threads per EU instead of 4). Four lanes share one state
+// column j: lane c = lane % 4 owns the key positions i = 4m + c, which is exactly the chain a_c / b_c of gdn_recur,
+// run in the same order; the four partial sums are combined as (a0+a1)+(a2+a3) through two xor shuffles (float + is
+// commutative, so every lane gets the same bits). Results are bit-identical to gdn_recur. A state row moves as one
+// float4 per lane (four lanes = one 64-byte line per message) and is transposed 4x4 across the lanes.
+// grid: nv*512 work-items (sub-group 8 = 2 columns).
+inline float4 gdn_tr4(const float4 e, const float m1, const float m2) {  // m1/m2: all ones where lane bit 0/1 is set
+  const float x0 = intel_sub_group_shuffle_xor(bitselect(e.s2, e.s0, m2), 2);
+  const float x1 = intel_sub_group_shuffle_xor(bitselect(e.s3, e.s1, m2), 2);
+  const float n0 = bitselect(e.s0, x0, m2), n1 = bitselect(e.s1, x1, m2);
+  const float n2 = bitselect(x0, e.s2, m2), n3 = bitselect(x1, e.s3, m2);
+  const float y0 = intel_sub_group_shuffle_xor(bitselect(n1, n0, m1), 1);
+  const float y2 = intel_sub_group_shuffle_xor(bitselect(n3, n2, m1), 1);
+  return (float4)(bitselect(n0, y0, m1), bitselect(y0, n1, m1), bitselect(n2, y2, m1), bitselect(y2, n3, m1));
+}
+__attribute__((intel_reqd_sub_group_size(8)))
+__kernel void gdn_recur1(__global const float* x, int C, __global const float* ab, int nk, int nv,
+                         __global const float* S, int M_valid, __global float* o, __global float* Sout) {
+  const int lane = get_sub_group_local_id(), c = lane & 3, col = get_global_id(0) >> 2;
+  const int h = col / 128, j = col % 128, kh = h % nk, qo = kh * 128, ko = nk * 128 + kh * 128;
+  const uint8 kn0 = intel_sub_group_block_read8((__global const uint*)(x + ko));
+  const uint8 kn1 = intel_sub_group_block_read8((__global const uint*)(x + ko + 64));
+  const uint8 qn0 = intel_sub_group_block_read8((__global const uint*)(x + qo));
+  const uint8 qn1 = intel_sub_group_block_read8((__global const uint*)(x + qo + 64));
+  const float v = x[2 * nk * 128 + h * 128 + j], decay = ab[h], beta = ab[nv + h];
+  const float m1 = as_float(-(uint)(c & 1)), m2 = as_float(-(uint)(c >> 1));
+  __global const float* sp = S + ((size_t)h * 128 + j) * 128;
+  float4 e[8];
+#pragma unroll
+  for (int p = 0; p < 8; ++p) e[p] = vload4(4 * p + c, sp);  // i = 16p + 4c + r
+  const float kr[16] = {as_float(kn0.s0), as_float(kn0.s1), as_float(kn0.s2), as_float(kn0.s3),
+                        as_float(kn0.s4), as_float(kn0.s5), as_float(kn0.s6), as_float(kn0.s7),
+                        as_float(kn1.s0), as_float(kn1.s1), as_float(kn1.s2), as_float(kn1.s3),
+                        as_float(kn1.s4), as_float(kn1.s5), as_float(kn1.s6), as_float(kn1.s7)};
+  const float qr[16] = {as_float(qn0.s0), as_float(qn0.s1), as_float(qn0.s2), as_float(qn0.s3),
+                        as_float(qn0.s4), as_float(qn0.s5), as_float(qn0.s6), as_float(qn0.s7),
+                        as_float(qn1.s0), as_float(qn1.s1), as_float(qn1.s2), as_float(qn1.s3),
+                        as_float(qn1.s4), as_float(qn1.s5), as_float(qn1.s6), as_float(qn1.s7)};
+  float s[32];  // s[m] = S[j][4m + c]
+#pragma unroll
+  for (int p = 0; p < 8; ++p) {
+    const float4 t = gdn_tr4(e[p], m1, m2);  // lane c: i = 16p + 4c' + c (c' = 0..3), m = 4p + c'
+    s[4 * p] = t.s0; s[4 * p + 1] = t.s1; s[4 * p + 2] = t.s2; s[4 * p + 3] = t.s3;
+  }
+#define KQ4(a, m) intel_sub_group_shuffle((a)[(m) / 2], 4 * ((m) % 2) + c)  // element 4m + c
+  float a = 0.0f;
+#pragma unroll
+  for (int m = 0; m < 32; ++m) {
+    s[m] *= decay;
+    a = fma(s[m], KQ4(kr, m), a);
+  }
+  const float a01 = a + intel_sub_group_shuffle_xor(a, 1);  // a0+a1 on lanes c = 0, 1; a2+a3 on c = 2, 3
+  const float d = (v - (a01 + intel_sub_group_shuffle_xor(a01, 2))) * beta;
+  float b = 0.0f;
+#pragma unroll
+  for (int m = 0; m < 32; ++m) {
+    s[m] = fma(KQ4(kr, m), d, s[m]);
+    b = fma(s[m], KQ4(qr, m), b);
+  }
+#undef KQ4
+  const float b01 = b + intel_sub_group_shuffle_xor(b, 1);
+  const float ob = b01 + intel_sub_group_shuffle_xor(b01, 2);
+  if (c == 0) o[h * 128 + j] = ob;
+  __global float* so = Sout + ((size_t)h * 128 + j) * 128;
+#pragma unroll
+  for (int p = 0; p < 8; ++p)  // (the transpose is its own inverse)
+    vstore4(gdn_tr4((float4)(s[4 * p], s[4 * p + 1], s[4 * p + 2], s[4 * p + 3]), m1, m2), 4 * p + c, so);
 }
 
 // y = rmsnorm_head(o) * w * silu(z) per 128-dim head, quantized (K = nv*128). grid (256, M).
