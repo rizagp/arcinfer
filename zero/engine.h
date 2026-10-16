@@ -4066,14 +4066,29 @@ class Engine {
     int prev = tok;
     const int rk = dfl_rank_, K = std::min(dfl_topk_, V);
     std::vector<int> idx(V);
+    // (ARC_DFL_SEL_OLD=1: nth_element over the whole vocabulary per position, ~2 ms each on the host: the one-pass
+    //  top-K below made code answers 35B 48.4 -> 52.7, 27B 16.9 -> 18.3 tok/s with the same drafts)
+    static const bool sel_old = getenv("ARC_DFL_SEL_OLD") != nullptr;
     // drafts are kept while the drafter's own probability of the chosen path stays >= ARC_DFL_P (each draft verified
     // costs more rows in the main model's pass: an unlikely tail is cheaper not to check)
     static const double min_p = getenv("ARC_DFL_P") ? atof(getenv("ARC_DFL_P")) : 0.3;  // (code 11.4 -> 11.6 tok/s, prose up)
     double path_p = 1.0;
     for (int t = 0; t < std::min(nd, max_drafts); ++t) {
       const float* l = &dfl_lg_[(size_t)t * V];
-      for (int i = 0; i < V; ++i) idx[i] = i;
-      std::nth_element(idx.begin(), idx.begin() + K, idx.end(), [&](int a, int b) { return l[a] > l[b]; });
+      if (sel_old) {
+        for (int i = 0; i < V; ++i) idx[i] = i;
+        std::nth_element(idx.begin(), idx.begin() + K, idx.end(), [&](int a, int b) { return l[a] > l[b]; });
+      } else {
+        // the K largest logits in one pass (kept sorted, largest first; almost every logit fails the first test)
+        int n = 0;
+        for (int i = 0; i < V; ++i) {
+          const float v = l[i];
+          if (n == K && v <= l[idx[K - 1]]) continue;
+          int j = n < K ? n++ : K - 1;
+          while (j > 0 && l[idx[j - 1]] < v) { idx[j] = idx[j - 1]; --j; }
+          idx[j] = i;
+        }
+      }
       const float* h = &dfl_hph_[(size_t)t * rk];
       float ph[1024];
       for (int r = 0; r < rk; ++r) ph[r] = bf16_to_f32(dfl_pred_[(size_t)prev * rk + r]) * h[r];
