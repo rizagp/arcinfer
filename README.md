@@ -256,6 +256,7 @@ test uses port 8091 and needs the GPU memory.
 | `build failed` right away / `No Visual Studio C++ compiler found` | Visual Studio's C++ workload is missing (step 3); to use a particular installation, set `$env:ARC_VCVARS` to its `vcvars64.bat`. `setup.cmd` checks this. The compiler output of `setup.cmd` is in `%LOCALAPPDATA%\arcinfer\build.log`. |
 | `running scripts is disabled on this system` | Run the script through `powershell -ExecutionPolicy Bypass -File ...` (see the top of this section). |
 | `Model file ... not found` | Download it with `hf download` (step 6); `arc-server` searches `%LOCALAPPDATA%\arcinfer\models` and the Hugging Face cache. |
+| Models moved to another drive | List the folders, one per line, in `%LOCALAPPDATA%\arcinfer\model-dirs.txt` (or `ARC_MODEL_DIRS`, `;`-separated): a Hugging Face cache layout (`models--...`) or `.gguf` files directly in the folder. The Hugging Face cache is searched first, so a model kept in both places loads from there. |
 | The first start of a model takes minutes | The driver compiles the kernels once; later starts use `%LOCALAPPDATA%\arcinfer\kernels`. |
 | The server stops while loading, or another model fails to start | Another arcinfer server or a llama.cpp process holds the GPU memory: `arc-server stop`, close other GPU programs. The log is `%LOCALAPPDATA%\arcinfer\server.log`. |
 | Gemma does not use its drafter | `mtp-gemma-4-*-it.gguf` must be in the same folder as the model GGUF (download it from the same repository). |

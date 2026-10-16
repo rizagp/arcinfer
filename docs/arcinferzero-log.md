@@ -342,3 +342,13 @@ Sapuan baca acak (`page_probe 3072 sweep`; GB/s, satu alokasi zeMemAllocDevice; 
 Cache GPU ±4 MiB (±900 GB/s); dari ±32 MiB kecepatan RAM (±78 GB/s); di atas ±1 GiB hanya baca acak 256 B yang jatuh
 (±21 GB/s), potongan >= 4 KiB tetap ±75. Bobot, expert dan blok KV arcinfer (16 key x 256 dim = 4 KiB per head)
 semuanya >= 4 KiB bersambung: tidak terpengaruh. Untuk KV berhalaman nanti: halaman >= 4 KiB.
+
+### 27B: di mana waktunya (16 Okt, siang; runz --prof-gen, profil per kernel kini memakai timestamp Level Zero)
+
+Sebelumnya `--prof-gen` di zero selalu 0 ms (clrt.h tidak punya timer); sekarang event dari pool timestamp kernel.
+27B, generate (profil aktif: 4,29 tok/s, tanpa profil 4,8): waktu GPU 223 ms / langkah 233 ms -> jeda antar-kernel ±4 %
+(±940 kernel per token). Spill: attn_prep 192 B (0,5 % waktu), gdn_conv 1 KB (0,6 %): tidak berarti.
+GB/s efektif per peran (11,3 GB/token): attn_qkv 76, output 73,5, attn_gate 73; ffn_down 60, ffn_up 57, ffn_gate 56,
+ssm_out 51. Per jenis kuantisasi (profil per layer, angka absolut lebih rendah karena beban profil): IQ4_XS / Q4_K
+≈ 62, IQ3_S / IQ3_XXS ≈ 51–55, IQ2_* ≈ 47–52, IQ1_M ≈ 33: dekode codebook (IQ3/IQ2) belum tertutup waktu baca memori.
+FFN 27B didominasi IQ3_S / IQ3_XXS (±5 GB). Perkiraan: dekode IQ3 setara IQ4_XS +5–10 %, gabung kernel kecil +2–4 %.

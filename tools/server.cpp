@@ -1725,7 +1725,9 @@ static std::vector<ModelInfo> scan_models() {
   if (const char* v = getenv("HF_HUB_CACHE")) hub = v;
   else if (const char* h = getenv("HF_HOME")) hub = std::string(h) + "/hub";
   else if (const char* u = getenv("USERPROFILE")) hub = std::string(u) + "/.cache/huggingface/hub";
-  struct Cand { std::string name, file; fs::path path; fs::file_time_type t; };
+  // (prio: 0 the Hugging Face cache and arcinfer's own folders, 1+ the extra model folders in their order, so a model
+  //  kept in both places loads from the first)
+  struct Cand { std::string name, file; fs::path path; fs::file_time_type t; int prio = 0; };
   std::vector<Cand> cands;
   auto lower = [](std::string s) { for (auto& c : s) c = (char)tolower((unsigned char)c); return s; };
   auto is_model = [&](const fs::path& p) {
@@ -1736,16 +1738,47 @@ static std::vector<ModelInfo> scan_models() {
     return k == std::string::npos || k < 6 || f.compare(k - 5, 5, "00001") == 0;
   };
   std::error_code ec;
-  if (!hub.empty())
-    for (const auto& d : fs::directory_iterator(hub, ec)) {
+  // a Hugging Face cache layout (models--org--repo\snapshots\<rev>\...); in extra folders also loose .gguf files
+  auto scan_hub = [&](const fs::path& dir, int prio) {
+    for (const auto& d : fs::directory_iterator(dir, ec)) {
       const std::string dn = d.path().filename().string();
+      if (prio > 0 && is_model(d.path()) && d.is_regular_file(ec)) {
+        cands.push_back({"local/" + d.path().stem().string(), dn, d.path(), d.last_write_time(ec), prio});
+        continue;
+      }
       if (!d.is_directory(ec) || dn.rfind("models--", 0) != 0) continue;
       std::string name = dn.substr(8);
       const size_t sep = name.find("--");
       if (sep != std::string::npos) name.replace(sep, 2, "/");
       for (const auto& e : fs::recursive_directory_iterator(d.path() / "snapshots", ec))
-        if (is_model(e.path())) cands.push_back({name, e.path().filename().string(), e.path(), e.last_write_time(ec)});
+        if (is_model(e.path())) cands.push_back({name, e.path().filename().string(), e.path(), e.last_write_time(ec), prio});
     }
+  };
+  if (!hub.empty()) scan_hub(hub, 0);
+  // extra model folders (e.g. a second drive): ARC_MODEL_DIRS (';'-separated) and %LOCALAPPDATA%\arcinfer\model-dirs.txt
+  // (one folder per line, '#' comments); each in the Hugging Face cache layout or with .gguf files directly in it
+  {
+    std::vector<std::string> extra;
+    auto add = [&](std::string d) {
+      while (!d.empty() && (d.back() == '\r' || d.back() == ' ' || d.back() == '\t')) d.pop_back();
+      while (!d.empty() && (d.front() == ' ' || d.front() == '\t')) d.erase(d.begin());
+      if (!d.empty() && d[0] != '#') extra.push_back(d);
+    };
+    if (const char* v = getenv("ARC_MODEL_DIRS")) {
+      std::string all = v;
+      for (size_t a = 0, b; a <= all.size(); a = b + 1) {
+        b = all.find(';', a);
+        if (b == std::string::npos) b = all.size();
+        add(all.substr(a, b - a));
+      }
+    }
+    if (const char* la = getenv("LOCALAPPDATA")) {
+      std::ifstream f(fs::path(la) / "arcinfer" / "model-dirs.txt");
+      for (std::string line; std::getline(f, line);) add(line);
+    }
+    int prio = 1;
+    for (const auto& d : extra) scan_hub(fs::path(d), prio++);
+  }
   if (const char* la = getenv("LOCALAPPDATA"))
     for (const auto& e : fs::directory_iterator(fs::path(la) / "arcinfer" / "models", ec))
       if (is_model(e.path())) cands.push_back({"arcinfer/" + e.path().stem().string(), e.path().filename().string(), e.path(), e.last_write_time(ec)});
@@ -1757,8 +1790,10 @@ static std::vector<ModelInfo> scan_models() {
       cands.push_back({"arcinferzero/" + d.path().filename().string(), g.filename().string(), g, fs::last_write_time(g, ec)});
   }
 #endif
-  // the same file in several snapshots (revisions): the newest
-  std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.name != b.name ? a.name < b.name : a.file != b.file ? a.file < b.file : a.t > b.t; });
+  // the same file in several snapshots (revisions) or folders: the first folder, then the newest
+  std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
+    return a.name != b.name ? a.name < b.name : a.file != b.file ? a.file < b.file : a.prio != b.prio ? a.prio < b.prio : a.t > b.t;
+  });
   static const std::map<std::string, std::pair<std::string, std::string>> known = {
       {"Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf", {"qwen3.8-27b", "27b"}},
       {"Qwen3.6-35B-A3B-GSQ2-arc.gguf", {"qwen3.6-35b-a3b", "35b"}},

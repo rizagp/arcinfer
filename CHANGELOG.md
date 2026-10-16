@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-10-16 (afternoon): extra model folders, kernel timings on Level Zero
+
+- Models can live on another drive: `%LOCALAPPDATA%\arcinfer\model-dirs.txt` (one folder per line) or
+  `ARC_MODEL_DIRS` (`;`-separated) adds folders in the Hugging Face cache layout or with `.gguf` files directly in
+  them. The Hugging Face cache is searched first, so a model kept in both places still loads from there.
+- `runz --prof-gen` on arcinferzero now reports per-kernel times (Level Zero kernel timestamps; before: 0 ms).
+- `zero/page_probe.cpp`: GPU page size and random-read speed by span (2 MiB pages, ~4 MiB GPU cache, random 256 B
+  reads slow down above ~1 GiB; the Level Zero virtual-memory API is refused on this Windows driver).
+
 ## 2026-10-16: arcinferzero is the default engine; MTP up to 7 drafts
 
 - `arc-server`, `pi-arc` and the launcher start arcinferzero (Level Zero) by default; `--opencl` / `-OpenCL` (launcher:

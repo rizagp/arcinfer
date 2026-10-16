@@ -309,6 +309,7 @@ Hanya perintah pintas `pi-arc` / `arc-server` yang menyimpan lokasi folder; sele
 | `web_search` di Pi menjawab "No results found" atau tidak pernah selesai | Mesin pencari bawaannya DuckDuckGo dan Startpage; DuckDuckGo diblokir di Indonesia sehingga keduanya tidak memberi hasil. Tambahkan Yandex di `%USERPROFILE%\.pi\agent\settings.json`: `"webSearch": {"engines": ["yandex", "startpage", "duckduckgo"]}` (atau lewat perintah `/search-config` di Pi). |
 | Sesi Pi baru butuh ±40 detik sebelum menjawab | Normal untuk sesi pertama di folder proyek baru (prompt sistem diproses sekali); sesi berikutnya di folder itu cepat. |
 | "Model file ... not found" | Model belum diunduh ke cache Hugging Face (lihat tabel di bagian 1). |
+| Model dipindah ke drive lain | Tulis foldernya (satu per baris) di `%LOCALAPPDATA%\arcinfer\model-dirs.txt`, mis. `D:\models` (susunan cache Hugging Face `models--...`, atau file `.gguf` langsung di folder itu). Cache Hugging Face di C: tetap dicari lebih dulu. Kalau drive itu dicabut, modelnya hilang dari daftar sampai drive dipasang lagi. |
 | Pi berhenti dengan error konteks | Ketik `/compact` di Pi, atau mulai sesi baru. |
 | Jawaban sangat lambat di awal | Normal untuk prompt besar pertama (lihat bagian 6); berikutnya memakai cache. |
 | Ingin melihat apa yang terjadi | `arc-server status`, dan log di `%LOCALAPPDATA%\arcinfer\server.log` (waktu proses prompt, kecepatan, statistik MTP per permintaan). |

@@ -85,6 +85,35 @@ inline uint64_t device_bytes = 0;  // device USM allocated by the engine
 inline char* stage = nullptr;      // host USM bounce buffer for reads / writes
 inline size_t stage_n = 0;
 inline void sync() { ZE_CHECK(zeCommandListHostSynchronize(cl, UINT64_MAX)); }
+// kernel timestamps for profiling (engine.profile: clEnqueueNDRangeKernel asked for an event): events come from pools
+// of 4096 host-visible timestamp events and go back to a free list on clReleaseEvent
+inline std::vector<ze_event_handle_t> ev_free;
+inline double ev_ns_per_tick = 0;
+inline uint64_t ev_mask = ~0ull;
+inline ze_event_handle_t ev_get() {
+  if (ev_free.empty()) {
+    if (ev_ns_per_tick == 0) {
+      ze_device_properties_t dp{};
+      dp.stype = ZE_STYPE_DEVICE_PROPERTIES;  // (this stype: timerResolution in ns per tick)
+      ZE_CHECK(zeDeviceGetProperties(dev, &dp));
+      ev_ns_per_tick = dp.timerResolution ? (double)dp.timerResolution : 1.0;
+      if (dp.kernelTimestampValidBits && dp.kernelTimestampValidBits < 64) ev_mask = (1ull << dp.kernelTimestampValidBits) - 1;
+    }
+    const uint32_t n = 4096;
+    ze_event_pool_desc_t pd{ZE_STYPE_EVENT_POOL_DESC, nullptr, 0x1 | 0x4 /* host visible, kernel timestamps */, n};
+    ze_event_pool_handle_t pool;
+    ZE_CHECK(zeEventPoolCreate(ctx, &pd, 1, &dev, &pool));
+    for (uint32_t i = 0; i < n; ++i) {
+      ze_event_desc_t ed{ZE_STYPE_EVENT_DESC, nullptr, i, 0x4 /* host scope */, 0};
+      ze_event_handle_t e;
+      ZE_CHECK(zeEventCreate(pool, &ed, &e));
+      ev_free.push_back(e);
+    }
+  }
+  ze_event_handle_t e = ev_free.back();
+  ev_free.pop_back();
+  return e;
+}
 inline char* staging(size_t n) {
   if (n > stage_n) {
     if (stage) { sync(); zeMemFree(ctx, stage); }
@@ -340,7 +369,9 @@ inline cl_int clEnqueueNDRangeKernel(cl_command_queue, cl_kernel k, cl_uint dim,
     fprintf(stderr, "arcinferzero: %s: global size %u x %u not a multiple of %u x %u\n", k->name.c_str(), gs[0], gs[1],
             ls[0], ls[1]);
   }
-  ze_result_t r = zeCommandListAppendLaunchKernel(zrt::cl, k->k, &gc, nullptr, 0, nullptr);
+  ze_event_handle_t sig = ev ? zrt::ev_get() : nullptr;
+  if (ev) *ev = (cl_event)sig;
+  ze_result_t r = zeCommandListAppendLaunchKernel(zrt::cl, k->k, &gc, sig, 0, nullptr);
   static const long fake_oom = getenv("ARC_FAKE_OOM") ? atol(getenv("ARC_FAKE_OOM")) : 0;  // (test: launch N "fails")
   static long launches = 0;
   if (fake_oom && ++launches % fake_oom == 0 && r == ZE_RESULT_SUCCESS) {
@@ -349,7 +380,7 @@ inline cl_int clEnqueueNDRangeKernel(cl_command_queue, cl_kernel k, cl_uint dim,
     if (zrt::oom_hook && zrt::oom_hook()) return CL_SUCCESS;
   }
   for (int i = 0; r == (ze_result_t)0x70000003 && i < 8 && zrt::oom_hook && zrt::oom_hook(); ++i)  // (out of device memory)
-    r = zeCommandListAppendLaunchKernel(zrt::cl, k->k, &gc, nullptr, 0, nullptr);
+    r = zeCommandListAppendLaunchKernel(zrt::cl, k->k, &gc, sig, 0, nullptr);
   if (r != ZE_RESULT_SUCCESS) {
     fprintf(stderr, "Level Zero error 0x%x launching %s (global %u x %u x %u, local %u x %u x %u)\n", r, k->name.c_str(),
             gs[0], gs[1], gs[2], ls[0], ls[1], ls[2]);
@@ -379,7 +410,10 @@ inline cl_int clGetEventProfilingInfo(cl_event, cl_profiling_info, size_t sz, vo
   if (v && sz >= 8) *(cl_ulong*)v = 0;
   return CL_SUCCESS;
 }
-inline cl_int clReleaseEvent(cl_event) { return CL_SUCCESS; }
+inline cl_int clReleaseEvent(cl_event e) {  // (only kernel events are real: back to the free list)
+  if (e) { ZE_CHECK(zeEventHostReset((ze_event_handle_t)e)); zrt::ev_free.push_back((ze_event_handle_t)e); }
+  return CL_SUCCESS;
+}
 inline cl_int clReleaseKernel(cl_kernel k) { if (k) { zeKernelDestroy(k->k); delete k; } return CL_SUCCESS; }
 inline cl_int clReleaseProgram(cl_program p) { if (p) { zeModuleDestroy(p->m); delete p; } return CL_SUCCESS; }
 inline cl_int clReleaseCommandQueue(cl_command_queue) { return CL_SUCCESS; }
@@ -514,7 +548,13 @@ struct ClRt {
     CL_CHECK(err);
     return m;
   }
-  static double event_ms(cl_event) { return 0.0; }
+  static double event_ms(cl_event e) {  // (kernel time from the Level Zero timestamps; call after clFinish)
+    if (!e) return 0.0;
+    ze_kernel_timestamp_result_t ts{};
+    if (zeEventQueryKernelTimestamp((ze_event_handle_t)e, &ts) != ZE_RESULT_SUCCESS) return 0.0;
+    const uint64_t t = (ts.context.kernelEnd - ts.context.kernelStart) & zrt::ev_mask;
+    return t * zrt::ev_ns_per_tick * 1e-6;
+  }
 };
 
 inline std::string read_file(const std::string& path) {

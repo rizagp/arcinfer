@@ -299,3 +299,31 @@ call lolos, jawaban gambar/audio sama. Tidak memenuhi = tidak dipakai (sakelar k
 - [ ] Server kadang lambat ±½ sepanjang umurnya (35B: 26 → 12 tok/s, log identik), terutama bila dijalankan
       tepat setelah server lain mati; jeda 5 dtk membantu. runz --bench-pp kini mencetak waktu per langkah (16 Okt:
       7 run E4B 32K stabil, lambat tidak muncul; dugaan: satu jeda besar, bukan GPU lambat terus).
+
+## F17: kerja akhir pekan, Jumat 16 Okt malam → Senin 19 Okt 08:00 (laptop ditinggal)
+
+Fokus: kecepatan 27B di arcinferzero. Aturan tetap: hasil identik per bit dengan sebelumnya (atau, untuk drafter,
+jawaban identik dengan tanpa drafter), tes di folder scratch, server tes di port 8091 dan selalu dimatikan, RAM
+Windows >= 14 GB, GGUF tidak dihapus, jalur drafter Gemma tidak diubah, tidak ada unduhan lain selain DFlash2
+(sudah diizinkan), push ke GitHub hanya kalau diizinkan. Setiap perubahan dicatat di docs/arcinferzero-log.md.
+
+| # | Pekerjaan | Perkiraan | Target | Syarat lolos |
+|---|---|---|---|---|
+| 17.1 | GEMV IQ3_S / IQ3_XXS (dan IQ2_*) lebih cepat: bench GEMV khusus zero per jenis kuantisasi, varian codebook (SLM / register / konstanta), cara membuka indeks + tanda, baris per sub-group; urutan penjumlahan tetap | 2–4 jam | FFN 27B 56–60 → ≥ 68 GB/s; 27B +5–10 % | logit identik (run vs runz) 4B, 9B, 27B, 35B; kecepatan bergantian 3x |
+| 17.2 | Gabung kernel kecil: gate + up FFN satu kernel; kernel kecil DeltaNet (gates, conv, update state, norm) | 2–3 jam | jeda antar-kernel 4 % → ≤ 2 %; 27B +2–4 % | sama dengan 17.1 |
+| 17.3 | DFlash2 untuk 27B: (a) konversi safetensors BF16 → GGUF (bobot ke Q8_0, selector + konvolusi apa adanya); (b) acuan CPU numpy dari kode z-lab/dflash (model.py), dicek dengan hidden state yang di-dump dari runz; (c) drafter di GPU: fc + hidden_norm, 5 layer (konvolusi dua-tap, attention non-kausal sliding 2048 atas fitur konteks, MLP), kepala output 27B untuk 7 posisi, top-16 + selector; (d) simpan hidden state layer 5/19/33/47/61 saat verifikasi; (e) verifikasi blok 8 memakai jalur MTP 7 draft yang sudah ada (rollback DeltaNet replay); (f) runz + server (`--drafter dflash`) | 15–25 jam | 27B ±9 → 12–15 tok/s | jawaban identik dengan tanpa drafter (kode + Indonesia, suhu 0); token draft = acuan numpy; tidak ada crash 20 permintaan berturut-turut |
+| 17.4 | (bila 17.3 selesai) Setel DFlash2: panjang blok efektif, kuantisasi drafter (Q8_0 vs Q4), sampling suhu > 0 (rejection sampling seperti acuan), konteks panjang | 3–6 jam | kecepatan terbaik per jenis jawaban | sama dengan 17.3 |
+| 17.5 | (bila waktu sisa) Draft MTP lebih murah untuk model lain (daftar token dinamis); atau mulai KV berhalaman untuk slot | sisa waktu | — | identik |
+| 17.6 | Regresi penuh semua model (identitas, gambar/audio, MTP, tool call, API, Pi smoke), dokumen, laporan | 3–4 jam | semua lolos | — |
+
+Jadwal kasar (diubah sesuai hasil; pekerjaan yang gagal syarat dibatalkan, tidak dipaksakan):
+- Jumat malam: 17.1, lalu 17.2.
+- Sabtu: 17.3 a–c (konversi, acuan numpy, drafter di GPU).
+- Minggu: 17.3 d–f (integrasi, server), 17.4.
+- Minggu malam – Senin 04:00: 17.5 bila ada waktu; Senin 04:00–07:30: 17.6.
+- Senin 07:30 berhenti tes; 07:40 rapikan: semua proses tes dihentikan, server DIBIARKAN MATI (keputusan user),
+  laporan akhir.
+
+Keputusan user (16 Okt pagi): mulai nanti malam saat user bilang (server dipakai user sampai sore); commit lokal saja,
+push ke GitHub setelah user cek laporan Senin; Senin pagi server dibiarkan mati; laptop dijaga tetap menyala lewat
+aplikasi selama kerja.
