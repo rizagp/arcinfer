@@ -400,3 +400,17 @@ MoE 512 expert dengan streaming langsung dari GGUF + tambalan baris down, PLE di
 - Hasil (greedy, identik dengan tanpa drafter): kode 4,85 -> 11,5 tok/s (89 % draft diterima, 6,9 token/pass);
   teks Indonesia DFlash2 saja 2,9 tok/s (11 % diterima) -> mode gabungan dengan MTP: 5,6 (MTP saja 5,8-6,3).
 - Drafter memakan ±13 % waktu (dfl 7,9 %, head 4,7 %); sisanya verifikasi 8 baris 27B (±480 ms per pass).
+
+### Flash Next lebih cepat (16 Okt malam)
+
+- Generate 4,28 -> 6,85 tok/s: pool cache expert dikelompokkan per ukuran record (12 -> 16 %), salinan W8 bobot
+  dense dilepas untuk cache (16 -> 22 %, hit 80 -> 86 %), kernel MoE TM 1 dirombak (agent, studi ISA), mixer hc
+  satu token digabung (hc_down1 dengan K dibagi 8 potong + hc_up1, f32): 25,1 -> 17,4 ms per token.
+- SSD laptop ini: baca acak 2 MB maksimal 3,6-3,8 GB/s di semua QD (zero/ssd_bench.cpp); engine sudah di batas itu.
+- Tebakan routing layer berikutnya untuk prefetch (ARC_XGUESS=1): 37 % tebakan terpakai, 48 % miss tertangkap,
+  baca SSD +55 %, tidak lebih cepat -> mati. Simulasi (zero/cache_sim.py): LRU global 82 % > LRU per layer 80 %,
+  Belady 90 % pada cache 16 %.
+- QSA divalidasi pada 3.566 token: KL vs acuan CPU ber-QSA 0,020 (attention padat 0,043). Acuan CPU sempat NaN:
+  silu dengan /fp:fast (x / inf) di mixer -> diperbaiki di tools/ref_forward.
+- 35B: kernel moe_down -20 % (bit-identik); bench/moe_bench: gate/up IQ3_XXS 51 GB/s sendirian, ±35 di model.
+
