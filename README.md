@@ -1,8 +1,8 @@
 # arcinfer
 
-A from-scratch LLM inference engine for **Intel integrated GPUs (Xe-LPG / Meteor Lake "Arc Graphics")**,
-written in C++ with OpenCL C kernels, focused on **fast prompt processing (time to first token)** for long prompts
-such as scanning a codebase. It loads GGUF files directly and serves an **OpenAI-, Anthropic- and Ollama-compatible
+A from-scratch LLM inference engine for **Intel integrated GPUs (Xe-LPG / Meteor Lake "Arc Graphics")** that runs on
+**Level Zero** (Intel's low-level GPU API; the original OpenCL engine is kept as an option), written in C++, focused on
+**fast prompt processing (time to first token)** for long prompts such as scanning a codebase. It loads GGUF files directly and serves an **OpenAI-, Anthropic- and Ollama-compatible
 API with a web UI**, and it plugs into the [Pi](https://pi.dev) coding agent with one command.
 
 Two engines share the kernels and the server code:
