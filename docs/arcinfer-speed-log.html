@@ -116,6 +116,7 @@ td .down { color: var(--copper); font-weight: 600; }
     <h1>Menjalankan Model 35B di Laptop Tanpa Kartu Grafis Diskrit</h1>
     <p class="dek">Laporan ini merangkum hasil pengujian performa arcinfer, engine inferensi yang dikembangkan khusus untuk iGPU Intel Arc, mulai dari versi awal hingga kondisi terkini. Fokus pengujian meliputi kecepatan prefill (pemrosesan prompt) dan token generation pada enam model, dari Qwen3.5 4B sampai Qwen3.6 35B-A3B.</p>
     <div class="byline">Seluruh pengukuran dilakukan pada perangkat yang sama. Sumber data: CHANGELOG, QUEUE, review_notes, dan bench/results proyek arcinfer.</div>
+    <div class="byline">Catatan: laporan ini memakai engine OpenCL (10–14 Oktober). Sejak 16 Oktober engine bawaannya arcinferzero (kernel yang sama lewat Level Zero, hasil identik per bit); angka terbaru ada di <a href="performa-zero-2026-10-16.html">performa-zero-2026-10-16.html</a>.</div>
   </header>
 
   <div class="plate" aria-label="Spesifikasi platform pengujian">
