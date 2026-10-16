@@ -64,10 +64,29 @@
 #error "unsupported QTYPE"
 #endif
 
+#ifndef TP  // tokens per step of the dot-product loop (divides TM)
+#if defined(W8)
+#define TP (SC32 && TM >= 16 ? 16 : 8)  // 27B prompt GEMM, IQ3: TP 16 +3-7 % vs one token at a time; 8 for 4 scales (16 spills)
+#else
+#define TP 1  // native types: Q8_0 is already scheduled well, the K types spill with TP > 1
+#endif
+#endif
+
 #if QTYPE == Q4_K || QTYPE == Q5_K
 #define DOT(a, w) dot_4x8packed_su_int((a), (w))
 #else
 #define DOT(a, w) dot_4x8packed_ss_int((a), (w))
+#endif
+
+// W8: int32 sum x weight scale (int8), activation sum (|b| <= 2048) x min (0..255) as 32x16 and 16x16-bit
+// multiplies: one instruction each, where the 32x32-bit multiply is emulated (mul + mach). Same products.
+// The native types keep the plain multiply (their compiled schedule depends on it; not measured yet).
+#if defined(W8)
+#define MULS(x, sc) ((x) * (short)(sc))
+#define MULMIN(b, mn) ((short)(b) * (short)(mn))
+#else
+#define MULS(x, sc) ((sc) * (x))
+#define MULMIN(b, mn) ((mn) * (b))
 #endif
 
 #define SBYTE(u, k) ((int)(char)(((u) >> (8 * (k))) & 0xFF))
@@ -246,22 +265,53 @@ __kernel void gemm(__global const uint* restrict wq, __global const uint* restri
 #endif
 #endif
 
+      // TP tokens at a time: their activation words are loaded first, then their dot products run side by side
+      // (2 or 4 * TP independent DP4a chains). Written out explicitly because for some kernels the compiler keeps
+      // this source order, and one token at a time leaves 2 chains and 1-3 loads in flight (3x slower).
 #pragma unroll
-      for (int m = 0; m < TM; ++m) {
+      for (int mg = 0; mg < TM; mg += TP) {
+      uint aw[TP];
+#pragma unroll
+      for (int p = 0; p < TP; ++p) {
+        const int m = mg + p;
 #ifdef DBG_NOALOAD
-        const uint a = (uint)(m * 0x01010101 + s + j) ^ get_sub_group_local_id();
+        aw[p] = (uint)(m * 0x01010101 + s + j) ^ get_sub_group_local_id();
 #elif defined(MOE_TILES)
-        const uint a = intel_sub_group_block_read((__global const uint*)(aq + (size_t)BCAST(tokl, m) * K + s * 256 + j * 64));
+        aw[p] = intel_sub_group_block_read((__global const uint*)(aq + (size_t)BCAST(tokl, m) * K + s * 256 + j * 64));
 #else
-        const uint a = intel_sub_group_block_read((__global const uint*)(ap + (size_t)m * K + s * 256 + j * 64));
+        aw[p] = intel_sub_group_block_read((__global const uint*)(ap + (size_t)m * K + s * 256 + j * 64));
 #endif
+      }
 #if SC32
-        int acc0 = 0, acc1 = 0;
+      int c0[TP], c1[TP];
 #pragma unroll
-        for (int w = 0; w < 8; ++w) {
-          acc0 += DOT(BCASTA(a, w), lo[w]);
-          acc1 += DOT(BCASTA(a, w + 8), hi[w]);
+      for (int p = 0; p < TP; ++p) c0[p] = c1[p] = 0;
+#pragma unroll
+      for (int w = 0; w < 8; ++w)
+#pragma unroll
+        for (int p = 0; p < TP; ++p) {
+          c0[p] += DOT(BCASTA(aw[p], w), lo[w]);
+          c1[p] += DOT(BCASTA(aw[p], w + 8), hi[w]);
         }
+#else
+      int c0[TP], c1[TP], c2[TP], c3[TP];
+#pragma unroll
+      for (int p = 0; p < TP; ++p) c0[p] = c1[p] = c2[p] = c3[p] = 0;
+#pragma unroll
+      for (int w = 0; w < 4; ++w)
+#pragma unroll
+        for (int p = 0; p < TP; ++p) {
+          c0[p] += DOT(BCAST(aw[p], w), lo[w]);
+          c1[p] += DOT(BCAST(aw[p], w + 4), lo[w + 4]);
+          c2[p] += DOT(BCAST(aw[p], w + 8), hi[w]);
+          c3[p] += DOT(BCAST(aw[p], w + 12), hi[w + 4]);
+        }
+#endif
+#pragma unroll
+      for (int p = 0; p < TP; ++p) {
+        const int m = mg + p;
+#if SC32
+        const int acc0 = c0[p], acc1 = c1[p];
 #if QTYPE == Q8_0
 #ifdef ACT32
         res[m] = fma(BCAST(avl[m / 16], m % 16) * dlo, (float)acc0, fma(BCAST(avh[m / 16], m % 16) * dhi, (float)acc1, res[m]));
@@ -269,18 +319,11 @@ __kernel void gemm(__global const uint* restrict wq, __global const uint* restri
         isum[m] = fma(dlo, (float)acc0, fma(dhi, (float)acc1, isum[m]));
 #endif
 #else
-        const int plo = sc0 * acc0, phi = sc2 * acc1;
+        const int plo = MULS(acc0, sc0), phi = MULS(acc1, sc2);
 #endif
 #else
-        int acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
-#pragma unroll
-        for (int w = 0; w < 4; ++w) {
-          acc0 += DOT(BCAST(a, w), lo[w]);
-          acc1 += DOT(BCAST(a, w + 4), lo[w + 4]);
-          acc2 += DOT(BCAST(a, w + 8), hi[w]);
-          acc3 += DOT(BCAST(a, w + 12), hi[w + 4]);
-        }
-        const int plo = sc0 * acc0 + sc1 * acc1, phi = sc2 * acc2 + sc3 * acc3;
+        const int acc0 = c0[p], acc1 = c1[p], acc2 = c2[p], acc3 = c3[p];
+        const int plo = MULS(acc0, sc0) + MULS(acc1, sc1), phi = MULS(acc2, sc2) + MULS(acc3, sc3);
 #endif
 #if QTYPE != Q8_0
 #if defined(DBG_NOPOST)
@@ -288,14 +331,15 @@ __kernel void gemm(__global const uint* restrict wq, __global const uint* restri
 #elif defined(ACT32)
         tq[m] = fma(BCAST(avl[m / 16], m % 16), (float)plo, fma(BCAST(avh[m / 16], m % 16), (float)phi, tq[m]));
 #if HAS_MIN
-        const int mlo = mn0 * BCAST(b0[m / 16], m % 16) + mn1 * BCAST(b1[m / 16], m % 16);
-        const int mhi = mn2 * BCAST(b2[m / 16], m % 16) + mn3 * BCAST(b3[m / 16], m % 16);
+        const int mlo = MULMIN(BCAST(b0[m / 16], m % 16), mn0) + MULMIN(BCAST(b1[m / 16], m % 16), mn1);
+        const int mhi = MULMIN(BCAST(b2[m / 16], m % 16), mn2) + MULMIN(BCAST(b3[m / 16], m % 16), mn3);
         tmn[m] = fma(BCAST(avl[m / 16], m % 16), (float)mlo, fma(BCAST(avh[m / 16], m % 16), (float)mhi, tmn[m]));
 #endif
 #else
         isum[m] += plo + phi;
 #endif
 #endif
+      }
       }
     }
 

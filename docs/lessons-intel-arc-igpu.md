@@ -135,6 +135,13 @@ the multiply done in float, both bit-identical) cut the loop to 1,751 instructio
 (8.2 -> 2.5-2.8 TOPS): the driver's scheduler then interleaved only 2 independent DP4a chains instead of ~5, so each
 DP4a waited on the one before it (`{I@2}` instead of `{I@5}` dependencies). Instruction count is not the metric;
 the number of independent chains in flight is. Any GEMM change has to be measured, not counted.
+Why the scheduler did it: for this large unrolled loop it kept the **source order** (one token at a time: one
+activation load, its 16 DP4a, its scale math), so only 2 chains and 1-3 loads were in flight. Writing the interleave
+into the source fixes it: load the activation words of 16 tokens first, then run their dot products side by side
+(32 chains), then each token's scale math. With the 16-bit scale multiply this gives 1,742 instructions, ~900 of
+1,024 DP4a without a dependency wait, no spill, and is bit-identical: 27B GEMM 8.05 -> 8.30 TOPS (gate), 6.62 -> 7.0
+(down), 27B prompt 124 -> 127 tok/s; 35B unchanged (its prompt is not GEMM-bound). Rule: if the compiler keeps
+source order, the source order must already be the schedule you want.
 
 ## 7. Mistakes worth avoiding
 
