@@ -970,6 +970,9 @@ class Engine {
   cl_mem moe_wq_ = nullptr, moe_wh_ = nullptr;
   cl_mem pf_rl_ = nullptr, pf_tiles_ = nullptr, pf_dummy_ = nullptr;  // next-layer routing guess (generation)
   bool pf_next_ = false;
+  // one token, streamed experts: the tiles of its cached and of its missing experts (layer_moe, ARC_XSPLIT)
+  cl_mem xt_hit_ = nullptr, xt_miss_ = nullptr;
+  std::vector<int> xt_hit_h_, xt_miss_h_;
   int moe_group_ = 0;
   // residual stream of a prompt segment (up to lm_seg_ tokens) for layer-major prefill, and its per-chunk views
   cl_mem x_all_ = nullptr;
@@ -1622,7 +1625,8 @@ class Engine {
             xc_->st.path.c_str());
   }
   // After the routing of layer L: read the chosen experts and make them resident (see zero/xcache.h).
-  void stream_layer(Layer& L, int T, bool gemm) {
+  // (tl1: one token's tiles when the caller has read them already)
+  void stream_layer(Layer& L, int T, bool gemm, const int* tl1 = nullptr) {
     const int NU = hp.n_expert_used;
     static std::vector<int> ids;
     ids.resize((size_t)T * NU);
@@ -1631,9 +1635,13 @@ class Engine {
       std::vector<int> tl(1 + 3 * NU), tg;
       if (pf_next_) {  // (the guess of the next layer's routing, computed with this layer's)
         tg.resize(1 + 3 * NU);
-        CL_CHECK(clEnqueueReadBuffer(cl_.queue, pf_tiles_, CL_FALSE, 0, tg.size() * 4, tg.data(), 0, nullptr, nullptr));
+        CL_CHECK(clEnqueueReadBuffer(cl_.queue, pf_tiles_, tl1 ? CL_TRUE : CL_FALSE, 0, tg.size() * 4, tg.data(), 0,
+                                     nullptr, nullptr));
       }
-      CL_CHECK(clEnqueueReadBuffer(cl_.queue, mtiles_, CL_TRUE, 0, tl.size() * 4, tl.data(), 0, nullptr, nullptr));
+      if (tl1)
+        std::copy(tl1, tl1 + tl.size(), tl.begin());
+      else
+        CL_CHECK(clEnqueueReadBuffer(cl_.queue, mtiles_, CL_TRUE, 0, tl.size() * 4, tl.data(), 0, nullptr, nullptr));
       for (int k = 0; k < NU; ++k) ids[k] = tl[1 + 3 * k];
       if (pf_next_)
         for (int k = 0; k < NU; ++k) guess.push_back(tg[1 + 3 * k]);
@@ -3414,23 +3422,79 @@ class Engine {
     // 476 -> 642 tok/s; 512: 450 vs 310)
     static const int gemm_min = getenv("ARC_MOE_GEMM_MIN") ? atoi(getenv("ARC_MOE_GEMM_MIN")) : 1152;
     const bool use_gemm = moe_group_ > 0 && tm == 16 && T >= gemm_min && moe_gemm_layer_ok(L);
-    if (xc_) stream_layer(L, T, use_gemm);
     const std::string xdef = xc_ ? " -DXCACHE" : "";
-    if (use_gemm) {
-      moe_gemm(L, 0, Mp);
-    } else if (hp.moe_std) {  // standard expert types (kernels/decode.cl moe_gateup_q)
+    // standard expert types, per tile (kernels/decode.cl moe_gateup_q / moe_down_q): the tiles in `tiles`
+    auto gateup_q = [&](cl_mem tiles) {
       const int grows = gr_gu;
       cl_kernel k = kernel("decode", grf_env("ARC_MOE_GRF") + "-DMOE_Q -DQT=" + std::to_string(L.ex_type[0]) + " -DGROWS=" +
                                          std::to_string(grows) + " -DTM=" + std::to_string(tm) + xdef + hld, "moe_gateup_q");
       int M = Mp, K = E, FF = F;
       if (xc_) {
-        set_args(k, 0, xc_->xtab[L.il], xc_->xtab[L.il], FF, K, tabs_, aq_, asc_, M, mtiles_, stok_, mh_, xc_->xtab[L.il],
+        set_args(k, 0, xc_->xtab[L.il], xc_->xtab[L.il], FF, K, tabs_, aq_, asc_, M, tiles, stok_, mh_, xc_->xtab[L.il],
                  xoff(L, 0), xoff(L, 1));
       } else {
-        set_args(k, 0, L.ex_q[0], L.ex_q[1], FF, K, tabs_, aq_, asc_, M, mtiles_, stok_, mh_);
+        set_args(k, 0, L.ex_q[0], L.ex_q[1], FF, K, tabs_, aq_, asc_, M, tiles, stok_, mh_);
       }
       size_t gws[2] = {((size_t)(F + grows - 1) / grows * 16 + 255) / 256 * 256, max_tiles}, lws[2] = {256, 1};
       run("moe_gateup", k, 2, gws, lws);
+    };
+    auto quant_h = [&] {
+      cl_kernel k = kernel("moe", defs, "moe_quant");
+      int FF = Fp;
+      set_args(k, 0, mh_, FF, slots_, mhq_, mhsc_);
+      size_t gws[2] = {(size_t)16 * Fp / 256, (size_t)n}, lws[2] = {16, 1};
+      run("moe_quant", k, 2, gws, lws);
+    };
+    auto down_q = [&](cl_mem tiles) {
+      const int grows = T == 1 ? gr_dn : 1;
+      cl_kernel k = kernel("decode", "-DMOE_Q -DQT=" + std::to_string(L.ex_type[2]) + " -DGROWS=" + std::to_string(grows) +
+                                         " -DTM=" + std::to_string(tm) + xdef +
+                                         (Fp != F ? " -DFV=" + std::to_string(F) : std::string()), "moe_down_q");
+      int NN = E, K = Fp, S = slots_;
+      if (xc_)
+        set_args(k, 0, xc_->xtab[L.il], NN, K, tabs_, mhq_, mhsc_, S, tiles, swt_, my_, xc_->xtab[L.il], xoff(L, 2));
+      else
+        set_args(k, 0, L.ex_q[2], NN, K, tabs_, mhq_, mhsc_, S, tiles, swt_, my_);
+      size_t gws[2] = {((size_t)(E + grows - 1) / grows * 16 + 255) / 256 * 256, max_tiles}, lws[2] = {256, 1};
+      run("moe_down", k, 2, gws, lws);
+    };
+    // One token whose experts are partly not cached: the cached ones' gate / up and down run while stream_layer reads
+    // the others from the SSD, then the others' (the same kernels on per-slot rows: bit-identical). The victims of
+    // the reads are never experts of this layer, so the running kernels' experts stay put. Flash Next (22 % cached,
+    // 84.5 % hits): 6.6 -> 7.3 tok/s. ARC_XSPLIT=0: all after the reads.
+    static const bool xsplit = !getenv("ARC_XSPLIT") || atoi(getenv("ARC_XSPLIT")) != 0;
+    cl_mem tiles = mtiles_;
+    std::vector<int> tl1;
+    if (xc_ && T == 1 && !use_gemm && hp.moe_std && xsplit) {
+      tl1.resize(1 + 3 * (size_t)NU);
+      CL_CHECK(clEnqueueReadBuffer(cl_.queue, mtiles_, CL_TRUE, 0, tl1.size() * 4, tl1.data(), 0, nullptr, nullptr));
+      xt_hit_h_.assign(1, 0);
+      xt_miss_h_.assign(1, 0);
+      for (int t = 0; t < tl1[0] && t < NU; ++t) {
+        auto& v = xc_->cached(L.il, tl1[1 + 3 * t]) ? xt_hit_h_ : xt_miss_h_;
+        v.insert(v.end(), tl1.begin() + 1 + 3 * t, tl1.begin() + 4 + 3 * t);
+        ++v[0];
+      }
+      if (xt_hit_h_[0] > 0 && xt_miss_h_[0] > 0) {
+        if (!xt_hit_) {
+          xt_hit_ = buf((1 + 3 * (size_t)NU) * 4);
+          xt_miss_ = buf((1 + 3 * (size_t)NU) * 4);
+        }
+        CL_CHECK(clEnqueueWriteBuffer(cl_.queue, xt_hit_, CL_TRUE, 0, xt_hit_h_.size() * 4, xt_hit_h_.data(), 0, nullptr,
+                                      nullptr));
+        CL_CHECK(clEnqueueWriteBuffer(cl_.queue, xt_miss_, CL_TRUE, 0, xt_miss_h_.size() * 4, xt_miss_h_.data(), 0,
+                                      nullptr, nullptr));
+        gateup_q(xt_hit_);
+        quant_h();
+        down_q(xt_hit_);
+        tiles = xt_miss_;
+      }
+    }
+    if (xc_) stream_layer(L, T, use_gemm, tl1.empty() ? nullptr : tl1.data());
+    if (use_gemm) {
+      moe_gemm(L, 0, Mp);
+    } else if (hp.moe_std) {
+      gateup_q(tiles);
     } else {
       cl_kernel k = kernel("moe", defs, "moe_gateup");
       int M = Mp, K = E;
@@ -3438,13 +3502,7 @@ class Engine {
       size_t gws[2] = {(size_t)F, max_tiles}, lws[2] = {16, 1};
       run("moe_gateup", k, 2, gws, lws);
     }
-    {
-      cl_kernel k = kernel("moe", defs, "moe_quant");
-      int FF = Fp;
-      set_args(k, 0, mh_, FF, slots_, mhq_, mhsc_);
-      size_t gws[2] = {(size_t)16 * Fp / 256, (size_t)n}, lws[2] = {16, 1};
-      run("moe_quant", k, 2, gws, lws);
-    }
+    quant_h();
     // shared expert down: its quantized input replaces the FFN input in aq_ (the expert GEMM above has read it)
     {
       int a32 = 1, gelu = 0;
@@ -3456,17 +3514,7 @@ class Engine {
     if (use_gemm) {
       moe_gemm(L, 2, Mp);
     } else if (hp.moe_std) {
-      const int grows = T == 1 ? gr_dn : 1;
-      cl_kernel k = kernel("decode", "-DMOE_Q -DQT=" + std::to_string(L.ex_type[2]) + " -DGROWS=" + std::to_string(grows) +
-                                         " -DTM=" + std::to_string(tm) + xdef +
-                                         (Fp != F ? " -DFV=" + std::to_string(F) : std::string()), "moe_down_q");
-      int NN = E, K = Fp, S = slots_;
-      if (xc_)
-        set_args(k, 0, xc_->xtab[L.il], NN, K, tabs_, mhq_, mhsc_, S, mtiles_, swt_, my_, xc_->xtab[L.il], xoff(L, 2));
-      else
-        set_args(k, 0, L.ex_q[2], NN, K, tabs_, mhq_, mhsc_, S, mtiles_, swt_, my_);
-      size_t gws[2] = {((size_t)(E + grows - 1) / grows * 16 + 255) / 256 * 256, max_tiles}, lws[2] = {256, 1};
-      run("moe_down", k, 2, gws, lws);
+      down_q(tiles);
     } else {
       cl_kernel k = kernel("moe", defs, "moe_down");
       set_args(k, 0, L.ex_q[2], L.ex_s[2], mhq_, mhsc_, slots_, F, E, mtiles_, swt_, my_);

@@ -2935,7 +2935,11 @@ __kernel void dfl_add(__global float* x, __global const float* y, int E) {
 #ifndef HCK
 #define HCK 10240
 #endif
-// dot of 256 weights (one superblock at p) with x[0..256): lane l takes elements 16 l .. 16 l + 15 (block l / 2)
+// The activations in local memory are stored per superblock transposed, element 16 l + j at 16 j + l (HC_XT), so that
+// the lanes' reads of one step are consecutive: read as x[16 l + j] all 16 lanes hit the same bank (hc_up1 100 us).
+#define HC_XT(k) (((k) & ~255) | (((k) & 15) << 4) | (((k) >> 4) & 15))
+// dot of 256 weights (one superblock at p) with x[0..256) (HC_XT layout): lane l takes elements 16 l .. 16 l + 15
+// (block l / 2)
 inline float q8sb_dot(__global const uchar* p, __local const float* x) {
   const int lane = get_sub_group_local_id();
   const float d = vload_half(lane / 2, (__global const half*)p);
@@ -2943,7 +2947,7 @@ inline float q8sb_dot(__global const uchar* p, __local const float* x) {
   const uint w[4] = {q.x, q.y, q.z, q.w};
   float acc = 0.0f;
 #pragma unroll
-  for (int j = 0; j < 16; ++j) acc += (float)(char)((w[j / 4] >> (8 * (j % 4))) & 0xFF) * x[16 * lane + j];
+  for (int j = 0; j < 16; ++j) acc += (float)(char)((w[j / 4] >> (8 * (j % 4))) & 0xFF) * x[16 * j + lane];
   return d * acc;
 }
 // Partial sums of lo[n] = W_down[n] . xn over K slice ks (HCK / KS values; n < N: the low-rank and the inject rows),
@@ -2970,7 +2974,7 @@ __kernel void hc_down1(__global const float* res, int r0, __global const float* 
   if (li == 0) rs[0] = rsqrt(ss / E + eps);
   barrier(CLK_LOCAL_MEM_FENCE);
   const float r = rs[0];
-  for (int i = li; i < SL; i += ls) xs[i] = xr[k0 + i] * r * w[k0 + i];
+  for (int i = li; i < SL; i += ls) xs[HC_XT(i)] = xr[k0 + i] * r * w[k0 + i];
   barrier(CLK_LOCAL_MEM_FENCE);
   if (get_group_id(0) == 0 && li == 0 && (k0 % E) == 0) rinv[c] = r;
   const int n = get_group_id(0) * 16 + get_sub_group_id(), nsb = HC * E / 256, s0 = k0 / 256;
@@ -2994,7 +2998,7 @@ __kernel void hc_up1(__global const float* res, int r0, __global const float* w,
       for (int q = 0; q < HC_KS; ++q) v += part[(size_t)q * N + k];
     if (get_group_id(0) == 0 && k < N) lo[k] = v;  // (the inject logits for hc_combine)
     v = k < LR ? v / (float)HC : 0.0f;
-    xs[k] = v / (1.0f + exp(-v));
+    xs[HC_XT(k)] = v / (1.0f + exp(-v));
   }
   barrier(CLK_LOCAL_MEM_FENCE);
   const int i = get_group_id(0) * 16 + get_sub_group_id(), nsb = KP / 256;

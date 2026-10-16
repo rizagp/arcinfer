@@ -495,6 +495,15 @@ struct XCache {
 
   // Makes the experts `ids` (any order, repeats allowed) of layer l readable by the kernels; prompt = a prompt chunk.
   // dummy_rest: also point the layer's other experts at valid memory (the prompt GEMM decodes whole expert groups).
+  // expert e of layer l is in the cache: its record's address goes to xaddr (where a prompt chunk's GEMM may have left
+  // a dummy one) and it stays there through the next ensure() of this layer, which takes the hits first
+  bool cached(int l, int e) {
+    if (e < 0 || e >= NE) return false;
+    const int s = where[(size_t)l * NE + e];
+    if (s < 0) return false;
+    xaddr[(size_t)l * NE + e] = (uint64_t)pools[pool_of[l]].addr[s];
+    return true;
+  }
   void ensure(int l, const int* ids, size_t n, bool prompt, bool dummy_rest) {
     join();
     Pool& P = pools[pool_of[l]];
