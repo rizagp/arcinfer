@@ -2426,7 +2426,17 @@ class Engine {
       const int tb = old ? (cur_T_ <= 2 ? 2 : cur_T_ <= 4 ? 4 : 8) : cur_T_;
       const bool vk = gemv_v_ok(w) || (!old && w.type == GGML_IQ3_S);
       int gr = vk ? gemv_v_rows(w) : w.N <= 4096 ? 1 : w.N <= 8192 ? 2 : 4;
-      if (!old) gr = w.type == GGML_Q6_K ? 1 : w.type == GGML_IQ3_S ? 2 : vk ? (w.N >= 8192 ? 4 : 2) : std::min(gr, 2);
+      // Below 6 tokens (MTP verification of prose: 2-3 rows) 4 rows per sub-group for the codebook types and for long
+      // rows (K >= 8192, the FFN down projection), Q4_K / IQ4_XS short rows 2: 27B, bench/gemv_bench, 3 tokens: gate
+      // IQ3_XXS 57.8 -> 64.7 GB/s, down Q4_K 57.5 -> 70.6; Indonesian prose with MTP 6.95 -> 7.2 tok/s. With 6-8
+      // tokens the earlier rule stays: there 4 for the down projection and 2 for gate / up were faster only in
+      // bench/gemv_bench (code with 7 drafts or DFlash2 2 % slower in the model). Bit-identical either way.
+      if (!old) {
+        const bool cb = vk && w.type != GGML_IQ4_XS;
+        if (w.type == GGML_Q6_K) gr = 1;
+        else if (cur_T_ < 6 && (vk || w.type == GGML_Q4_K)) gr = w.K >= 8192 || cb ? 4 : 2;
+        else gr = w.type == GGML_IQ3_S ? 2 : vk ? (w.N >= 8192 ? 4 : 2) : std::min(gr, 2);
+      }
       cl_kernel k = kernel("decode", std::string(old ? "" : "-cl-intel-256-GRF-per-thread ") + "-DQT=" +
                                          std::to_string(w.type) + " -DGROWS=" + std::to_string(gr) + " -DTB=" + std::to_string(tb) + head_defs(w) +
                                          mt_lazy_opt(),
