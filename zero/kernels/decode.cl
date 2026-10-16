@@ -801,8 +801,14 @@ inline void vb_tables(__local uint* kt, __global const uint* tabs) {
 // codebook types (IQ1_M, IQ2_*, IQ3_*): the codebook (and the sign table) staged in local memory; each lane loads
 // its superblock into registers with 8-byte vector loads and decodes its block there with decode32 (gemv decoded
 // from a sub-group-staged local window with byte-wise reads: 27-61 GB/s on these types)
-#ifdef AUX_OFF
+#if defined(AUX_OFF) && defined(SGN_MASKS)
+// (-DSGN_MASKS: the sign table expanded to byte masks, 128 x (low word, high word): apply_signs4 becomes
+//  (g ^ m) + (m & 0x01010101) with m read from local memory, no per-word multiplies; the same words)
+#define VB_TABLES (GRID_N + 256)
+#elif defined(AUX_OFF)
 #define VB_TABLES (GRID_N + AUX_N)
+#elif defined(SGN_MASKS) && (QT == IQ3_S || QT == IQ2_S)
+#define VB_TABLES (GRID_N + 512)  // (sign bytes stored directly: 256 x (low mask, high mask))
 #else
 #define VB_TABLES GRID_N
 #endif
@@ -820,11 +826,23 @@ inline void vb_tables(__local uint* kt, __global const uint* tabs) {
     kt[i + 3 * ls] = t3;
   }
   for (; i < GRID_N; i += ls) kt[i] = tabs[GRID_OFF + i];
-#ifdef AUX_OFF
+#if defined(AUX_OFF) && defined(SGN_MASKS)
+  for (int i = get_local_id(0); i < 128; i += get_local_size(0)) {
+    const uint sg = (tabs[AUX_OFF + i / 4] >> (8 * (i % 4))) & 0xFFu;
+    kt[GRID_N + 2 * i] = ((((sg & 0xFu) * 0x00204081u) & 0x01010101u) * 0xFFu);
+    kt[GRID_N + 2 * i + 1] = ((((sg >> 4) * 0x00204081u) & 0x01010101u) * 0xFFu);
+  }
+#elif defined(AUX_OFF)
   for (int i = get_local_id(0); i < AUX_N; i += get_local_size(0)) kt[GRID_N + i] = tabs[AUX_OFF + i];
+#elif defined(SGN_MASKS) && (QT == IQ3_S || QT == IQ2_S)
+  for (int i = get_local_id(0); i < 256; i += get_local_size(0)) {
+    kt[GRID_N + 2 * i] = (((((uint)i & 0xFu) * 0x00204081u) & 0x01010101u) * 0xFFu);
+    kt[GRID_N + 2 * i + 1] = (((((uint)i >> 4) * 0x00204081u) & 0x01010101u) * 0xFFu);
+  }
 #endif
   barrier(CLK_LOCAL_MEM_FENCE);
 }
+inline uint apply_mask4(uint g, uint m) { return (g ^ m) + (m & 0x01010101u); }
 #else
 #define VB_TABLES 1
 inline void vb_tables(__local uint* kt, __global const uint* tabs) {}
@@ -916,9 +934,15 @@ inline void vblock(__global const uchar* p, int ib, __local const uint* kt, uint
   const uint qq[4] = {qv.x, qv.y, qv.z, qv.w};
 #pragma unroll
   for (int l = 0; l < 4; ++l) {
+#ifdef SGN_MASKS
+    const uint2 m = vload2((a >> (7 * l)) & 127, kt + GRID_N);
+    w[2 * l] = apply_mask4(kt[qq[l] & 0xFF], m.x);
+    w[2 * l + 1] = apply_mask4(kt[qq[l] >> 8], m.y);
+#else
     const uint sg = ksg[(a >> (7 * l)) & 127];
     w[2 * l] = apply_signs4(kt[qq[l] & 0xFF], sg & 0xF);
     w[2 * l + 1] = apply_signs4(kt[qq[l] >> 8], sg >> 4);
+#endif
   }
 #elif QT == IQ2_XXS
   *d = f16(ps[(BB - 2) / 2]) * 0.125f;
@@ -927,9 +951,16 @@ inline void vblock(__global const uchar* p, int ib, __local const uint* kt, uint
   *sc0 = *sc1 = 1 + 2 * (int)(a1 >> 28);
 #pragma unroll
   for (int l = 0; l < 4; ++l) {
+#ifdef SGN_MASKS
+    const uint gi = (a0 >> (8 * l)) & 0xFF;
+    const uint2 m = vload2((a1 >> (7 * l)) & 127, kt + GRID_N);
+    w[2 * l] = apply_mask4(kt[2 * gi], m.x);
+    w[2 * l + 1] = apply_mask4(kt[2 * gi + 1], m.y);
+#else
     const uint gi = (a0 >> (8 * l)) & 0xFF, sg = ksg[(a1 >> (7 * l)) & 127];
     w[2 * l] = apply_signs4(kt[2 * gi], sg & 0xF);
     w[2 * l + 1] = apply_signs4(kt[2 * gi + 1], sg >> 4);
+#endif
   }
 #elif QT == IQ3_S
   *d = f16(ps[(BB - 2) / 2]);
@@ -940,9 +971,15 @@ inline void vblock(__global const uchar* p, int ib, __local const uint* kt, uint
 #pragma unroll
   for (int l = 0; l < 4; ++l) {
     const uint g1 = (qq[l] & 0xFF) | ((h << (8 - 2 * l)) & 256), g2 = (qq[l] >> 8) | ((h << (7 - 2 * l)) & 256);
+#ifdef SGN_MASKS
+    const uint2 m = vload2((sgn >> (8 * l)) & 0xFF, kt + GRID_N);
+    w[2 * l] = apply_mask4(kt[g1], m.x);
+    w[2 * l + 1] = apply_mask4(kt[g2], m.y);
+#else
     const uint sg = (sgn >> (8 * l)) & 0xFF;
     w[2 * l] = apply_signs4(kt[g1], sg & 0xF);
     w[2 * l + 1] = apply_signs4(kt[g2], sg >> 4);
+#endif
   }
 #elif QT == IQ2_XS
   *d = f16(ps[(BB - 2) / 2]) * 0.125f;
@@ -953,9 +990,16 @@ inline void vblock(__global const uchar* p, int ib, __local const uint* kt, uint
   const uint qq[4] = {qv.x, qv.y, qv.z, qv.w};
 #pragma unroll
   for (int l = 0; l < 4; ++l) {
+#ifdef SGN_MASKS
+    const uint gi = qq[l] & 511;
+    const uint2 m = vload2(qq[l] >> 9, kt + GRID_N);
+    w[2 * l] = apply_mask4(kt[2 * gi], m.x);
+    w[2 * l + 1] = apply_mask4(kt[2 * gi + 1], m.y);
+#else
     const uint gi = qq[l] & 511, sg = ksg[qq[l] >> 9];
     w[2 * l] = apply_signs4(kt[2 * gi], sg & 0xF);
     w[2 * l + 1] = apply_signs4(kt[2 * gi + 1], sg >> 4);
+#endif
   }
 #elif QT == IQ2_S
   *d = f16(ps[(BB - 2) / 2]) * 0.125f;
@@ -966,8 +1010,14 @@ inline void vblock(__global const uchar* p, int ib, __local const uint* kt, uint
 #pragma unroll
   for (int l = 0; l < 4; ++l) {
     const uint gi = ((qs4 >> (8 * l)) & 0xFF) | ((h << (8 - 2 * l)) & 0x300), sg = (sg4 >> (8 * l)) & 0xFF;
+#ifdef SGN_MASKS
+    const uint2 m = vload2(sg, kt + GRID_N);
+    w[2 * l] = apply_mask4(kt[2 * gi], m.x);
+    w[2 * l + 1] = apply_mask4(kt[2 * gi + 1], m.y);
+#else
     w[2 * l] = apply_signs4(kt[2 * gi], sg & 0xF);
     w[2 * l + 1] = apply_signs4(kt[2 * gi + 1], sg >> 4);
+#endif
   }
 #else
   // (other codebook types, IQ1_M: decode32 from global memory, byte-wise)
@@ -1080,39 +1130,108 @@ __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void gemv_mt_v(__global const uchar* raw, int N, int K, __global const uint* tabs, __global const char* aq,
                         __global const float* asc, __global const ushort* absum, int M, int T, __global float* C,
                         int ldc, int c_off, int accumulate) {
+  // Token-outer form: the GROWS rows' blocks are decoded first, then each token's activations are loaded once for
+  // all rows (instead of once per row: half the activation reads with 2 rows, one scale load per token
+  // instead of one per row and token), each half block (4 words) one half ahead of its use, so a load is always in
+  // flight. The rows' dot chains are written interleaved (the compiler keeps source order). No per-token branches:
+  // tokens t >= T read token T - 1's bytes (results never stored); lanes past the last superblock (odd nsb) read a
+  // valid block and multiply by a zero scale (st = 0, as before: the term is +-0). Same integer sums and the same
+  // float expression per (row, token): bit-identical to the row-outer form.
+#ifndef MT_ONESC
+#if QT == IQ3_XXS || QT == IQ3_S || QT == IQ4_XS || QT == IQ2_XXS
+#define MT_ONESC 1  // (sc0 == sc1 by construction; -DMT_ONESC=0 for the two-chain form)
+#else
+#define MT_ONESC 0
+#endif
+#endif
   __local uint kt[VB_TABLES];
   vb_tables(kt, tabs);
   const int lane = get_sub_group_local_id(), r0 = (get_global_id(0) / 16) * GROWS;
-  const int nsb = K / 256, ib = lane % 8, hs = lane / 8;
+  const int nsb = K / 256, ib = lane % 8, hs = lane / 8, K4 = K / 4;
+  __global const uchar* rp[GROWS];
+#pragma unroll
+  for (int r = 0; r < GROWS; ++r) rp[r] = raw + (size_t)min(r0 + r, N - 1) * nsb * BBP;
   float acc[GROWS][TB];
 #pragma unroll
   for (int r = 0; r < GROWS; ++r)
 #pragma unroll
     for (int t = 0; t < TB; ++t) acc[r][t] = 0.0f;
   for (int sp = 0; sp < nsb; sp += 2) {
-    const int b = sp * 8 + lane;
     const bool has = sp + hs < nsb;
     const int s = has ? sp + hs : sp;
-    MT_ACTS
+    const int b = s * 8 + ib;
+    __global const uint* ap = (__global const uint*)aq + 8 * b;
+    __global const float* ascb = asc + (size_t)b * M;
+    // half-token pipeline: words 0..3 (lo) / 4..7 (hi) of a token's block, one half loaded ahead of its use
+    uint4 an = vload4(0, ap);  // token 0, lo half: in flight while the weights are decoded
+    float sn = ascb[0];
+    uint w[GROWS][8];
+    float dr[GROWS];
+    int s0r[GROWS], s1r[GROWS];
 #pragma unroll
     for (int r = 0; r < GROWS; ++r) {
-      uint w[8];
-      float d, dmin;
-      int sc0, sc1, mn0, mn1;
-      vblock(raw + ((size_t)min(r0 + r, N - 1) * nsb + s) * BBP, ib, kt, w, &d, &dmin, &sc0, &sc1, &mn0, &mn1);
+      float dmin;
+      int mn0, mn1;
+      vblock(rp[r] + (size_t)s * BBP, ib, kt, w[r], &dr[r], &dmin, &s0r[r], &s1r[r], &mn0, &mn1);
+    }
 #pragma unroll
-      for (int t = 0; t < TB; ++t) {
-        MT_ACT(t)
-        int lo = dot_4x8packed_ss_int(at.s0, w[0]);
-        lo += dot_4x8packed_ss_int(at.s1, w[1]);
-        lo += dot_4x8packed_ss_int(at.s2, w[2]);
-        lo += dot_4x8packed_ss_int(at.s3, w[3]);
-        int hi = dot_4x8packed_ss_int(at.s4, w[4]);
-        hi += dot_4x8packed_ss_int(at.s5, w[5]);
-        hi += dot_4x8packed_ss_int(at.s6, w[6]);
-        hi += dot_4x8packed_ss_int(at.s7, w[7]);
-        acc[r][t] += st * d * (float)(sc0 * lo + sc1 * hi);
+    for (int t = 0; t < TB; ++t) {
+      __global const uint* apt = ap + (size_t)min(t, T - 1) * K4;
+      const uint4 al = an;
+      const float st = has ? sn : 0.0f;
+      an = vload4(1, apt);  // this token's hi half
+#if MT_ONESC
+      // (one scale per block: one chain of 8 per row, lo + hi summed in the chain: the same integer)
+      int x[GROWS];
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) x[r] = dot_4x8packed_ss_int(al.x, w[r][0]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) x[r] += dot_4x8packed_ss_int(al.y, w[r][1]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) x[r] += dot_4x8packed_ss_int(al.z, w[r][2]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) x[r] += dot_4x8packed_ss_int(al.w, w[r][3]);
+#else
+      int lo[GROWS], hi[GROWS];
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) lo[r] = dot_4x8packed_ss_int(al.x, w[r][0]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) lo[r] += dot_4x8packed_ss_int(al.y, w[r][1]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) lo[r] += dot_4x8packed_ss_int(al.z, w[r][2]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) lo[r] += dot_4x8packed_ss_int(al.w, w[r][3]);
+#endif
+      const uint4 ah = an;
+      if (t + 1 < TB) {  // next token's lo half and scale
+        an = vload4(0, ap + (size_t)min(t + 1, T - 1) * K4);
+        sn = ascb[min(t + 1, T - 1)];  // (a runtime index: not merged into one 8-float load, 14 registers fewer)
       }
+#if MT_ONESC
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) x[r] += dot_4x8packed_ss_int(ah.x, w[r][4]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) x[r] += dot_4x8packed_ss_int(ah.y, w[r][5]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) x[r] += dot_4x8packed_ss_int(ah.z, w[r][6]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) x[r] += dot_4x8packed_ss_int(ah.w, w[r][7]);
+      // (float)(sc * x) == (float)x * (float)sc exactly: |sc * x| < 2^24 for these types (IQ4_XS: 32 * 32 * 127 *
+      // 127 = 16.5 M), so both are the exact product; the native float multiply replaces an emulated 32-bit one
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) acc[r][t] += st * dr[r] * ((float)x[r] * (float)s0r[r]);
+#else
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) hi[r] = dot_4x8packed_ss_int(ah.x, w[r][4]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) hi[r] += dot_4x8packed_ss_int(ah.y, w[r][5]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) hi[r] += dot_4x8packed_ss_int(ah.z, w[r][6]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) hi[r] += dot_4x8packed_ss_int(ah.w, w[r][7]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) acc[r][t] += st * dr[r] * (float)(s0r[r] * lo[r] + s1r[r] * hi[r]);
+#endif
     }
   }
 #pragma unroll
@@ -1212,6 +1331,11 @@ __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void gemv_mt(__global const uchar* raw, int N, int K, __global const uint* tabs, __global const char* aq,
                       __global const float* asc, __global const ushort* absum, int M, int T, __global float* C,
                       int ldc, int c_off, int accumulate) {
+  // Token-outer form (as gemv_mt_v): the GROWS rows are staged and decoded first, then each token's activations
+  // are loaded once for all rows, half a block ahead of their use, without per-token branches (tokens t >= T
+  // read token T - 1, results not stored; lanes past the last superblock read a valid block and get a zero scale).
+  // Same integer sums and float expression per (row, token) as the row-outer form: bit-identical.
+  // (TB 8: GROWS 2 keeps the decoded rows and the 2 x 8 accumulators in registers.)
   __local uint win_all[16][WIN_CALLS * 16];
   __local uint* win = win_all[get_sub_group_id() & 15];
 #ifdef GRID_OFF
@@ -1230,16 +1354,26 @@ __kernel void gemv_mt(__global const uchar* raw, int N, int K, __global const ui
 #endif
   barrier(CLK_LOCAL_MEM_FENCE);
   const int lane = get_sub_group_local_id(), r0 = (get_global_id(0) / 16) * GROWS;
-  const int nsb = K / 256;
+  const int nsb = K / 256, K4 = K / 4;
   float acc[GROWS][TB];
 #pragma unroll
   for (int r = 0; r < GROWS; ++r)
 #pragma unroll
     for (int t = 0; t < TB; ++t) acc[r][t] = 0.0f;
   for (int sp = 0; sp < nsb; sp += 2) {
-    const int b = sp * 8 + lane;
     const bool has = sp + lane / 8 < nsb;
-    MT_ACTS_K
+    const int b = has ? sp * 8 + lane : sp * 8 + lane % 8;
+    __global const uint* ap = (__global const uint*)aq + 8 * b;
+    __global const float* ascb = asc + (size_t)b * M;
+#if QT == Q2_K || QT == Q4_K || QT == Q5_K
+    __global const short* ab0 = (__global const short*)absum + (size_t)(2 * b) * M;
+    __global const short* ab1 = ab0 + M;
+#endif
+    uint4 an = vload4(0, ap);
+    float sn = ascb[0];
+    uint w[GROWS][8];
+    int s0r[GROWS], s1r[GROWS], m0r[GROWS], m1r[GROWS];
+    float dr[GROWS], dmr[GROWS];
 #pragma unroll
     for (int r = 0; r < GROWS; ++r) {
       const int n = min(r0 + r, N - 1);
@@ -1247,26 +1381,48 @@ __kernel void gemv_mt(__global const uchar* raw, int N, int K, __global const ui
 #pragma unroll
       for (int c = 0; c < WIN_CALLS; ++c) win[c * 16 + lane] = intel_sub_group_block_read(src + c * 16);
       sub_group_barrier(CLK_LOCAL_MEM_FENCE);
-      uint w[8];
-      int sc0, sc1, mn0, mn1;
-      float d, dmin;
-      decode32((const uchar*)win + (lane / 8) * BBP, lane % 8, grid, aux, w, &sc0, &sc1, &mn0, &mn1, &d, &dmin);
+      decode32((const uchar*)win + (lane / 8) * BBP, lane % 8, grid, aux, w[r], &s0r[r], &s1r[r], &m0r[r], &m1r[r],
+               &dr[r], &dmr[r]);
       sub_group_barrier(CLK_LOCAL_MEM_FENCE);
+    }
 #pragma unroll
-      for (int t = 0; t < TB; ++t) {
-        MT_ACT_K(t)
-        int lo = dot_4x8packed_ss_int(at.s0, w[0]);
-        lo += dot_4x8packed_ss_int(at.s1, w[1]);
-        lo += dot_4x8packed_ss_int(at.s2, w[2]);
-        lo += dot_4x8packed_ss_int(at.s3, w[3]);
-        int hi = dot_4x8packed_ss_int(at.s4, w[4]);
-        hi += dot_4x8packed_ss_int(at.s5, w[5]);
-        hi += dot_4x8packed_ss_int(at.s6, w[6]);
-        hi += dot_4x8packed_ss_int(at.s7, w[7]);
+    for (int t = 0; t < TB; ++t) {
+      const int tc = min(t, T - 1);
+      __global const uint* apt = ap + (size_t)tc * K4;
+      const uint4 al = an;
+      const float st = has ? sn : 0.0f;
 #if QT == Q2_K || QT == Q4_K || QT == Q5_K
-        acc[r][t] += st * (d * (float)(sc0 * lo + sc1 * hi) - dmin * (float)(mn0 * b0 + mn1 * b1));
+      const int b0 = ab0[tc], b1 = ab1[tc];
+#endif
+      an = vload4(1, apt);
+      int lo[GROWS], hi[GROWS];
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) lo[r] = dot_4x8packed_ss_int(al.x, w[r][0]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) lo[r] += dot_4x8packed_ss_int(al.y, w[r][1]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) lo[r] += dot_4x8packed_ss_int(al.z, w[r][2]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) lo[r] += dot_4x8packed_ss_int(al.w, w[r][3]);
+      const uint4 ah = an;
+      if (t + 1 < TB) {
+        an = vload4(0, ap + (size_t)min(t + 1, T - 1) * K4);
+        sn = ascb[min(t + 1, T - 1)];
+      }
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) hi[r] = dot_4x8packed_ss_int(ah.x, w[r][4]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) hi[r] += dot_4x8packed_ss_int(ah.y, w[r][5]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) hi[r] += dot_4x8packed_ss_int(ah.z, w[r][6]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) hi[r] += dot_4x8packed_ss_int(ah.w, w[r][7]);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) {
+#if QT == Q2_K || QT == Q4_K || QT == Q5_K
+        acc[r][t] += st * (dr[r] * (float)(s0r[r] * lo[r] + s1r[r] * hi[r]) - dmr[r] * (float)(m0r[r] * b0 + m1r[r] * b1));
 #else
-        acc[r][t] += st * d * (float)(sc0 * lo + sc1 * hi);
+        acc[r][t] += st * dr[r] * (float)(s0r[r] * lo[r] + s1r[r] * hi[r]);
 #endif
       }
     }

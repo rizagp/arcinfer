@@ -2411,16 +2411,16 @@ class Engine {
     }
     if (cur_T_ > 1 && cur_T_ <= 8) {
       // small batch (e.g. speculative verification): read each weight once for all tokens
-      const int tb = cur_T_ <= 2 ? 2 : cur_T_ <= 4 ? 4 : 8;
-      const bool vk = gemv_v_ok(w);
-      const int grows = vk ? gemv_v_rows(w) : w.N <= 4096 ? 1 : w.N <= 8192 ? 2 : 4;
-      // (TB 8, 4..7 MTP drafts: the default register file, twice the threads per EU, beat the 256-GRF build despite a
-      //  few spilled bytes: 27B with 5 drafts 9.2 vs 7.6 tok/s. ARC_MT8_GRF=256 builds it large, ARC_MT8_GROWS caps
-      //  the rows per sub-group of gemv_mt)
-      static const bool mt8_big = getenv("ARC_MT8_GRF") && std::string(getenv("ARC_MT8_GRF")) == "256";
-      static const int mt8_rows = getenv("ARC_MT8_GROWS") ? atoi(getenv("ARC_MT8_GROWS")) : 0;
-      const int gr = tb == 8 && mt8_rows > 0 && !vk ? std::min(grows, mt8_rows) : grows;
-      cl_kernel k = kernel("decode", std::string(tb == 8 && mt8_big ? "-cl-intel-256-GRF-per-thread " : "") + "-DQT=" +
+      // token-outer kernels (each token's activations loaded once for all of a sub-group's rows, no per-token
+      // branches; bit-identical to the earlier row-outer ones), built for exactly T tokens with 256 registers.
+      // 27B, 8 rows (bench/gemv_bench): IQ3_XXS gate 23.4 -> 42.9 GB/s with 4 rows per sub-group, IQ3_S down (now
+      // gemv_mt_v) 22.6 -> 38.9 with 2; Q6_K one row (it spills with more). ARC_MT_OLD=1: the earlier choice
+      static const bool old = getenv("ARC_MT_OLD") != nullptr;
+      const int tb = old ? (cur_T_ <= 2 ? 2 : cur_T_ <= 4 ? 4 : 8) : cur_T_;
+      const bool vk = gemv_v_ok(w) || (!old && w.type == GGML_IQ3_S);
+      int gr = vk ? gemv_v_rows(w) : w.N <= 4096 ? 1 : w.N <= 8192 ? 2 : 4;
+      if (!old) gr = w.type == GGML_Q6_K ? 1 : w.type == GGML_IQ3_S ? 2 : vk ? (w.N >= 8192 ? 4 : 2) : std::min(gr, 2);
+      cl_kernel k = kernel("decode", std::string(old ? "" : "-cl-intel-256-GRF-per-thread ") + "-DQT=" +
                                          std::to_string(w.type) + " -DGROWS=" + std::to_string(gr) + " -DTB=" + std::to_string(tb) + head_defs(w) +
                                          mt_lazy_opt(),
                            vk ? "gemv_mt_v" : "gemv_mt");
