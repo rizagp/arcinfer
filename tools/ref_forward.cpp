@@ -274,6 +274,287 @@ static void gemma4_layers(const std::vector<int>& toks, std::vector<float>& x) {
   }
 }
 
+// Qwen3.8 Flash Next (qwen4exp), mirroring llama.cpp src/models/qwen4exp.cpp (see docs/flash-next-spec.md):
+// hyper-connections (hc parallel residual streams mixed before and combined after each block), Gated DeltaNet with a
+// sigmoid output gate, gated attention (dense: equal to QSA while every key block is selected, i.e. short prompts),
+// 512-expert MoE + shared expert, the PLE n-gram hash embedding at its layer. Leaves the final mixer output (the
+// model's output norm) in x [T][E].
+static void qwen4exp_layers(const std::vector<int>& toks, std::vector<float>& x) {
+  const int T = (int)toks.size(), nl = hp("block_count") - hp("nextn_predict_layers", 0), E = hp("embedding_length");
+  const int HC = hp("hyper_connection.count"), HD = HC * E;
+  const int nh = hp("attention.head_count"), nkv = hp("attention.head_count_kv"), hd = hp("attention.key_length");
+  const int nrot = hp("rope.dimension_count"), ds = hp("ssm.state_size"), nk = hp("ssm.group_count"), nv = hp("ssm.time_step_rank");
+  const int Di = hp("ssm.inner_size"), interval = hp("full_attention_interval", 4);
+  const float eps = (float)F->get_float(A + ".attention.layer_norm_rms_epsilon", 1e-6);
+  const double base = F->get_float(A + ".rope.freq_base", 1e7);
+  const int Cd = 2 * nk * ds + Di;
+  const GgufTensor& te = F->get("token_embd.weight");
+  const int V = (int)te.dims[1];
+  auto sig = [](double v) { return 1.0 / (1.0 + std::exp(-v)); };
+
+  // res[t][c][i]: HC copies of the embedding
+  std::vector<float> res((size_t)T * HD);
+  {
+    std::vector<float> e(E);
+    for (int t = 0; t < T; ++t) {
+      dequant_row(te.type, te.data + (size_t)toks[t] * (te.nbytes / V), E, e.data());
+      for (int c = 0; c < HC; ++c) memcpy(&res[((size_t)t * HC + c) * E], e.data(), E * 4);
+    }
+  }
+  // per-stream RMS norm of v[t][c][:] with a [HC][E] weight (stream c uses w[c*E ..])
+  auto stream_norm = [&](std::vector<float>& v, const std::vector<float>& w) {
+    for (int t = 0; t < T; ++t)
+      for (int c = 0; c < HC; ++c) rmsnorm(&v[((size_t)t * HC + c) * E], E, w.data() + (size_t)c * E, eps);
+  };
+  // the mixer: block input [T][E] and (with an inject weight) the [T][HC] scatter logits
+  auto hc_mix = [&](const std::string& pre, std::vector<float>& mixed, std::vector<float>* inject) {
+    std::vector<float> xn = res, lo, gate;
+    stream_norm(xn, vecf(pre + "_norm.weight"));
+    matmul(pre + "_down.weight", xn, T, lo);
+    for (auto& v : lo) v = silu(v / (float)HC);
+    matmul(pre + "_up.weight", lo, T, gate);
+    mixed.assign((size_t)T * E, 0.0f);
+    for (int t = 0; t < T; ++t)
+      for (int i = 0; i < E; ++i) {
+        double acc = 0;
+        for (int c = 0; c < HC; ++c) {
+          const size_t j = ((size_t)t * HC + c) * E + i;
+          acc += xn[j] * sig(gate[j]);
+        }
+        mixed[(size_t)t * E + i] = (float)(acc / HC);
+      }
+    if (inject) matmul(pre + "_inject.weight", xn, T, *inject);
+  };
+  // res[t][c] += 2 sigmoid(inject[t][c] / HC) * out[t]
+  auto hc_combine = [&](const std::vector<float>& out, const std::vector<float>& inject) {
+    for (int t = 0; t < T; ++t)
+      for (int c = 0; c < HC; ++c) {
+        const float w = (float)(2.0 * sig(inject[(size_t)t * HC + c] / (double)HC));
+        for (int i = 0; i < E; ++i) res[((size_t)t * HC + c) * E + i] += w * out[(size_t)t * E + i];
+      }
+  };
+
+  // PLE n-gram rows (host hash; the prompt starts a sequence: missing predecessors read as EOS)
+  const auto* ple_layers = F->get_ints(A + ".ple.layers");
+  const int ple_layer = ple_layers && !ple_layers->empty() ? (int)(*ple_layers)[0] : -1;
+  std::vector<float> ple_emb;
+  if (ple_layer >= 0) {
+    const int ng = hp("ple.ngram_size"), per = hp("ple.heads_per_ngram"), nph = (ng - 1) * per, phd = hp("embedding_length_per_layer_input");
+    const int64_t eos = hp("ple.eos_token_id");
+    const auto* mult = F->get_ints(A + ".ple.layer_multipliers");
+    const auto* off = F->get_ints(A + ".ple.head_offsets");
+    const auto* voc = F->get_ints(A + ".ple.head_vocab_sizes");
+    const GgufTensor& pt = F->get("per_layer_token_embd.weight");
+    const size_t prb = pt.nbytes / pt.dims[1];
+    ple_emb.assign((size_t)T * nph * phd, 0.0f);
+    for (int t = 0; t < T; ++t) {
+      std::vector<int64_t> ctx(ng);
+      ctx[0] = toks[t];
+      bool cut = false;
+      for (int s = 1; s < ng; ++s) {
+        const int64_t tk = cut || t - s < 0 ? -1 : toks[t - s];
+        cut = cut || tk < 0 || tk == eos;
+        ctx[s] = cut ? eos : tk;
+      }
+      for (int n = 2; n <= ng; ++n) {
+        uint64_t mixed = (uint64_t)ctx[0] * (uint64_t)(*mult)[0];
+        for (int j = 1; j < n; ++j) mixed ^= (uint64_t)ctx[j] * (uint64_t)(*mult)[j];
+        for (int g = 0; g < per; ++g) {
+          const int h = (n - 2) * per + g;
+          const uint64_t row = mixed % (uint64_t)(*voc)[h] + (uint64_t)(*off)[h];
+          dequant_row(pt.type, pt.data + row * prb, phd, &ple_emb[((size_t)t * nph + h) * phd]);
+        }
+      }
+    }
+  }
+
+  std::vector<float> mixed, inject, out;
+  for (int il = 0; il < nl; ++il) {
+    const std::string p = "blk." + std::to_string(il) + ".";
+    if (il == ple_layer) {
+      // gate each stream by its match with the n-gram key, then a dilated depthwise causal conv
+      std::vector<float> key, value;
+      matmul(p + "ple_key.weight", ple_emb, T, key);
+      matmul(p + "ple_value.weight", ple_emb, T, value);
+      std::vector<float> query = res;
+      stream_norm(key, vecf(p + "ple_norm_key.weight"));
+      stream_norm(query, vecf(p + "ple_norm_query.weight"));
+      std::vector<float> gated((size_t)T * HD);
+      for (int t = 0; t < T; ++t)
+        for (int c = 0; c < HC; ++c) {
+          double s = 0;
+          for (int i = 0; i < E; ++i) s += (double)key[((size_t)t * HC + c) * E + i] * query[((size_t)t * HC + c) * E + i];
+          s /= std::sqrt((double)E);
+          const double g = sig((s < 0 ? -1.0 : s > 0 ? 1.0 : 0.0) * std::sqrt(std::max(std::fabs(s), 1e-6)));
+          for (int i = 0; i < E; ++i) gated[((size_t)t * HC + c) * E + i] = (float)(value[(size_t)t * E + i] * g);
+        }
+      std::vector<float> nrm = gated;
+      stream_norm(nrm, vecf(p + "ple_norm_conv.weight"));
+      const auto cw = vecf(p + "ple_conv1d.weight");  // [HD][kern]
+      const int kern = hp("ple.conv_kernel"), dil = hp("ple.ngram_size");
+      for (int t = 0; t < T; ++t)
+        for (int ch = 0; ch < HD; ++ch) {
+          double acc = 0;
+          for (int k = 0; k < kern; ++k) {
+            const int tt = t - (kern - 1 - k) * dil;
+            if (tt >= 0) acc += (double)cw[(size_t)ch * kern + k] * nrm[(size_t)tt * HD + ch];
+          }
+          res[(size_t)t * HD + ch] += gated[(size_t)t * HD + ch] + silu((float)acc);
+        }
+    }
+    hc_mix(p + "hc_attn", mixed, &inject);
+    const std::vector<float>& h = mixed;
+    out.assign((size_t)T * E, 0.0f);
+    if ((il + 1) % interval != 0) {
+      // Gated DeltaNet (as Qwen3.5, with a sigmoid output gate)
+      std::vector<float> qkv, z, al, be;
+      matmul(p + "attn_qkv.weight", h, T, qkv);
+      matmul(p + "attn_gate.weight", h, T, z);
+      matmul(p + "ssm_alpha.weight", h, T, al);
+      matmul(p + "ssm_beta.weight", h, T, be);
+      auto dt = vecf(p + "ssm_dt.bias"), sa = vecf(p + "ssm_a"), cw = vecf(p + "ssm_conv1d.weight"), sn = vecf(p + "ssm_norm.weight");
+      std::vector<float> c((size_t)T * Cd);
+      for (int t = 0; t < T; ++t)
+        for (int ch = 0; ch < Cd; ++ch) {
+          float acc = 0;
+          for (int i = 0; i < 4; ++i) { int tt = t - 3 + i; if (tt >= 0) acc += cw[ch * 4 + i] * qkv[(size_t)tt * Cd + ch]; }
+          c[(size_t)t * Cd + ch] = silu(acc);
+        }
+      for (int t = 0; t < T; ++t)
+        for (int hh = 0; hh < 2 * nk; ++hh) {
+          float* v = &c[(size_t)t * Cd + hh * ds];
+          double ss = 0;
+          for (int i = 0; i < ds; ++i) ss += (double)v[i] * v[i];
+          const float r = (float)(1.0 / std::sqrt(ss + eps));
+          for (int i = 0; i < ds; ++i) v[i] *= r;
+        }
+      std::vector<float> o((size_t)T * Di);
+      std::vector<double> S((size_t)nv * ds * ds, 0.0);
+      for (int t = 0; t < T; ++t)
+        for (int hv = 0; hv < nv; ++hv) {
+          const int kh = hv % nk;
+          const float* q = &c[(size_t)t * Cd + kh * ds];
+          const float* k = &c[(size_t)t * Cd + nk * ds + kh * ds];
+          const float* v = &c[(size_t)t * Cd + 2 * nk * ds + hv * ds];
+          const float a = al[(size_t)t * nv + hv] + dt[hv];
+          const double g = (a > 20 ? a : std::log1p(std::exp((double)a))) * sa[hv];
+          const double decay = std::exp(g), beta = sig(be[(size_t)t * nv + hv]);
+          for (int jj = 0; jj < ds; ++jj) {
+            double* s = &S[((size_t)hv * ds + jj) * ds];
+            double sk = 0;
+            for (int i = 0; i < ds; ++i) { s[i] *= decay; sk += s[i] * k[i]; }
+            const double d = (v[jj] - sk) * beta;
+            double oq = 0;
+            for (int i = 0; i < ds; ++i) { s[i] += k[i] * d; oq += s[i] * q[i]; }
+            o[(size_t)t * Di + hv * ds + jj] = (float)(oq / std::sqrt((double)ds));
+          }
+        }
+      for (int t = 0; t < T; ++t)
+        for (int hv = 0; hv < nv; ++hv) {
+          float* ov = &o[(size_t)t * Di + hv * ds];
+          rmsnorm(ov, ds, sn.data(), eps);
+          for (int i = 0; i < ds; ++i) ov[i] *= (float)sig(z[(size_t)t * Di + hv * ds + i]);
+        }
+      matmul(p + "ssm_out.weight", o, T, out);
+    } else {
+      // gated attention, dense causal
+      std::vector<float> qg, kk, vv;
+      matmul(p + "attn_q.weight", h, T, qg);
+      matmul(p + "attn_k.weight", h, T, kk);
+      matmul(p + "attn_v.weight", h, T, vv);
+      auto qn = vecf(p + "attn_q_norm.weight"), kn = vecf(p + "attn_k_norm.weight");
+      std::vector<float> q((size_t)T * nh * hd);
+      auto rope = [&](float* v, int pos) {
+        const int hr = nrot / 2;
+        for (int i = 0; i < hr; ++i) {
+          const double th = pos * std::pow(base, -2.0 * i / nrot);
+          const double cs = std::cos(th), sn = std::sin(th), a = v[i], b = v[i + hr];
+          v[i] = (float)(a * cs - b * sn);
+          v[i + hr] = (float)(a * sn + b * cs);
+        }
+      };
+      for (int t = 0; t < T; ++t) {
+        for (int hh = 0; hh < nh; ++hh) {
+          float* d = &q[((size_t)t * nh + hh) * hd];
+          memcpy(d, &qg[(size_t)t * nh * hd * 2 + hh * hd * 2], hd * 4);
+          rmsnorm(d, hd, qn.data(), eps);
+          rope(d, t);
+        }
+        for (int hh = 0; hh < nkv; ++hh) {
+          float* d = &kk[(size_t)t * nkv * hd + hh * hd];
+          rmsnorm(d, hd, kn.data(), eps);
+          rope(d, t);
+        }
+      }
+      std::vector<float> att((size_t)T * nh * hd);
+      for (int t = 0; t < T; ++t)
+        for (int hh = 0; hh < nh; ++hh) {
+          const int g = hh / (nh / nkv);
+          std::vector<double> sc(t + 1);
+          double mx = -1e300;
+          for (int u = 0; u <= t; ++u) {
+            double s = 0;
+            for (int i = 0; i < hd; ++i) s += (double)q[((size_t)t * nh + hh) * hd + i] * kk[(size_t)u * nkv * hd + g * hd + i];
+            sc[u] = s / std::sqrt((double)hd);
+            mx = std::max(mx, sc[u]);
+          }
+          double zz = 0;
+          for (auto& s : sc) { s = std::exp(s - mx); zz += s; }
+          for (int i = 0; i < hd; ++i) {
+            double acc = 0;
+            for (int u = 0; u <= t; ++u) acc += sc[u] * vv[(size_t)u * nkv * hd + g * hd + i];
+            const float gate = qg[(size_t)t * nh * hd * 2 + hh * hd * 2 + hd + i];
+            att[((size_t)t * nh + hh) * hd + i] = (float)(acc / zz * sig(gate));
+          }
+        }
+      matmul(p + "attn_output.weight", att, T, out);
+    }
+    hc_combine(out, inject);
+
+    // MoE: router softmax top-k (renormalized) + the sigmoid-gated shared expert
+    hc_mix(p + "hc_ffn", mixed, &inject);
+    std::vector<float> g, u, d;
+    matmul(p + "ffn_gate_shexp.weight", h, T, g);
+    matmul(p + "ffn_up_shexp.weight", h, T, u);
+    for (size_t i = 0; i < g.size(); ++i) g[i] = silu(g[i]) * u[i];
+    matmul(p + "ffn_down_shexp.weight", g, T, d);
+    const int NE = hp("expert_count"), NU = hp("expert_used_count"), Fe = hp("expert_feed_forward_length");
+    auto sgw = vecf(p + "ffn_gate_inp_shexp.weight");
+    std::vector<float> rl;
+    matmul(p + "ffn_gate_inp.weight", h, T, rl);
+#pragma omp parallel for
+    for (int t = 0; t < T; ++t) {
+      const float* ht = &h[(size_t)t * E];
+      double sg = 0;
+      for (int i = 0; i < E; ++i) sg += (double)sgw[i] * ht[i];
+      sg = sig(sg);
+      float* dt = &d[(size_t)t * E];
+      for (int i = 0; i < E; ++i) dt[i] *= (float)sg;
+      std::vector<int> id(NE);
+      for (int i = 0; i < NE; ++i) id[i] = i;
+      const float* l = &rl[(size_t)t * NE];
+      std::stable_sort(id.begin(), id.end(), [&](int a, int b) { return l[a] > l[b]; });
+      double z = 0;
+      for (int k = 0; k < NU; ++k) z += std::exp((double)l[id[k]] - l[id[0]]);
+      std::vector<float> ge(Fe), ue(Fe), de(E);
+      for (int k = 0; k < NU; ++k) {
+        const int e = id[k];
+        const float w = (float)(std::exp((double)l[e] - l[id[0]]) / z);
+        expert_mv(p + "ffn_gate_exps", e, Fe, E, ht, ge.data());
+        expert_mv(p + "ffn_up_exps", e, Fe, E, ht, ue.data());
+        for (int i = 0; i < Fe; ++i) ge[i] = silu(ge[i]) * ue[i];
+        expert_mv(p + "ffn_down_exps", e, E, Fe, ge.data(), de.data());
+        for (int i = 0; i < E; ++i) dt[i] += w * de[i];
+      }
+    }
+    hc_combine(d, inject);
+    fprintf(stderr, "\rlayer %d/%d", il + 1, nl);
+  }
+  // the final mixer is the output norm
+  hc_mix("output_hc", mixed, nullptr);
+  x = mixed;
+}
+
 // Gemma's final logit soft-capping (cap * tanh(l / cap)); no-op for other models.
 static void softcap(std::vector<float>& l) {
   const float c = (float)F->get_float(A + ".final_logit_softcapping", 0.0);
@@ -303,7 +584,8 @@ int main(int argc, char** argv) {
   for (int t = 0; t < T; ++t) dequant_row(te.type, te.data + (size_t)toks[t] * (te.nbytes / V), E, &x[(size_t)t * E]);
 
   if (A == "gemma4") gemma4_layers(toks, x);
-  for (int il = 0; il < nl && A != "gemma4"; ++il) {
+  if (A == "qwen4exp") qwen4exp_layers(toks, x);
+  for (int il = 0; il < nl && A != "gemma4" && A != "qwen4exp"; ++il) {
     const std::string p = "blk." + std::to_string(il) + ".";
     auto an = vecf(p + "attn_norm.weight");
     h = x;
@@ -458,12 +740,14 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < x.size(); ++i) x[i] += d[i];
     fprintf(stderr, "\rlayer %d/%d", il + 1, nl);
   }
-  auto on = vecf("output_norm.weight");
+  // (qwen4exp: no output norm, the final hyper-connection mixer is one)
+  const std::vector<float> on = f.find("output_norm.weight") ? vecf("output_norm.weight") : std::vector<float>();
+  auto out_norm = [&](float* v) { if (!on.empty()) rmsnorm(v, E, on.data(), eps); };
   if (getenv("REF_PPL")) {
     // perplexity-style scoring of this chunk: negative log-likelihood of tokens T/2+1 .. T-1
     std::vector<float> xs(x.begin() + (size_t)(T / 2) * E, x.end() - E), lg;
     const int R = T - 1 - T / 2;
-    for (int r = 0; r < R; ++r) rmsnorm(&xs[(size_t)r * E], E, on.data(), eps);
+    for (int r = 0; r < R; ++r) out_norm(&xs[(size_t)r * E]);
     matmul(f.find("output.weight") ? "output.weight" : "token_embd.weight", xs, R, lg);
     softcap(lg);
     double nll = 0;
@@ -478,7 +762,7 @@ int main(int argc, char** argv) {
     return 0;
   }
   std::vector<float> last(x.end() - E, x.end()), logits;
-  rmsnorm(last.data(), E, on.data(), eps);
+  out_norm(last.data());
   matmul(f.find("output.weight") ? "output.weight" : "token_embd.weight", last, 1, logits);
   softcap(logits);
   std::vector<int> idx(V);
@@ -505,7 +789,7 @@ int main(int argc, char** argv) {
     if (getenv("REF_ALL")) {
       // log-probs of every position (T x V), for a KL averaged over the prompt
       std::vector<float> xs = x, all;
-      for (int t = 0; t < T; ++t) rmsnorm(&xs[(size_t)t * E], E, on.data(), eps);
+      for (int t = 0; t < T; ++t) out_norm(&xs[(size_t)t * E]);
       matmul(f.find("output.weight") ? "output.weight" : "token_embd.weight", xs, T, all);
       softcap(all);
       for (int t = 0; t < T; ++t) {
