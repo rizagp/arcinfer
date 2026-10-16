@@ -1315,6 +1315,9 @@ class Server {
     std::vector<int> gen;
     std::string text, dr, dc;
     std::string finish = "length";
+#ifdef ARC_ZERO
+    if (getenv("ARC_PROF_REQ")) eng_.profile = true;  // (the generation's kernels; printed after the request)
+#endif
     const auto t_gen = clk::now();
     Json lp_all = Json::array(), lp_pending = Json::array();  // logprobs entries: all, and not yet streamed
     auto lp_json = [&](const Json& entries) {
@@ -1608,6 +1611,22 @@ class Server {
     if (n_drafts) fprintf(stderr, " | MTP %d/%d drafts accepted", n_accepted, n_drafts);
     if (n_tool_fixed) fprintf(stderr, " | tool call: %d of %d tokens corrected", n_tool_fixed, n_tool_tok);
     fprintf(stderr, "\n");
+#ifdef ARC_ZERO
+    // (ARC_PROF_REQ=1: the GPU time by kernel of each request, for diagnosis; every kernel is timed, which costs time)
+    static const bool prof_req = getenv("ARC_PROF_REQ") != nullptr;
+    if (prof_req) {
+      double total = 0;
+      std::vector<std::pair<double, std::string>> rows;
+      for (auto& [n, ms] : eng_.prof_ms) total += ms, rows.push_back({ms, n});
+      std::sort(rows.rbegin(), rows.rend());
+      fprintf(stderr, "  GPU time %.1f ms:", total);
+      for (size_t r = 0; r < rows.size() && r < 12; ++r)
+        fprintf(stderr, " %s %.0f (%d)", rows[r].second.c_str(), rows[r].first, eng_.prof_n[rows[r].second]);
+      fprintf(stderr, "\n");
+      eng_.prof_ms.clear();
+      eng_.prof_n.clear();
+    }
+#endif
     if (n_drafts) {
       timings.set("draft_n", n_drafts);
       timings.set("draft_n_accepted", n_accepted);
