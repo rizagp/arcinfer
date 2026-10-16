@@ -115,8 +115,7 @@ class Engine {
     // (measured on arcinferzero, server answers at temperature 0, 2026-10-16: 35B 1 -> 3 drafts 23.9 -> 26.1 tok/s,
     //  4B 2 -> 3 22.9 -> 24.8; 9B 2 and 3 alike (15.8 / 15.6); 27B 3 = 5 = 7; Gemma's drafter unchanged at 2)
     if (!opt.dflash.empty()) opt.mtp = true;
-    if (opt.mtp_drafts <= 0)
-      opt.mtp_drafts = !opt.dflash.empty() ? 7 : hp.gemma ? 2 : hp.moe || hp.n_embd >= 5120 || hp.n_embd <= 2560 ? 3 : 2;
+    if (opt.mtp_drafts <= 0) opt.mtp_drafts = !opt.dflash.empty() ? 7 : mtp_block_drafts();
     auto t0 = std::chrono::steady_clock::now();
     plan_weights();
     stream_ = hp.moe_std && opt.stream_experts && !getenv("ARC_ZERO_NO_STREAM");
@@ -4120,6 +4119,10 @@ class Engine {
   // no recurrent state, a rejected draft only moves the position back.
   // (Qwen: one DeltaNet state copy per draft, allocated for --mtp-drafts; Gemma's drafter keeps no state)
   static constexpr int kMaxDrafts = 7;  // (Qwen3.8's MTP block is trained for 7)
+  // default MTP drafts per step (later ones chained while the block is confident, opt.mtp_min_p). With the
+  // token-outer verification GEMVs (16 Oct night), code answers: 27B 3 -> 7 drafts 12.6 -> 14.7 tok/s, 35B 3 -> 5
+  // 34.2 -> 38.6; Indonesian prose equal (27B 7.0, 35B 23.4 / 23.1). 9B 2, 4B 3 (not re-measured); Gemma's drafter 2.
+  int mtp_block_drafts() const { return hp.gemma ? 2 : hp.moe ? 5 : hp.n_embd >= 5120 ? 7 : hp.n_embd <= 2560 ? 3 : 2; }
   int max_drafts() const { return gemma_mtp_ ? 3 : std::clamp(opt.mtp_drafts, 2, kMaxDrafts); }
   // `tok` is the next token (sampled, not yet processed; it goes to position pos). Returns up to `max_drafts` greedy
   // drafts of the MTP block for the tokens after it: the second one is chained on the block's own output and only
@@ -4144,7 +4147,7 @@ class Engine {
     toks.push_back(tok);
     pend_toks_.clear();
     max_drafts = std::clamp(max_drafts, 1, std::clamp(opt.mtp_drafts, 1, kMaxDrafts));
-    if (dfl_) max_drafts = std::min(max_drafts, 3);  // (with DFlash2 the drafts setting is its 7; the MTP block: 3)
+    if (dfl_) max_drafts = std::min(max_drafts, mtp_block_drafts());  // (with DFlash2 the drafts setting is its 7)
     if (pos + 1 + max_drafts > ctx) max_drafts = std::max(1, ctx - pos - 1);
     std::vector<int> drafts;
     mtp_rows(toks.data(), hfin_, np + 1, pos - np, true, max_drafts > 1 ? mtp_h_ : nullptr);

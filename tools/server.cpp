@@ -2233,7 +2233,7 @@ static int list_models() {
       if (gemma && m.vision) chunk = std::max(chunk, 2048);  // (an image is one chunk)
       d.set("chunk", chunk);
 #ifdef ARC_ZERO
-      d.set("mtp_drafts", !m.mtp ? 0 : !eo.dflash.empty() ? 7 : gemma ? 2 : moe || n_embd >= 5120 || n_embd <= 2560 ? 3 : 2);
+      d.set("mtp_drafts", !m.mtp ? 0 : !eo.dflash.empty() ? 7 : gemma ? 2 : moe ? 5 : n_embd >= 5120 ? 7 : n_embd <= 2560 ? 3 : 2);
 #else
       d.set("mtp_drafts", !m.mtp ? 0 : moe ? 1 : !gemma && n_embd >= 5120 ? 3 : 2);
 #endif
