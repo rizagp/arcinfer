@@ -123,8 +123,8 @@ code { font: 13px var(--f-mono); background: var(--bg); padding: 1px 5px; border
 
   <section>
     <h2><span class="id">Prompt dan generate di berbagai panjang konteks</span><span class="en">Prompt and generation at different context lengths</span></h2>
-    <p class="muted id"><code>runz --bench-pp</code>: prompt sepanjang N token, lalu 64 token generate. Prompt = tok/s memproses prompt; gen = tok/s generate setelahnya. Gemma: sore 15 Okt → pagi 16 Okt.</p>
-    <p class="muted en"><code>runz --bench-pp</code>: a prompt of N tokens, then 64 generated tokens. Prompt = tok/s processing the prompt; gen = tok/s generating after it. Gemma: evening of 15 Oct → morning of 16 Oct.</p>
+    <p class="muted id"><code>runz --bench-pp</code>: prompt sepanjang N token, lalu 64 token generate. Prompt = tok/s memproses prompt; gen = tok/s generate setelahnya. Gemma: sore 15 Okt → pagi 16 Okt. Qwen3.8 27B prompt: pagi → sore 16 Okt (GEMM prompt yang lebih cepat; generate belum diukur ulang).</p>
+    <p class="muted en"><code>runz --bench-pp</code>: a prompt of N tokens, then 64 generated tokens. Prompt = tok/s processing the prompt; gen = tok/s generating after it. Gemma: evening of 15 Oct → morning of 16 Oct. Qwen3.8 27B prompt: morning → afternoon of 16 Oct (faster prompt GEMM; generation not re-measured).</p>
     <div class="tbl"><table>
       <thead><tr><th><span class="id">Model</span><span class="en">Model</span></th><th><span class="id">Konteks</span><span class="en">Context</span></th><th>Prompt</th><th>Gen</th><th><span class="id">Prompt pagi</span><span class="en">Prompt, morning</span></th><th><span class="id">Gen pagi</span><span class="en">Gen, morning</span></th></tr></thead>
       <tbody id="bench"></tbody>
@@ -204,7 +204,7 @@ const drafts = [
 const bench = [
   ['Qwen3.5 4B', '2K', 862.5, 20.2], ['', '16K', 696.9, 18.7], ['', '131K', 280.5, 9.5],
   ['Qwen3.5 9B', '2K', 399.1, 12.1], ['', '16K', 387.9, 11.5], ['', '131K', 221.9, 8.8],
-  ['Qwen3.8 27B', '2K', 110.2, 5.1], ['', '16K', 102.8, 4.7], ['', '64K', 79.6, 4.0],
+  ['Qwen3.8 27B', '2K', 110.2, 5.1, 130.1], ['', '16K', 102.8, 4.7, 125.4], ['', '64K', 79.6, 4.0],
   ['Qwen3.6 35B', '2K', 660.0, 20.1], ['', '16K', 678.7, 18.8], ['', '131K', 253.5, 13.8], ['', '262K', 146.1, 10.1],
   ['Gemma E4B', '2K', 733.3, 21.0, 827.5, 21.5], ['', '16K', 571.1, 19.6, 624.9, 20.1], ['', '131K', 209.4, 9.5, 197.2, 9.4],
   ['Gemma 12B', '2K', 270.6, 9.5, 289.4, 9.6], ['', '16K', 218.4, 9.2, 227.7, 9.2], ['', '131K', 86.1, 7.4, 86.5, 7.6],
