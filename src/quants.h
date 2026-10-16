@@ -479,6 +479,29 @@ inline void dequant_row(uint32_t type, const uint8_t* row, int K, float* out) {
     }
     return;
   }
+  if (type == GGML_IQ4_NL) {  // blocks of 32: f16 scale, low nibbles = elements 0..15, high = 16..31, via the IQ4 table
+    for (int b = 0; b < K / 32; ++b) {
+      const uint8_t* p = row + (size_t)b * 18;
+      uint16_t h;
+      memcpy(&h, p, 2);
+      const float d = fp16_to_f32(h);
+      for (int j = 0; j < 16; ++j) {
+        out[b * 32 + j] = d * (float)kvalues_iq4nl[p[2 + j] & 0x0F];
+        out[b * 32 + 16 + j] = d * (float)kvalues_iq4nl[p[2 + j] >> 4];
+      }
+    }
+    return;
+  }
+  if (type == GGML_Q2_0) {  // blocks of 64: f16 scale, element j = bits 2*(j%4) of byte j/4, value (q - 1) * d
+    for (int b = 0; b < K / 64; ++b) {
+      const uint8_t* p = row + (size_t)b * 18;
+      uint16_t h;
+      memcpy(&h, p, 2);
+      const float d = fp16_to_f32(h);
+      for (int j = 0; j < 64; ++j) out[b * 64 + j] = d * (float)(((p[2 + j / 4] >> (2 * (j % 4))) & 3) - 1);
+    }
+    return;
+  }
   DecodedSB o;
   for (int s = 0; s < K / 256; ++s) {
     decode_sb(type, row + (size_t)s * gguf_sb_bytes(type), o);
