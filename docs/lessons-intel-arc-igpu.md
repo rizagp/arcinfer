@@ -109,6 +109,10 @@ IQ4_XS / Q4_K reach ±62 in the same profile; codebook types need more arithmeti
 | LSC prefetch of the next K/V tiles in decode attention (`prefetch()`, 1–4 tiles ahead) | 37 % slower (27B, 32K: 1.12 -> 1.53 ms per layer): the extra messages compete with the real loads |
 | Smaller or larger key splits for decode attention (64–512 keys per sub-group, to fill the last wave) | within 3 % at every shape (27B, 4B, 35B at 32K); the wave-count estimate from the assembly did not hold |
 | IQ2/IQ3 GEMV: sign byte computed (`i | parity(i) << 7`) instead of read from a local-memory table, and the sign mask without the 32-bit multiply | gemv_v (the kernel the engine uses for these types) equal or slower: IQ2_XS 63 -> 60 GB/s; only the unused plain gemv got faster. Fewer instructions again did not mean faster |
+| Prefetching the next layer's experts from a routing guess (its router on this layer's FFN input) | Flash Next, 16 % cache: 37 % of the guesses used, 48 % of the misses caught, SSD reads +55 %, no faster (the SSD is the limit, and wrong guesses take its time) |
+| A per-layer LRU for the expert cache (against the cyclic layer order of decoding) | a recorded Flash Next trace: 80 % hits vs 82 % for the global LRU (Belady's optimum: 90 %) |
+| Layer-major prompt segments of 32K instead of 16K for narrow models (experts decoded once per segment) | 35B, 40K prompt: 530 -> 521 tok/s (the larger residual buffer costs expert-cache room) |
+| Double-buffered K/V tiles, 8 or 32 tokens per work-group in prompt attention | within 4 % (35B shape at 32K) |
 | Larger GPU pages / Level Zero virtual memory | the driver already uses 2 MiB pages; mapping physical memory is refused |
 
 ## 6. Compiler flags that this driver honors (tested 16 Oct, driver 32.0.101.9033)
