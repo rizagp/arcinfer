@@ -2613,17 +2613,17 @@ __kernel void hc_gate_mean_quant(__global const float* xn, __global const float*
   const float inv_hc = 1.0f / (float)HC;
   for (int s = sg; s < E / 256; s += get_num_sub_groups()) {
     const int base = s * 256 + 16 * lane;
-    float v[16];
-#pragma unroll
-    for (int i = 0; i < 16; ++i) {
-      float acc = 0.0f;
+    // (each lane's 16 values with one vector load per stream: read value by value, a load instruction touched 16
+    //  cache lines for 4 bytes each; Flash Next, 2048-row chunk: 45 -> 3.7 ms, bit-identical)
+    float16 acc = (float16)0.0f;
+    if (valid)
       for (int c = 0; c < HC; ++c) {
-        const size_t j = (size_t)m * HCE + c * E + base + i;
-        acc += valid ? xn[j] / (1.0f + exp(-gate[j])) : 0.0f;
+        const size_t j = (size_t)m * HCE + c * E + base;
+        acc += vload16(0, xn + j) / (1.0f + exp(-vload16(0, gate + j)));
       }
-      v[i] = acc * inv_hc;
-      mixed[(size_t)m * E + base + i] = v[i];
-    }
+    float v[16];
+    vstore16(acc * inv_hc, 0, v);
+    vstore16(acc * inv_hc, 0, mixed + (size_t)m * E + base);
     quant_store16(v, s, m, M, E, aq, asc, absum, act32);
   }
 }
