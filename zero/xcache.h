@@ -467,6 +467,32 @@ struct XCache {
     });
   }
 
+  // (generation) the experts `ids` of layer X that are not cached, into stage[X % 2] on a thread: a guess of the next
+  // layer's routing, read while the GPU works; ensure() then copies the ones it needs from there
+  uint64_t g_pf = 0, g_pf_used = 0;
+  void prefetch_ids(int X, const int* ids, int n) {
+    join();
+    if (X < 0 || X >= NL || pool_of[X] < 0) return;
+    const int h = X % 2;
+    stage_layer[h] = X;
+    stage_e[h].clear();
+    pf_reqs_.clear();
+    for (int i = 0; i < n && (int)stage_e[h].size() < S; ++i) {
+      const int e = ids[i];
+      if (e < 0 || e >= NE || where[(size_t)X * NE + e] >= 0) continue;
+      if (std::find(stage_e[h].begin(), stage_e[h].end(), e) != stage_e[h].end()) continue;
+      pf_reqs_.push_back({X, e, stage[h] + stage_e[h].size() * stage_rec});
+      stage_e[h].push_back(e);
+    }
+    if (pf_reqs_.empty()) return;
+    g_pf += pf_reqs_.size();
+    pf_ = std::thread([this] {
+      const auto t0 = std::chrono::steady_clock::now();
+      st.read(pf_reqs_);
+      pf_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    });
+  }
+
   // Makes the experts `ids` (any order, repeats allowed) of layer l readable by the kernels; prompt = a prompt chunk.
   // dummy_rest: also point the layer's other experts at valid memory (the prompt GEMM decodes whole expert groups).
   void ensure(int l, const int* ids, size_t n, bool prompt, bool dummy_rest) {
@@ -518,6 +544,8 @@ struct XCache {
     std::vector<int> pre(NE, -1);  // expert -> staging record (prefetched)
     if (stage_layer[h] == l)
       for (size_t r = 0; r < stage_e[h].size(); ++r) pre[stage_e[h][r]] = (int)r;
+    if (!prompt && stage_layer[h] == l)
+      for (int e : miss) g_pf_used += pre[e] >= 0;
     bool first = true;
     while (i0 < miss.size()) {
       std::vector<ExpertStore::Req> reqs;

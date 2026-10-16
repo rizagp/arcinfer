@@ -807,7 +807,19 @@ inline void vb_tables(__local uint* kt, __global const uint* tabs) {
 #define VB_TABLES GRID_N
 #endif
 inline void vb_tables(__local uint* kt, __global const uint* tabs) {
-  for (int i = get_local_id(0); i < GRID_N; i += get_local_size(0)) kt[i] = tabs[GRID_OFF + i];
+  // (four loads in flight before their stores: the staging loop otherwise waits for each load in turn, eight
+  // round trips for IQ2_S's 2048 words with 256 work-items)
+  const int ls = get_local_size(0);
+  int i = get_local_id(0);
+  for (; i + 3 * ls < GRID_N; i += 4 * ls) {
+    const uint t0 = tabs[GRID_OFF + i], t1 = tabs[GRID_OFF + i + ls], t2 = tabs[GRID_OFF + i + 2 * ls],
+               t3 = tabs[GRID_OFF + i + 3 * ls];
+    kt[i] = t0;
+    kt[i + ls] = t1;
+    kt[i + 2 * ls] = t2;
+    kt[i + 3 * ls] = t3;
+  }
+  for (; i < GRID_N; i += ls) kt[i] = tabs[GRID_OFF + i];
 #ifdef AUX_OFF
   for (int i = get_local_id(0); i < AUX_N; i += get_local_size(0)) kt[GRID_N + i] = tabs[AUX_OFF + i];
 #endif
@@ -1347,6 +1359,18 @@ inline float moe_term(uint8 a8, const uint* w, float d, float dmin, int sc0, int
 #endif
 // h[slot][F] = silu(x W_gate_e^T) * (x W_up_e^T); x rows are the slots' tokens (aq [token][K], per-32 scales asc
 // [K/32][M]); rg / ru: [NE * F] rows of K.
+// One slot per tile (TM 1, token generation) with the vector decoders: the slot's token, its activation row and
+// the lanes' row pointers are fixed before the loop, and each step loads the lane's activation block before the
+// weights are decoded, so its latency overlaps the weight loads (same terms, same order: bit-identical).
+#if TM == 1 && defined(MOE_VB)
+#define MOE_T1 1
+#endif
+#ifndef DN_PACK
+#define DN_PACK 1
+#endif
+#ifndef GU_ORDER
+#define GU_ORDER 1  // 1: gate decoded and accumulated before the up block is decoded (fewer live registers)
+#endif
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void moe_gateup_q(__global const uchar* rg, __global const uchar* ru, int F, int K, __global const uint* tabs,
                            __global const char* aq, __global const float* asc, int M, __global const int* tiles,
@@ -1373,6 +1397,44 @@ __kernel void moe_gateup_q(__global const uchar* rg, __global const uchar* ru, i
   for (int r = 0; r < GROWS; ++r)
 #pragma unroll
     for (int m = 0; m < TM; ++m) ag[r][m] = au[r][m] = 0.0f;
+#ifdef MOE_T1
+  {
+    const int tok = stok[r0], hs = lane / 8, ib = lane % 8;
+    __global const uint* ap = (__global const uint*)(aq + (size_t)tok * K);
+    __global const float* sap = asc + tok;
+    __global const uchar* pg[GROWS];
+    __global const uchar* pu[GROWS];
+#pragma unroll
+    for (int r = 0; r < GROWS; ++r) {
+      const int n = min(n0 + r, F - 1);
+      pg[r] = XR(eg, n, 0);
+      pu[r] = XR(eu, n, 0);
+    }
+    for (int sp = 0; sp < nsb; sp += 2) {
+      const bool has = sp + hs < nsb;
+      const int sbi = has ? sp + hs : sp, bc = sbi * 8 + ib;  // (a lane past the row: superblock sp, a8 = sa = 0)
+      uint8 a8 = vload8(0, ap + 8 * bc);
+      float sa = sap[(size_t)bc * M];
+      a8 = has ? a8 : (uint8)0;
+      sa = has ? sa : 0.0f;
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) {
+        uint wg[8], wu[8];
+        int gs0, gs1, us0, us1, gm0 = 0, gm1 = 0, um0 = 0, um1 = 0;
+        float dg, du, gdmin = 0.0f, udmin = 0.0f;
+        vblock(pg[r] + sbi * BBP, ib, kt, wg, &dg, &gdmin, &gs0, &gs1, &gm0, &gm1);
+#if GU_ORDER
+        ag[r][0] += sa * moe_term(a8, wg, dg, gdmin, gs0, gs1, gm0, gm1);
+#endif
+        vblock(pu[r] + sbi * BBP, ib, kt, wu, &du, &udmin, &us0, &us1, &um0, &um1);
+#if !GU_ORDER
+        ag[r][0] += sa * moe_term(a8, wg, dg, gdmin, gs0, gs1, gm0, gm1);
+#endif
+        au[r][0] += sa * moe_term(a8, wu, du, udmin, us0, us1, um0, um1);
+      }
+    }
+  }
+#else
   for (int sp = 0; sp < nsb; sp += 2) {
     const int b = sp * 8 + lane;
     const bool has = sp + lane / 8 < nsb;
@@ -1413,6 +1475,7 @@ __kernel void moe_gateup_q(__global const uchar* rg, __global const uchar* ru, i
       }
     }
   }
+#endif
 #pragma unroll
   for (int r = 0; r < GROWS; ++r)
 #pragma unroll
@@ -1424,6 +1487,11 @@ __kernel void moe_gateup_q(__global const uchar* rg, __global const uchar* ru, i
 }
 
 // y[slot][N] = weight(slot) * (h[slot] W_down_e^T); h quantized per slot (hq [slot][K], scales hsc [K/32][S]).
+// TM 1 with -DFV=<columns that hold values> (Flash Next: 640 of the 768): the last superblock's REM value blocks
+// of the sub-group's GROWS rows are spread over the lanes (lane = row * REM + block) instead of each row taking a
+// whole step with 16 - REM lanes on padding or past the row; each lane's term goes back to the lane that held it
+// before (sub_group_shuffle) and is added there in the same order: bit-identical, as the skipped blocks' terms are
+// exactly zero (their activations quantize to 0 with scale 0).
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void moe_down_q(__global const uchar* rd, int N, int K, __global const uint* tabs, __global const char* hq,
                          __global const float* hsc, int S, __global const int* tiles, __global const float* swt,
@@ -1449,6 +1517,73 @@ __kernel void moe_down_q(__global const uchar* rd, int N, int K, __global const 
   for (int r = 0; r < GROWS; ++r)
 #pragma unroll
     for (int m = 0; m < TM; ++m) acc[r][m] = 0.0f;
+#ifdef MOE_T1
+  {
+    const int hs = lane / 8, ib = lane % 8;
+    __global const uint* ap = (__global const uint*)(hq + (size_t)r0 * K);
+    __global const float* sap = hsc + r0;
+    __global const uchar* pr[GROWS];
+#pragma unroll
+    for (int r = 0; r < GROWS; ++r) pr[r] = XR(ed, min(n0 + r, N - 1), 0);
+#if defined(FV) && DN_PACK
+#define DN_FULL (2 * ((FV) / 512))            // superblocks in whole value pairs
+#define DN_REM ((FV) / 32 - 8 * DN_FULL)       // value blocks after them
+    const int spe = DN_FULL;
+#else
+    const int spe = nsb;
+#endif
+    for (int sp = 0; sp < spe; sp += 2) {
+      const bool has = sp + hs < nsb;
+      const int sbi = has ? sp + hs : sp, bc = sbi * 8 + ib;
+      uint8 a8 = vload8(0, ap + 8 * bc);
+      float sa = sap[(size_t)bc * S];
+      a8 = has ? a8 : (uint8)0;
+      sa = has ? sa : 0.0f;
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) {
+        uint w[8];
+        int sc0, sc1, mn0 = 0, mn1 = 0;
+        float d, dmin = 0.0f;
+        vblock(pr[r] + sbi * BBP, ib, kt, w, &d, &dmin, &sc0, &sc1, &mn0, &mn1);
+        acc[r][0] += sa * moe_term(a8, w, d, dmin, sc0, sc1, mn0, mn1);
+      }
+    }
+#if defined(FV) && DN_PACK
+#if DN_REM > 0 && DN_REM <= 8 && DN_REM * GROWS <= 16
+    {
+      const int rr = min(lane / DN_REM, GROWS - 1), j = lane % DN_REM, bc = 8 * DN_FULL + j;
+      const uint8 a8 = vload8(0, ap + 8 * bc);
+      const float sa = sap[(size_t)bc * S], st = lane < DN_REM ? sa : 0.0f;
+      uint w[8];
+      int sc0, sc1, mn0 = 0, mn1 = 0;
+      float d, dmin = 0.0f;
+      vblock(XR(ed, min(n0 + rr, N - 1), DN_FULL), j, kt, w, &d, &dmin, &sc0, &sc1, &mn0, &mn1);
+      const float t = moe_term(a8, w, d, dmin, sc0, sc1, mn0, mn1);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) acc[r][0] += st * intel_sub_group_shuffle(t, r * DN_REM + j);
+    }
+#elif DN_REM > 0
+    {
+      const int sp = DN_FULL;
+      const bool has = sp + hs < nsb;
+      const int sbi = has ? sp + hs : sp, bc = sbi * 8 + ib;
+      uint8 a8 = vload8(0, ap + 8 * bc);
+      float sa = sap[(size_t)bc * S];
+      a8 = has ? a8 : (uint8)0;
+      sa = has ? sa : 0.0f;
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) {
+        uint w[8];
+        int sc0, sc1, mn0 = 0, mn1 = 0;
+        float d, dmin = 0.0f;
+        vblock(pr[r] + sbi * BBP, ib, kt, w, &d, &dmin, &sc0, &sc1, &mn0, &mn1);
+        acc[r][0] += sa * moe_term(a8, w, d, dmin, sc0, sc1, mn0, mn1);
+      }
+    }
+#endif
+#endif
+  }
+#else
   for (int sp = 0; sp < nsb; sp += 2) {
     const int b = sp * 8 + lane;
     const bool has = sp + lane / 8 < nsb;
@@ -1480,6 +1615,7 @@ __kernel void moe_down_q(__global const uchar* rd, int N, int K, __global const 
       }
     }
   }
+#endif
 #pragma unroll
   for (int r = 0; r < GROWS; ++r)
 #pragma unroll

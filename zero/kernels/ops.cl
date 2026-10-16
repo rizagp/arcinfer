@@ -2821,3 +2821,76 @@ __kernel void dfl_add(__global float* x, __global const float* y, int E) {
   const size_t j = (size_t)get_global_id(1) * E + get_global_id(0);
   x[j] += y[j];
 }
+
+// ---- Flash Next mixers of a single-token pass, fused, with f32 activations (the prompt path quantizes them for the
+// int8 GEMMs). Weights in the Q8_0 GPU raw form: superblocks of 8 f16 scales + 256 int8 (272 bytes). HCK = HC * E.
+#ifndef HCK
+#define HCK 10240
+#endif
+// dot of 256 weights (one superblock at p) with x[0..256): lane l takes elements 16 l .. 16 l + 15 (block l / 2)
+inline float q8sb_dot(__global const uchar* p, __local const float* x) {
+  const int lane = get_sub_group_local_id();
+  const float d = vload_half(lane / 2, (__global const half*)p);
+  const uint4 q = vload4(0, (__global const uint*)(p + 16 + 16 * lane));
+  const uint w[4] = {q.x, q.y, q.z, q.w};
+  float acc = 0.0f;
+#pragma unroll
+  for (int j = 0; j < 16; ++j) acc += (float)(char)((w[j / 4] >> (8 * (j % 4))) & 0xFF) * x[16 * lane + j];
+  return d * acc;
+}
+// lo[n] = W_down[n] . xn (n < N: the low-rank rows and the inject rows), xn = per-stream RMS norm of res row r0 times w;
+// the streams' 1 / rms go to rinv. grid (256 * ceil(N / 16)), local (256): a sub-group per row.
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void hc_down1(__global const float* res, int r0, __global const float* w, int E, int HC, float eps,
+                       __global const uchar* wd, int N, __global float* lo, __global float* rinv) {
+  __local float xs[HCK];
+  __local float rs[16];
+  const int li = get_local_id(0), ls = get_local_size(0);
+  __global const float* xr = res + (size_t)r0 * HC * E;
+  for (int c = 0; c < HC; ++c) {
+    float ss = 0.0f;
+    for (int i = li; i < E; i += ls) {
+      const float v = xr[c * E + i];
+      xs[c * E + i] = v;
+      ss += v * v;
+    }
+    ss = work_group_reduce_add(ss);
+    if (li == 0) rs[c] = rsqrt(ss / E + eps);
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int i = li; i < HC * E; i += ls) xs[i] *= rs[i / E] * w[i];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (get_group_id(0) == 0 && li < HC) rinv[li] = rs[li];
+  const int n = get_group_id(0) * 16 + get_sub_group_id(), nsb = HC * E / 256;
+  if (n >= N) return;
+  float acc = 0.0f;
+  for (int sb = 0; sb < nsb; ++sb) acc += q8sb_dot(wd + ((size_t)n * nsb + sb) * 272, xs + sb * 256);
+  acc = sub_group_reduce_add(acc);
+  if (get_sub_group_local_id() == 0) lo[n] = acc;
+}
+// mixed[i] = mean over the streams c of xn_c[i] * sigmoid(W_up[c E + i] . silu(lo / HC)) (lo: LR values, the rest of the
+// KP-wide input zero). grid (256 * ceil(E / 16)), local (256): a sub-group per i.
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void hc_up1(__global const float* res, int r0, __global const float* w, __global const float* rinv,
+                     __global const float* lo, int LR, int KP, int E, int HC, __global const uchar* wu,
+                     __global float* mixed) {
+  __local float xs[1024];
+  const int li = get_local_id(0);
+  for (int k = li; k < KP; k += get_local_size(0)) {
+    const float v = k < LR ? lo[k] / (float)HC : 0.0f;
+    xs[k] = v / (1.0f + exp(-v));
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  const int i = get_group_id(0) * 16 + get_sub_group_id(), nsb = KP / 256;
+  if (i >= E) return;
+  __global const float* xr = res + (size_t)r0 * HC * E;
+  float m = 0.0f;
+  for (int c = 0; c < HC; ++c) {
+    const int n = c * E + i;
+    float acc = 0.0f;
+    for (int sb = 0; sb < nsb; ++sb) acc += q8sb_dot(wu + ((size_t)n * nsb + sb) * 272, xs + sb * 256);
+    const float g = sub_group_reduce_add(acc);
+    m += xr[n] * rinv[c] * w[n] / (1.0f + exp(-g));
+  }
+  if (get_sub_group_local_id() == 0) mixed[i] = m / (float)HC;
+}

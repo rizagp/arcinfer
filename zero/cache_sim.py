@@ -97,6 +97,23 @@ def simulate(policy, cap, warm, gen, pin_frac=0.9):
                 if dcap > 0:
                     dyn[k] = 1
                     if len(dyn) > dcap: dyn.popitem(last=False)
+    elif policy == 'layerlru':
+        # an LRU per layer with an equal share of the slots (a global LRU evicts the next layer's experts during
+        # single-token decoding: it walks the layers in a cycle)
+        caches = collections.defaultdict(collections.OrderedDict)
+        nl = max(1, len(set(l for l, _ in warm) | set(l for tok in gen for l, _ in tok)))
+        lcap = max(1, cap // nl)
+        def touch(k, count):
+            nonlocal hits, miss
+            c = caches[k[0]]
+            if k in c:
+                c.move_to_end(k); hits += count; return
+            miss += count
+            c[k] = 1
+            if len(c) > lcap: c.popitem(last=False)
+        for k in warm: touch(k, 0)
+        for tok in gen:
+            for k in tok: touch(k, 1)
     elif policy == 'belady':
         seq = [k for tok in gen for k in tok]
         nxt = [0] * len(seq)
@@ -146,7 +163,7 @@ def main():
         print(f'{"cache":>6} {"policy":>8} {"hit %":>6} {"SSD MB/tok":>10} {"tok/s serial":>12} {"tok/s overlap":>13}')
         for capf in [float(x) for x in a.caps.split(',')]:
             cap = int(total * capf)
-            for pol in ('lru', 'lfu', 'pin', 'pin+lru', 'belady'):
+            for pol in ('lru', 'layerlru', 'lfu', 'pin', 'pin+lru', 'belady'):
                 h, m = simulate(pol, cap, warm, toks)
                 n = max(1, len(toks))
                 mb = m / n * a.mb

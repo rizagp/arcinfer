@@ -911,6 +911,7 @@ class Engine {
   // Flash Next: the final mixer (the output norm), the mixers' buffers (normed streams, gates, low-rank + inject
   // outputs, the block output / mixed input), the PLE block's n-gram embeddings (per chunk view in layer-major
   // prefill) and the token ids before the current position (host copy of the ones kept in the PLE layer's state)
+  cl_mem hc_rinv_ = nullptr;  // (single-token mixers: the streams' 1 / rms)
   cl_mem out_hc_norm_ = nullptr, hc_xn_ = nullptr, hc_gate_ = nullptr, hc_lo_ = nullptr, hco_ = nullptr,
          ple_emb_ = nullptr, ple_hist_ = nullptr;
   GpuWeight out_hc_down_, out_hc_up_;
@@ -968,6 +969,8 @@ class Engine {
   // prompt chunks of standard-type experts: a group of moe_group_ experts at a time decoded into W8 (moe_wq_ /
   // moe_wh_), then the int8 GEMM over that group's slot tiles (gemm.cl MOE_TILES)
   cl_mem moe_wq_ = nullptr, moe_wh_ = nullptr;
+  cl_mem pf_rl_ = nullptr, pf_tiles_ = nullptr, pf_dummy_ = nullptr;  // next-layer routing guess (generation)
+  bool pf_next_ = false;
   int moe_group_ = 0;
   // residual stream of a prompt segment (up to lm_seg_ tokens) for layer-major prefill, and its per-chunk views
   cl_mem x_all_ = nullptr;
@@ -1169,6 +1172,13 @@ class Engine {
   void plan_weights() {
     if (hp.moe) {  // Q8_0 matrices (repacked at load) and 2-bit experts: nothing is decoded just in time
       w8_resident = true;
+      // streamed experts that cannot all be cached (more than the GPU memory share; Qwen3.8 Flash Next: 52 GB): the
+      // dense weights' W8 copies (~3 GB) go to the expert cache instead, decoded just in time per prompt segment
+      uint64_t ex = 0;
+      for (auto& t : f_.tensors)
+        if (t.name.find("_exps.weight") != std::string::npos) ex += t.nbytes;
+      static const bool keep = getenv("ARC_W8_RESIDENT") != nullptr;  // (A/B)
+      if (hp.moe_std && opt.stream_experts && !keep && zrt::global_mem && ex > zrt::global_mem) w8_resident = false;
       return;
     }
     size_t raw = 0, w8 = 0;
@@ -1616,14 +1626,23 @@ class Engine {
     const int NU = hp.n_expert_used;
     static std::vector<int> ids;
     ids.resize((size_t)T * NU);
+    std::vector<int> guess;
     if (T == 1) {
-      std::vector<int> tl(1 + 3 * NU);
+      std::vector<int> tl(1 + 3 * NU), tg;
+      if (pf_next_) {  // (the guess of the next layer's routing, computed with this layer's)
+        tg.resize(1 + 3 * NU);
+        CL_CHECK(clEnqueueReadBuffer(cl_.queue, pf_tiles_, CL_FALSE, 0, tg.size() * 4, tg.data(), 0, nullptr, nullptr));
+      }
       CL_CHECK(clEnqueueReadBuffer(cl_.queue, mtiles_, CL_TRUE, 0, tl.size() * 4, tl.data(), 0, nullptr, nullptr));
       for (int k = 0; k < NU; ++k) ids[k] = tl[1 + 3 * k];
+      if (pf_next_)
+        for (int k = 0; k < NU; ++k) guess.push_back(tg[1 + 3 * k]);
     } else {
       CL_CHECK(clEnqueueReadBuffer(cl_.queue, mids_, CL_TRUE, 0, ids.size() * 4, ids.data(), 0, nullptr, nullptr));
     }
     xc_->ensure(L.il, ids.data(), ids.size(), T > 8, gemm);
+    if (!guess.empty()) xc_->prefetch_ids(L.il + 1, guess.data(), (int)guess.size());
+    pf_next_ = false;
     static const bool xcheck = getenv("ARC_XCHECK") != nullptr;  // (debug: every tile's expert address is in a pool)
     if (xcheck) {
       const int max_t = T * NU + hp.n_expert + 1;
@@ -1666,10 +1685,11 @@ class Engine {
     char b[512];
     snprintf(b, sizeof b,
              "experts: generation %llu hits / %llu misses (%.1f %% hit) | prompt %llu cached, %llu read (%llu prefetched) | "
-             "SSD %.2f GB in %.0f ms (%.2f GB/s)",
+             "SSD %.2f GB in %.0f ms (%.2f GB/s) | next-layer guesses %llu read, %llu used",
              (unsigned long long)x.hits, (unsigned long long)x.misses, 100.0 * x.hits / std::max<uint64_t>(1, x.hits + x.misses),
              (unsigned long long)x.p_hits, (unsigned long long)x.p_reads, (unsigned long long)x.pf_reads,
-             x.st.bytes_read / 1e9, x.read_ms, x.st.bytes_read / 1e6 / std::max(1e-9, x.read_ms));
+             x.st.bytes_read / 1e9, x.read_ms, x.st.bytes_read / 1e6 / std::max(1e-9, x.read_ms),
+             (unsigned long long)x.g_pf, (unsigned long long)x.g_pf_used);
     return b;
   }
  private:
@@ -2929,6 +2949,24 @@ class Engine {
   void hc_mix(cl_mem normw, const GpuWeight& down, const GpuWeight& up, int T, int Mp, int act32, int r0) {
     const int E = hp.n_embd, HC = hp.hc_n, W = hp.hce(), LD = down.N, LR = hp.hc_lr, KP = hc_lr_pad();
     float eps = hp.eps;
+    // single tokens: two fused kernels with f32 activations (norm + down + inject, then silu + up + gated mean) and
+    // the block input's quantization; prompt chunks below: int8 GEMMs (ARC_HC_INT8=1: those for single tokens too)
+    static const bool int8_1 = getenv("ARC_HC_INT8") != nullptr;
+    if (T == 1 && !int8_1 && W <= 10240 && KP <= 1024) {
+      if (!hc_rinv_) hc_rinv_ = buf(64 * 4);
+      int rr = r0, e = E, hc = HC, n = down.N, lr = LR, kp = KP;
+      cl_kernel k1 = kernel("ops", "", "hc_down1");
+      set_args(k1, 0, x_, rr, normw, e, hc, eps, down.raw, n, hc_lo_, hc_rinv_);
+      size_t g1 = (size_t)256 * ((n + 15) / 16), l1 = 256;
+      run("hc_mix1", k1, 1, &g1, &l1);
+      cl_kernel k2 = kernel("ops", "", "hc_up1");
+      set_args(k2, 0, x_, rr, normw, hc_rinv_, hc_lo_, lr, kp, e, hc, up.raw, hco_);
+      size_t g2 = (size_t)256 * ((E + 15) / 16);
+      run("hc_mix1", k2, 1, &g2, &l1);
+      rd_bytes += raw_bytes(down) + raw_bytes(up);
+      quant_rows(hco_, E, Mp, 1, act32);
+      return;
+    }
     {
       cl_kernel k = kernel("ops", "", "hc_norm_quant");
       int rr = r0, e = E, hc = HC, mm = Mp, tt = T, a32 = act32;
@@ -3304,6 +3342,23 @@ class Engine {
       set_args(k, 0, rl, sgate_, mtiles_, stok_, swt_, minv_);
       size_t g1 = 16, l1 = 16;
       run("moe_route", k, 1, &g1, &l1);
+      // streamed experts: guess the next layer's experts with its router on this layer's FFN input (the residual
+      // stream changes little from one layer to the next), so stream_layer can read them while the GPU works on
+      // this layer. Only a prefetch: the next layer still routes on its own input. Off by default (ARC_XGUESS=1:
+      // on): Flash Next 16 % cache, 37 % of the guesses used, 48 % of the misses caught, SSD reads +55 %, no faster
+      static const bool guess = getenv("ARC_XGUESS") && atoi(getenv("ARC_XGUESS")) != 0;
+      const int nx = L.il + 1;
+      if (guess && xc_ && nx < hp.n_layer && layers_[nx].router.raw) {
+        if (!pf_rl_) {
+          pf_rl_ = buf((size_t)hp.router_rows() * 16 * 4);
+          pf_tiles_ = buf((1 + 3 * (size_t)NU) * 4);
+          pf_dummy_ = buf((size_t)64 * 4 * 4);
+        }
+        matmul("moe_guess", layers_[nx].router, Mp, pf_rl_, NR, 0, 0, true);
+        set_args(k, 0, pf_rl_, pf_dummy_, pf_tiles_, pf_dummy_, pf_dummy_, pf_dummy_);
+        run("moe_guess", k, 1, &g1, &l1);
+        pf_next_ = true;
+      }
     } else {
       {
         cl_kernel k = kernel("moe", defs, "moe_route");
@@ -3398,7 +3453,8 @@ class Engine {
     } else if (hp.moe_std) {
       const int grows = T == 1 ? gr_dn : 1;
       cl_kernel k = kernel("decode", "-DMOE_Q -DQT=" + std::to_string(L.ex_type[2]) + " -DGROWS=" + std::to_string(grows) +
-                                         " -DTM=" + std::to_string(tm) + xdef, "moe_down_q");
+                                         " -DTM=" + std::to_string(tm) + xdef +
+                                         (Fp != F ? " -DFV=" + std::to_string(F) : std::string()), "moe_down_q");
       int NN = E, K = Fp, S = slots_;
       if (xc_)
         set_args(k, 0, xc_->xtab[L.il], NN, K, tabs_, mhq_, mhsc_, S, mtiles_, swt_, my_, xc_->xtab[L.il], xoff(L, 2));
