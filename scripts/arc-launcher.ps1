@@ -127,7 +127,7 @@ $optNote = New-Label "Filled in with the best values for the selected model. Cha
 $optNote.ForeColor = [System.Drawing.Color]::DimGray
 $opt.Controls.Add($optNote); $opt.SetColumnSpan($optNote, 2)
 # the options most people change; the rest behind "Show advanced options"
-Add-Opt "Engine" $engineBox "arcinferzero: MoE experts from the SSD (35B: 262K context with images + MTP)"
+Add-Opt "Engine" $engineBox "arcinferzero: Level Zero; MoE models (35B) stream experts from the SSD: 262K with images + MTP"
 Add-Opt "Context (tokens)" $ctxBox "auto: the largest that fits"
 # the addresses other apps connect to (OpenAI / Anthropic / Ollama formats), with a Copy button each
 $apiPanel = New-Object System.Windows.Forms.FlowLayoutPanel

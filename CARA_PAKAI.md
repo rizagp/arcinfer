@@ -32,16 +32,15 @@ Model yang tersedia (setup mengunduhnya ke `%USERPROFILE%\.cache\huggingface\hub
 
 | Perintah | Model | File GGUF |
 |---|---|---|
-| `pi-arc` | Qwen3.8 27B | `ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF` → `Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` |
-| `pi-arc 35b` | Qwen3.6 35B-A3B (MoE) | `ISTA-DASLab/Qwen3.6-35B-A3B-2Bit-GSQ` (safetensors) → dikonversi sekali, lihat di bawah |
-| `pi-arc 35b-mtp` | Qwen3.6 35B-A3B dengan MTP (generasi ~13 % lebih cepat, konteks otomatis ~40K) | `unsloth/Qwen3.6-35B-A3B-MTP-GGUF` (UD-Q3_K_M); `35b-mtp-std` = file yang sama tanpa MTP (~98K) |
+| `pi-arc 27b` | Qwen3.8 27B | `ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF` → `Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` |
+| `pi-arc 35b` | Qwen3.6 35B-A3B (MoE) dengan MTP dan gambar, konteks 262K | `unsloth/Qwen3.6-35B-A3B-MTP-GGUF` → `Qwen3.6-35B-A3B-UD-Q3_K_M.gguf` + `mmproj-BF16.gguf` (diunduh manual dengan `hf download`); kalau tidak ada: versi GSQ 2-bit `ISTA-DASLab/Qwen3.6-35B-A3B-2Bit-GSQ` yang dikonversi (lihat di bawah; tanpa MTP) |
 | `pi-arc g12` | Gemma 4 12B (+ gambar) | `google/gemma-4-12B-it-qat-q4_0-gguf` → `gemma-4-12b-it-qat-q4_0.gguf` + `mmproj-gemma-4-12b-it-qat-q4_0.gguf`; drafter `mtp-gemma-4-12B-it.gguf` dari `unsloth/gemma-4-12B-it-qat-GGUF`, disalin ke folder snapshot model Google |
 | `pi-arc e4b` | Gemma 4 E4B | `google/gemma-4-E4B-it-qat-q4_0-gguf` → `gemma-4-E4B_q4_0-it.gguf`; drafter `mtp-gemma-4-E4B-it.gguf` dari `unsloth/gemma-4-E4B-it-qat-GGUF`, disalin ke folder snapshot model Google |
 | `pi-arc 9b` | Qwen3.5 9B | `unsloth/Qwen3.5-9B-MTP-GGUF` → `Qwen3.5-9B-UD-Q4_K_XL.gguf` |
 | `pi-arc 4b` | Qwen3.5 4B | `unsloth/Qwen3.5-4B-MTP-GGUF` → `Qwen3.5-4B-UD-Q4_K_XL.gguf` |
 
-Qwen3.6 35B-A3B dari ISTA-DASLab tidak tersedia dalam GGUF, jadi dikonversi sekali (±2,5 menit, hasil 10,9 GB di
-`%LOCALAPPDATA%\arcinfer\models`; sudah dilakukan di laptop ini):
+Pilihan `35b` di `setup.cmd` mengunduh versi GSQ 2-bit dari ISTA-DASLab. Versi ini tidak tersedia dalam GGUF, jadi
+dikonversi sekali (±2,5 menit, hasil 10,9 GB di `%LOCALAPPDATA%\arcinfer\models`):
 
 ```powershell
 python tools\convert_gsq.py "<cache HF>\models--ISTA-DASLab--Qwen3.6-35B-A3B-2Bit-GSQ\snapshots\<rev>" `
@@ -95,7 +94,7 @@ sesi sebelumnya. Untuk melanjutkan percakapan, pakai `pi-arc -c` atau `pi-arc -r
 |---|---|
 | langsung setelah Pi ditutup | hanya pesan baru (server masih memegang percakapan itu) |
 | setelah ada sesi atau proyek lain | hanya pesan baru: cache sesi (aktif secara default, 16 GB) menyimpan percakapan yang ditinggalkan ke disk dan memuatnya lagi dalam hitungan detik (`pi-arc --session-cache 0` mematikannya) |
-| setelah server dimatikan atau di-restart | seluruh percakapan (percakapan yang sedang dipegang saat server mati tidak disimpan; prompt sistem tetap diambil dari disk) |
+| setelah `arc-server stop` / `restart` atau ganti model | hanya pesan baru: percakapan yang sedang dipegang disimpan dulu ke disk lalu dimuat lagi (hilang hanya kalau proses server dimatikan paksa) |
 
 Menekan Esc di Pi langsung menghentikan server (saat membaca prompt: dalam ~1 detik; saat menulis jawaban: sebelum
 token berikutnya), jadi pesan berikutnya tidak perlu menunggu. Pesan berikutnya juga tidak memproses ulang seluruh
@@ -178,7 +177,8 @@ sebelum memindahkan/membangun ulang folder arcinfer.
 Selama server menyala:
 
 - **Web UI**: buka http://127.0.0.1:8090/ di browser untuk mengobrol langsung (bisa melampirkan file teks dengan
-  drag-and-drop; dengan Gemma 4 12B juga gambar: tombol **Image**, drag-and-drop, atau paste).
+  drag-and-drop; juga gambar untuk Gemma 4 12B / E4B, Qwen3.5 4B / 9B dan Qwen3.6 35B: tombol **Image**,
+  drag-and-drop, atau paste).
 - **API OpenAI**: base URL `http://127.0.0.1:8090/v1`, API key bebas (misalnya `arcinfer`), model `qwen3.8-27b`
   (atau model yang sedang dimuat; model lain di daftar dimuat otomatis). Mendukung streaming, `reasoning_content`,
   tool calls, `usage`, penalti pengulangan (`frequency_penalty`, `repeat_penalty`), `logit_bias`, `logprobs`,
@@ -224,17 +224,18 @@ print(r.choices[0].message.content)
 
 ## 5. Ukuran konteks, dan kalau percakapan sudah panjang
 
-Setiap model memakai konteks terbesar yang muat di memori GPU yang sedang diatur (Intel Graphics Software; sekarang
-18,3 GiB), dengan sisa ±1 GiB untuk Windows dan aplikasi lain, atau batas latih modelnya. Konteks menyesuaikan
-sendiri bila pengaturan itu diubah (jalankan `arc-server restart` sesudahnya). Pada 18,3 GiB:
+Setiap model memakai konteks terbesar yang muat di memori GPU yang sedang tersedia (diatur di Intel Graphics
+Software, ±18–19 GiB di laptop ini; jumlah yang diberikan driver berubah-ubah tergantung aplikasi lain), dengan sisa
+±1 GiB untuk Windows dan aplikasi lain, atau batas latih modelnya. Konteks menyesuaikan sendiri bila pengaturan itu
+diubah (jalankan `arc-server restart` sesudahnya). Jendela launcher menampilkan angka saat ini. Contoh:
 
-| Model | Konteks bawaan | Memori GPU |
-|---|---|---|
-| Qwen3.8 27B | 86.016 token (57.344 pada 17,4 GiB, 32.768 pada 16,5 GiB; 118.784 dengan `--chunk 1024`) | ±16,8 GiB |
-| Qwen3.6 35B-A3B | 262.144 token (penuh) | ±14,5 GiB |
-| Qwen3.5 9B / 4B | 262.144 token (penuh) | ±12,1 / 11,6 GiB |
-| Gemma 4 12B | 262.144 token (penuh) | ±12,7 GiB |
-| Gemma 4 E4B | 131.072 token (penuh) | ±10,8 GiB |
+| Model | Konteks bawaan |
+|---|---|
+| Qwen3.8 27B | ±41K token dengan gambar + MTP (lebih besar tanpa gambar: `27b-mtp`, atau tanpa keduanya: `27b-std`) |
+| Qwen3.6 35B-A3B | 262.144 token (penuh) dengan gambar + MTP (arcinferzero; engine OpenCL hanya ±40K dengan MTP) |
+| Qwen3.5 9B / 4B | 262.144 token (penuh) |
+| Gemma 4 12B | 262.144 token (penuh) |
+| Gemma 4 E4B | 131.072 token (penuh) |
 
 Jangan memasang memori GPU terlalu tinggi: pada 20 GB (dari 32 GB) model menyisakan terlalu sedikit memori untuk
 Windows, sehingga laptop menjadi lambat atau tidak merespons.
@@ -255,14 +256,22 @@ state yang tidak bisa "melupakan" token tertentu.
 
 ## 6. Seberapa cepat
 
-Diukur di laptop ini (lihat `docs/review_notes.md` dan `bench/results` untuk detail dan perbandingan dengan
-llama.cpp):
+Diukur di laptop ini dengan arcinferzero, 15–16 Oktober 2026 (detail: `docs/performa-zero-2026-10-16.html`;
+perbandingan dengan llama.cpp: `docs/review.html`). Kecepatan prompt = token per detik saat membaca prompt sepanjang
+16K token; kecepatan menulis = jawaban 400 token lewat server (kode / bahasa Indonesia; MTP tidak mengubah isi
+jawaban).
 
-| Model | Prompt 11.240 token sampai token pertama | Prompt 33.937 token | Kecepatan menulis |
+| Model | Membaca prompt (16K) | Menulis tanpa MTP | Menulis dengan MTP |
 |---|---|---|---|
-| Qwen3.8 27B | ±90–97 detik | ±5,5 menit | ±4 token/detik, ±5,3–5,8 dengan MTP |
-| Qwen3.5 9B | ±27 detik | ±1,6 menit | ±10 token/detik |
-| Qwen3.5 4B | ±14 detik | ±1 menit | ±19–21 token/detik |
+| Qwen3.6 35B-A3B | ±680 token/detik | ±20 token/detik | ±31 / 25 token/detik |
+| Qwen3.5 4B | ±700 token/detik | ±20 token/detik | ±30 / 26 token/detik |
+| Gemma 4 E4B | ±625 token/detik | ±22 token/detik | ±40 token/detik (kode) |
+| Qwen3.5 9B | ±390 token/detik | ±12 token/detik | ±17 / 15 token/detik |
+| Gemma 4 12B | ±228 token/detik | ±10 token/detik | ±21 token/detik (kode) |
+| Qwen3.8 27B | ±103 token/detik | ±5 token/detik | ±9 / 7,4 token/detik |
+
+Prompt yang sangat panjang lebih lambat dibaca (attention makin berat): di 131K token 35B ±250 token/detik, 4B ±280,
+E4B ±200.
 
 Tips:
 
@@ -277,7 +286,8 @@ Tips:
   percakapan yang sedang dipegang server, jadi setelahnya percakapan itu juga dimuat, tidak diproses ulang.
 - Pesan baru di sesi yang sama (Qwen 4B / 9B / 35B) hanya memproses ulang giliran terakhir: template Qwen membuang
   thinking giliran lama begitu Anda menulis lagi, dan server menyimpan titik awal giliran itu (arcinferzero).
-- Server jangan dimatikan di tengah pekerjaan: percakapan yang sedang dipegang hilang saat server berhenti.
+- Matikan server lewat `arc-server stop` (atau tombol Stop di launcher), bukan dengan menutup prosesnya paksa: hanya
+  dengan cara itu percakapan yang sedang dipegang disimpan dulu.
 - Laptop yang panas melambat 5–10 %. Jangan menjalankan pekerjaan GPU lain bersamaan.
 
 ## 7. Memindahkan folder arcinfer
@@ -310,10 +320,12 @@ perlu saja (dan mematikan server dulu bila `server.exe` ikut dibangun). Atau sec
 
 ```powershell
 arc-server stop
-.\build.ps1 tools\server.cpp tools\run.cpp
+.\build.ps1 zero\serverz.cpp zero\runz.cpp     # arcinferzero (bawaan)
+.\build.ps1 tools\server.cpp tools\run.cpp     # engine OpenCL
 ```
 
-Kernel GPU (`kernels\*.cl`) dikompilasi oleh driver saat server mulai, jadi perubahan kernel tidak perlu build.
+Kernel GPU (`zero\kernels\*.cl` untuk arcinferzero, `kernels\*.cl` untuk engine OpenCL) dikompilasi oleh driver
+saat server mulai, jadi perubahan kernel tidak perlu build.
 Kernel yang sudah dikompilasi disimpan di `%LOCALAPPDATA%\arcinfer\kernels`, jadi hanya pemakaian pertama tiap varian
 yang menunggu kompilasi.
 Uji regresi: `.\tests\run_tests.ps1 -Model4B <path 4B gguf> -Model27B <path 27B gguf> -ModelGemma <path Gemma 12B> -Model35B <path 35B gguf>`.

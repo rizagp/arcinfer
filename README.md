@@ -1,14 +1,25 @@
 # arcinfer
 
 A from-scratch LLM inference engine for **Intel integrated GPUs (Xe-LPG / Meteor Lake "Arc Graphics")**,
-written in C++ and OpenCL, focused on **fast prompt processing (time to first token)** for long prompts such as
-scanning a codebase. It loads GGUF files directly and serves an **OpenAI-compatible API with a web UI**, and it
-plugs into the [Pi](https://pi.dev) coding agent with one command.
+written in C++ with OpenCL C kernels, focused on **fast prompt processing (time to first token)** for long prompts
+such as scanning a codebase. It loads GGUF files directly and serves an **OpenAI-, Anthropic- and Ollama-compatible
+API with a web UI**, and it plugs into the [Pi](https://pi.dev) coding agent with one command.
+
+Two engines share the kernels and the server code:
+
+- **arcinferzero** (`zero/`, `bin\serverz.exe`, `bin\runz.exe`; the default since 2026-10-16) runs the
+  OpenCL-compiled kernels through **Level Zero**. Its output is bit-identical to the OpenCL engine on every model.
+  On top it streams mixture-of-experts weights from the SSD (Qwen3.6 35B-A3B: only the experts in use stay in GPU
+  memory, so the full 262K context fits together with images and MTP) and supports up to 7 MTP drafts per step.
+- **arcinfer** (`src/`, `bin\server.exe`, `bin\run.exe`): the original OpenCL engine, still available with
+  `arc-server start -OpenCL` / `pi-arc --opencl` (launcher: Engine "arcinfer").
 
 Target hardware it was built and tuned on: Intel Core Ultra 5 125H (Arc iGPU, 7 Xe-cores / 112 EUs, no XMX),
 32 GB LPDDR5x-6400, Windows 11.
 
 - Results and the story of the build: [docs/review.html](docs/review.html) (EN / ID)
+- Current speed per model (Level Zero, 2026-10-16): [docs/performa-zero-2026-10-16.html](docs/performa-zero-2026-10-16.html)
+- arcinferzero development log: [docs/arcinferzero-log.md](docs/arcinferzero-log.md) (Indonesian)
 - What changed recently: [CHANGELOG.md](CHANGELOG.md)
 - Panduan pemakaian berbahasa Indonesia: [CARA_PAKAI.md](CARA_PAKAI.md)
 
@@ -17,7 +28,7 @@ Target hardware it was built and tuned on: Intel Core Ultra 5 125H (Arc iGPU, 7 
 | GGUF architecture | Models | Notes |
 |---|---|---|
 | `qwen35` | Qwen3.5 (0.8B–27B dense), Qwen3.6, Qwen3.8 27B | hybrid Gated DeltaNet + gated attention; MTP speculative decoding; image input with a Qwen3-VL `mmproj` next to the model (encoded on the GPU; Qwen3.5 4B and 9B) |
-| `qwen35moe` | Qwen3.6-35B-A3B: ISTA-DASLab GSQ 2-bit, or standard GGUFs (e.g. Unsloth UD-Q3_K_S) | mixture of experts (256 experts, 8 active); GSQ converted from the safetensors checkpoint with `tools/convert_gsq.py`; standard GGUF experts (IQ / Q3_K / Q4_K / Q5_K / Q6_K / Q8_0 / Q4_0) load as they are; Unsloth's MTP repository adds speculative decoding (`35b-mtp`) |
+| `qwen35moe` | Qwen3.6-35B-A3B: standard GGUFs (e.g. Unsloth UD-Q3_K_M / UD-Q3_K_S) or ISTA-DASLab GSQ 2-bit | mixture of experts (256 experts, 8 active); standard GGUF experts (IQ / Q3_K / Q4_K / Q5_K / Q6_K / Q8_0 / Q4_0) load as they are; GSQ converted from the safetensors checkpoint with `tools/convert_gsq.py`; Unsloth's MTP repository adds speculative decoding and its `mmproj` image input (arcinferzero: both together at 262K context) |
 | `gemma4` | Gemma 4 12B, Gemma 4 E4B (Google's QAT Q4_0 GGUFs) | sliding-window + global attention, per-layer embeddings (E4B); image and audio input (`mmproj`: 12B gemma4uv / gemma4ua, E4B gemma4v ViT and gemma4a conformer on the GPU); speculative decoding with the Gemma 4 assistant drafters (`mtp-*.gguf`) |
 
 Weight types: `Q4_0`, `Q8_0`, `Q2_K`, `Q4_K`, `Q5_K`, `Q6_K`, `IQ1_M`, `IQ2_XXS`, `IQ2_XS`, `IQ2_S`, `IQ3_XXS`, `IQ3_S`,
@@ -85,12 +96,14 @@ already contains everything it needs to build (`third_party\` holds minja and nl
 ### 5. Build
 
 ```powershell
-.\build.ps1 tools\server.cpp tools\run.cpp tools\clinfo.cpp
+.\build.ps1 zero\serverz.cpp zero\runz.cpp tools\server.cpp tools\run.cpp tools\clinfo.cpp
 ```
 
-This takes about a minute and writes `bin\server.exe` (the HTTP server), `bin\run.exe` (command-line runs,
-benchmarks, accuracy checks) and `bin\clinfo.exe`. Run the programs from the project folder, because they read
-`kernels\*.cl` and `webui\` from there.
+This takes a few minutes and writes `bin\serverz.exe` / `bin\runz.exe` (arcinferzero: the HTTP server and the
+command-line tool for runs, benchmarks and accuracy checks), `bin\server.exe` / `bin\run.exe` (the same on the
+OpenCL engine) and `bin\clinfo.exe`. `zero\serverz.cpp` compiles `tools\server.cpp` on the Level Zero engine, so
+both servers have the same API. Run the programs from the project folder, because they read `zero\kernels\*.cl`
+(arcinferzero), `kernels\*.cl` (OpenCL engine) and `webui\` from there.
 
 Check that the GPU is usable:
 
@@ -130,7 +143,8 @@ in the same folder as the model: download them from the same repository in the s
 | `e4b` | Gemma 4 E4B QAT (Google, Q4_0); drafter from Unsloth, copied into the model's snapshot folder | `hf download google/gemma-4-E4B-it-qat-q4_0-gguf gemma-4-E4B_q4_0-it.gguf` and `hf download unsloth/gemma-4-E4B-it-qat-GGUF mtp-gemma-4-E4B-it.gguf` | 5.2 + 0.1 GB |
 | `35b` | Qwen3.6 35B-A3B, 2-bit GSQ | see step 7 (download 12.6 GB, then convert) | 11.7 GB |
 
-The E4B's `mmproj` file (1 GB) is not used yet: arcinfer reads images only with the 12B.
+With their `mmproj` file next to the model, Gemma 4 12B and E4B read images and audio, and Qwen3.5 4B / 9B and
+Qwen3.6 35B read images (all encoders run on the GPU).
 
 ### 7. Qwen3.6-35B-A3B (optional): convert the GSQ checkpoint
 
@@ -159,8 +173,11 @@ speculative decoding. `arc-server` / `pi-arc` find the converted file in `%LOCAL
 .\scripts\arc-server.ps1 start -Model e4b      # or 27b, 35b, 9b, 4b, g12
 ```
 
-The first start of each model compiles its GPU kernels (up to a minute or two); they are cached in
-`%LOCALAPPDATA%\arcinfer\kernels`, so later starts take 5–40 s (mostly reading the model file). Then open the web
+This starts arcinferzero; add `-OpenCL` for the OpenCL engine. The first start of each model compiles its GPU
+kernels (up to a minute or two); they are cached in `%LOCALAPPDATA%\arcinfer\kernels`, so later starts take 5–40 s
+(mostly reading the model file). The first arcinferzero start of a mixture-of-experts model also writes its expert
+file once (35B: 15 GB, about 2.5 minutes) to `%LOCALAPPDATA%\arcinfer\zero\`; it can be deleted at any time and is
+written again when missing. Then open the web
 UI at http://127.0.0.1:8090/ or call the OpenAI API at `http://127.0.0.1:8090/v1`. `arc-server status` shows what
 is running and `arc-server stop` frees the GPU memory.
 
@@ -250,10 +267,13 @@ test uses port 8091 and needs the GPU memory.
 ## Run the server by hand
 
 ```powershell
-.\bin\server.exe -m C:\path\to\model.gguf --port 8080 --ctx auto --mtp --alias qwen3.8-27b
-.\bin\server.exe --help           # every option with its default
-.\bin\server.exe --list-models    # the models it can load (Hugging Face cache, %LOCALAPPDATA%\arcinfer\models), as JSON
+.\bin\serverz.exe -m C:\path\to\model.gguf --port 8080 --ctx auto --mtp --alias qwen3.8-27b
+.\bin\serverz.exe --help           # every option with its default
+.\bin\serverz.exe --list-models    # the models it can load (Hugging Face cache, %LOCALAPPDATA%\arcinfer\models), as JSON
 ```
+
+`bin\server.exe` (OpenCL engine) takes the same options except the arcinferzero ones (`--mtp-drafts` above 3,
+`--expert-cache-gb`, `--expert-cache-pct`, `--windows-reserve-gb`, `--no-stream`).
 
 - Web UI: http://127.0.0.1:8080/
 - OpenAI API: `POST /v1/chat/completions` (streaming, `reasoning_content`, tool calls streamed while they are
@@ -301,15 +321,26 @@ test uses port 8091 and needs the GPU memory.
   and loads a saved one that matches the request, instead of processing its whole prompt again. New conversations
   resume after the system prompt they share (Qwen: a recurrent-state snapshot there, kept in host memory). Saving
   and loading take about a second; outputs are identical to never switching. `--session-cache-gb N` (the server's default 0 = off; arc-server / pi-arc start it with 16 GB, `pi-arc --session-cache 0` = off;
-  the least recently used conversations go first); `arc-server clear-cache` deletes them all. The conversation the
-  server holds when it is stopped is not saved.
-- `--mtp`: speculative decoding. Qwen3.5/3.8: the model's own MTP (multi-token prediction) block in the GGUF
-  (`nextn` tensors, up to 2 drafts per step). Gemma 4: the assistant drafter `mtp-*.gguf` next to the model (found
-  automatically; up to 3 drafts per step), which reads the main model's KV cache. The drafts are verified in one
-  main-model pass and the next token is still sampled from the model's distribution, so the output is unchanged.
-- Gemma 4 12B reads images (`image_url` content parts, data URLs) when its `mmproj-*.gguf` is next to the model
-  (or given with `--mmproj`); the image encoder runs on the CPU (~1 s per image). Audio input (`input_audio`) is
-  wired up for an mmproj with the Gemma 4 audio projector but not yet tested.
+  the least recently used conversations go first); `arc-server clear-cache` deletes them all. `arc-server stop` /
+  `restart` and a model switch save the conversation the server holds first (`POST /sessions/save`), so it is
+  loaded afterwards instead of processed again; only a server that is killed loses it.
+- Qwen turn snapshot (arcinferzero): the Qwen templates drop the reasoning of earlier turns as soon as the user
+  writes again, so the server also snapshots the start of the last assistant turn and a new message only processes
+  that turn again, not the whole conversation. `--preserve-thinking` (Qwen3.6; Qwen3.8 always does) keeps earlier
+  reasoning in the prompt instead: nothing is processed again, the context fills faster.
+- `--mtp`: speculative decoding. Qwen3.5/3.6/3.8: the model's own MTP (multi-token prediction) block in the GGUF
+  (`nextn` tensors). Gemma 4: the assistant drafter `mtp-*.gguf` next to the model (found automatically), which
+  reads the main model's KV cache. The drafts are verified in one main-model pass and the next token is still
+  sampled from the model's distribution, so the output is unchanged (checked: identical answers at every draft
+  count). `--mtp-drafts N`: arcinferzero 1–7 (default 3 for the 4B, 27B and 35B, 2 for the 9B and Gemma; more than 3
+  is not faster yet), the OpenCL engine up to 2 (Qwen) / 3 (Gemma).
+- Images (`image_url` content parts, data URLs) and audio (`input_audio`, `/v1/audio/transcriptions`) when the
+  model's `mmproj-*.gguf` is next to it (or given with `--mmproj`): images on Gemma 4 12B / E4B, Qwen3.5 4B / 9B and
+  Qwen3.6 35B, audio on Gemma 4 12B / E4B; the encoders run on the GPU.
+- Constrained tool calls (Gemma 4 and Qwen): while the model writes a tool call, only tokens that keep the call
+  valid for the tool's JSON schema are allowed (required arguments such as `path` cannot be left out, only known
+  keys); the content stays the model's choice. `ARC_TOOL_CONSTRAINT=0` turns it off; `ARC_LOG_TOOLCALLS=file.jsonl`
+  logs the raw text of every tool call.
 - During a long prompt, streaming responses carry `: prefill N/M` progress comments (also shown in the web UI).
 
 ## Using Pi
@@ -325,9 +356,10 @@ every option.
   `pi-arc` and `arc-server start` / `restart`: a model deleted from the Hugging Face cache disappears from it.
 - **Context:** each model gets the largest context that fits the GPU memory currently set (Intel Graphics
   Software), with ~1 GiB left for Windows and other apps, at most its max context length (the GGUF's
-  `context_length`). At 18.3 GiB: Qwen3.8 27B 81,920 with MTP / 122,880 without; Qwen3.6 35B-A3B 102,400 (UD-Q3_K_M),
-  217,088 (UD-Q3_K_S), 40,960 with MTP; Qwen3.5 9B 143,360 with images / 262,144 without; Qwen3.5 4B and Gemma 4
-  12B 262,144; Gemma 4 E4B 131,072. The launcher window shows how each one is counted. `pi-arc --ctx N` sets a context, `pi-arc --ctx auto` goes back to the automatic one (restarting a server
+  `context_length`). The GPU memory the driver offers changes with what else runs, so the numbers move; the launcher
+  window shows how each one is counted. Examples at ~18–19 GiB: Qwen3.6 35B-A3B 262,144 with images and MTP
+  (arcinferzero: experts streamed from the SSD; the OpenCL engine fits ~40K with MTP); Qwen3.5 4B / 9B and Gemma 4
+  12B 262,144; Gemma 4 E4B 131,072; Qwen3.8 27B 40,960 with images and MTP, more without them. `pi-arc --ctx N` sets a context, `pi-arc --ctx auto` goes back to the automatic one (restarting a server
   that runs a fixed context). `--chunk 1024` frees 1.1 GiB on the 27B for more context (118,784 at 18.3 GiB;
   prompts of ~11K tokens ~4 % slower, from ~34K on no difference). Pi's `maxTokens` is the whole window: Pi clamps
   each request to the room left (window − prompt − 4096).
@@ -356,7 +388,7 @@ What the server has to process (times on the 27B; see "Run the server by hand" f
 | open the first session in a new project folder | its system prompt once (~40 s); it is then kept for that folder |
 | continue a session (`pi-arc -c`, `pi-arc -r`, `/resume`) right after closing it | only your new message (the server still holds that conversation) |
 | ... after another session or project used the server | only the new message: the session cache (on by default) loads it from disk in seconds |
-| ... after a server restart | the whole conversation again (the conversation held when the server stops is not saved) |
+| ... after `arc-server restart` / `stop` or a model switch | only the new message: the held conversation is saved first and loaded from disk |
 | press Esc | nothing more: the server stops within ~1 s while reading the prompt, before the next token while writing; your next message only processes what is new |
 
 A new session starts empty: Pi sends only its system prompt and your message, so the model does not see an earlier
@@ -392,6 +424,9 @@ then `pi --model arcinfer/qwen3.8-27b --thinking low` (Pi sends the reasoning ef
 effort the Qwen3.8 template thinks at `xhigh`, which can take very long on a laptop).
 
 ## CLI
+
+`bin\runz.exe` (arcinferzero) and `bin\run.exe` (OpenCL engine) take the same arguments; `runz --bench-pp` also
+prints the time of each generation step.
 
 ```powershell
 .\bin\run.exe model.gguf --bench-pp 2048 --n 64                       # prompt-processing and generation speed
@@ -468,6 +503,9 @@ src/        engine.h (forward passes), quants.h (GGUF decoding/repacking), token
             kernel cache)
 kernels/    gemm.cl (DP4a GEMM), decode.cl (JIT decode + GEMV), ops.cl (norms, DeltaNet, attention, quantization),
             moe.cl (mixture-of-experts routing and 2-bit expert GEMMs)
+zero/       arcinferzero: engine.h (Level Zero engine), clrt.h (OpenCL-style calls on Level Zero), xcache.h +
+            expert_store.h (MoE experts on the SSD, GPU cache), serverz.cpp / runz.cpp, kernels/ (its own copy of the
+            kernels), vision / audio encoders, grf_probe.cpp (register-spill probe)
 tools/      server.cpp, run.cpp, test_gemm.cpp (kernel validation), ref_forward.cpp (f32 CPU reference: Qwen3.5,
             Qwen3.5-MoE, Gemma 4), convert_gsq.py (ISTA GSQ checkpoint -> GGUF), tok_test.cpp, chat_render.cpp,
             gguf_dump.cpp, clinfo.cpp
@@ -477,7 +515,8 @@ scripts/    arc-server.ps1 (server in the background), arc-launcher.ps1 (launche
             pi-arc.ps1 (Pi launcher), install-pi.ps1 (commands and Pi's model list), pi-models.ps1 (writes that list)
 tests/      run_tests.ps1 and its reference data
 webui/      index.html
-docs/       review.html (results), review_notes.md (working notes)
+docs/       review.html (results), performa-zero-2026-10-16.html (current speeds), arcinferzero-log.md,
+            review_notes.md (working notes)
 setup.cmd   setup.ps1: checks, builds, downloads models, connects Pi;  build.ps1: builds one or more tools
 ```
 
@@ -499,7 +538,9 @@ setup.cmd   setup.ps1: checks, builds, downloads models, connects Pi;  build.ps1
 - Speeds measured while another GPU process runs (an arcinfer server, a stray `run.exe`, llama.cpp) are not
   representative: they share the iGPU and its memory. `run.exe` prints a note when it finds one.
 
-## License notes
+## License
+
+arcinfer is licensed under the [Apache License 2.0](LICENSE).
 
 IQ codebook tables and Unicode category tables are generated from ggml / llama.cpp sources (MIT License).
 `third_party/` contains minja (MIT) and nlohmann/json (MIT).
