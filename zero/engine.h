@@ -331,6 +331,51 @@ class Engine {
   struct Cancelled {};
 
   const GgufFile& gguf() const { return f_; }
+  // Runs the generation kernels once so that a first request does not wait for their just-in-time compilation: a
+  // short prompt and a token, then with MTP / DFlash2 drafts and a verification pass of every row count (DFlash2 and
+  // the MTP block each); leaves the engine reset. Only when this model, these options and these kernel sources have
+  // not been warmed before (a marker in the kernel cache): after an update the first requests took seconds per new
+  // kernel (27B with DFlash2: a 27-token prompt 37 s, then 1-3 tok/s), later starts skip it. Returns true when it ran.
+  bool warm_up_once(int tok) {
+    const std::string& dir = cl_.cache_dir;
+    char hex[17];
+    snprintf(hex, sizeof hex, "%016llx",
+             (unsigned long long)ClRt::fnv1a(gemm_src_ + "\x01" + ops_src_ + "\x01" + dec_src_ + "\x01" + moe_src_ + "\x01" + f_.path +
+                                             "|" + std::to_string(opt.mtp) + "|" + opt.dflash + "|" + std::to_string(opt.mtp_drafts) +
+                                             "|" + std::to_string(max_chunk) + "|" + cl_.device_id));
+    const std::string marker = dir.empty() ? std::string() : dir + "\\warm-" + hex;
+    if (!marker.empty() && std::filesystem::exists(marker)) {
+      forward(&tok, 1);  // (the kernels are in the cache: building them is quick)
+      reset();
+      return false;
+    }
+    std::vector<int> t(32, tok);
+    forward(t.data(), 32);
+    forward(&tok, 1);
+    if (has_mtp && !gemma_mtp_) {
+      for (int round = 0; round < (dfl_ ? 2 : 1); ++round) {
+        dfl_ema_ = round == 0 ? 4.0 : 0.0;  // (round 0 with DFlash2: its drafts; round 1: the MTP block's)
+        dfl_wait_ = 0;
+        dfl_gap_ = 1 << 16;
+        for (int k = 1; k <= max_drafts() && pos + k + 2 < ctx; ++k) {
+          mtp_draft(tok, k);
+          verify(tok, std::vector<int>(k, tok));
+          verify_done(0);
+        }
+      }
+    }
+    reset();
+    dfl_ema_ = 4.0;
+    dfl_wait_ = 0;
+    dfl_gap_ = 8;
+    dfl_probe_ = false;
+    if (!marker.empty()) {
+      std::error_code ec;
+      std::filesystem::create_directories(dir, ec);
+      if (FILE* f = fopen(marker.c_str(), "w")) fclose(f);
+    }
+    return true;
+  }
 
   // Moves back to position P to reuse a cached prefix (models without recurrent state, i.e. Gemma 4): possible
   // while the sliding-window rings still hold the n_swa positions before P. Qwen3.5 uses snapshot()/restore().

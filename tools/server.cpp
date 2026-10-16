@@ -2351,7 +2351,16 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
   L->tok = std::make_unique<Tokenizer>(eng.gguf());
   fprintf(stderr, "loaded in %.1f s | %d layers | ctx %d | chunk %d | GPU %.2f GiB | weights %s\n", eng.load_ms / 1000,
           eng.hp.n_layer, eng.ctx, eng.max_chunk, eng.gpu_bytes / 1073741824.0, eng.w8_resident ? "W8 resident" : "W8 just-in-time");
+#ifdef ARC_ZERO
+  {  // compile kernels before serving (all of the generation's after an update)
+    const auto tw = std::chrono::steady_clock::now();
+    if (eng.warm_up_once(L->tok->encode("Hi", false)[0]))
+      fprintf(stderr, "kernels warmed up for this model in %.1f s (once after an update)\n",
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - tw).count());
+  }
+#else
   { int w = L->tok->encode("Hi", false)[0]; eng.forward(&w, 1); eng.reset(); }  // compile kernels before serving
+#endif
   L->srv = std::make_unique<Server>(eng, *L->tok, alias, so.webui);
   Server& srv = *L->srv;
   std::string mmproj = so.mmproj;
