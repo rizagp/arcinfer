@@ -533,6 +533,22 @@ inline void quantize_act_cpu(const float* x, int M, int K, int8_t* aq, float* as
 // Weight types the GEMM reads natively (repacked once at load). Everything else is decoded just in time
 // on the GPU (kernels/decode.cl) into the W8 layout.
 inline bool is_native_type(uint32_t t) { return t == GGML_Q4_K || t == GGML_Q5_K || t == GGML_Q6_K || t == GGML_Q8_0; }
+// Small-block types (IQ4_NL: 32 elements / 18 bytes, Q2_0: 64 / 18) whose consecutive blocks are read as 256-element
+// "superblocks" by the GPU (144 / 72 bytes). A row whose K is not a multiple of 256 (Qwen3.8 Flash Next down
+// projections: K = 640) is padded to the next multiple with zero blocks (scale 0, dequantizing to zeros).
+inline bool is_small_block_type(uint32_t t) { return t == GGML_IQ4_NL || t == GGML_Q2_0; }
+inline int padded_k(int K) { return (K + 255) / 256 * 256; }
+// N rows of K elements of a small-block type -> N rows of padded_k(K) elements (dst holds N * the padded row bytes)
+inline void pad_small_block_rows(uint32_t type, const uint8_t* src, int N, int K, uint8_t* dst) {
+  int blk = 0, bytes = 0;
+  ggml_block_info(type, blk, bytes);
+  const size_t rb = (size_t)K / blk * bytes, prb = (size_t)padded_k(K) / blk * bytes;
+  for (int n = 0; n < N; ++n) {
+    memcpy(dst + n * prb, src + n * rb, rb);
+    memset(dst + n * prb + rb, 0, prb - rb);  // (scale 0: an fp16 zero, so the padded elements dequantize to 0)
+  }
+}
+
 inline bool is_w8_type(uint32_t t) {
   switch (t) {
     case GGML_Q2_K: case GGML_Q3_K: case GGML_Q4_K: case GGML_Q5_K: case GGML_Q6_K: case GGML_IQ2_XXS: case GGML_IQ2_XS:

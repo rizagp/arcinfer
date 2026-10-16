@@ -78,8 +78,11 @@ IQ2_S for dense and expert gate/up; **IQ4_NL (20)** and **Q2_0 (42)** for expert
 ## Risks / design points
 
 1. **K = 640** for every `ffn_down` (expert and shared): arcinfer assumes K % 256 == 0 (superblocks, activation scales
-   per 256 or 32). Plan: decode down experts into W8 padded to K = 768 (zeros), activations padded the same way; or a
-   small-block GEMV / GEMM path for K % 64 == 0.
+   per 256 or 32). Decision (2026-10-16): treat consecutive small blocks as a 256-element "superblock" (IQ4_NL: 8 x 18
+   = 144 bytes; Q2_0: 4 x 18 = 72 bytes; both multiples of 8 for block reads) and pad each down row from K = 640 to 768
+   with zero blocks (scale 0) when the experts are copied into the GPU cache: +20 % for the down projections only
+   (converting to Q8_0 instead would grow the experts to ±51 GB). The down input (silu(gate)·up, 640) is padded with
+   zeros to 768 as well, so the products are unchanged. GPU decoders for QT 20 / 42 read these padded rows.
 2. Expert streaming: 46.8 GiB of experts, ±2 MiB each, read directly from the GGUF (no separate expert file); GPU cache
    ±12 GiB (25 %). Per token ±0.94 GB of experts; a 4,096-token prompt chunk touches nearly all of them.
 3. PLE table rows (160 x IQ4_NL = 90 bytes) are read from the SSD per token on the CPU: 16 random reads per token.
