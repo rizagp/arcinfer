@@ -3777,7 +3777,7 @@ class Engine {
     const auto v = dfl_f32(dfl_t(n));
     return buf(v.size() * 4, v.data());
   }
-  // a bf16 matrix [N][K] (columns k0 .. k0 + K of rows of Kfull) as a Q8_0 weight
+  // a bf16 matrix [N][K] (columns k0 .. k0 + K of rows of Kfull) as a Q4_0 weight
   GpuWeight dfl_w(const std::string& n, int k0 = 0, int Kc = 0) {
     const StTensor& t = dfl_t(n);
     const int N = (int)t.shape[0], Kf = (int)t.shape[1], K = Kc ? Kc : Kf;
@@ -3786,6 +3786,14 @@ class Engine {
 #pragma omp parallel for
     for (int r = 0; r < N; ++r)
       for (int c = 0; c < K; ++c) v[(size_t)r * K + c] = bf16_to_f32(b[(size_t)r * Kf + k0 + c]);
+    // Q4_0: the drafter's weights are read for every draft block; at half the bytes of Q8_0 its layers take ~45 %
+    // less time (27B code: 539 -> 296 ms per answer, 16.9 -> 17.2 tok/s; 35B 160 -> 105 ms), the drafts are taken
+    // as often (27B code 84.5 vs 85.4 %, 35B equal) and the drafter needs 0.84 GiB less (27B). ARC_DFL_Q8=1: Q8_0.
+    static const bool q4 = getenv("ARC_DFL_Q8") == nullptr;
+    if (q4) {
+      auto q = quantize_rows_q4_0(v.data(), N, K);
+      return make_weight(GGML_Q4_0, q.data(), q.size(), N, K);
+    }
     auto q8 = quantize_rows_q8_0(v.data(), N, K);
     return make_weight(GGML_Q8_0, q8.data(), q8.size(), N, K);
   }
