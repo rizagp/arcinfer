@@ -90,7 +90,7 @@ IQ4_XS / Q4_K reach ±62 in the same profile; codebook types need more arithmeti
 | Idea | Result |
 |---|---|
 | fp16 P·V accumulation in attention | no speed-up, worse error |
-| SIMD8 W8 GEMM (despite a 13.7 TOPS SIMD8 microbenchmark) | slower in the model |
+| SIMD8 W8 GEMM (its DP4a microbenchmark peaks at 13.7 TOPS vs 13.2 for SIMD16) | 28 % slower: 27B ffn_gate 7.90 -> 5.69 TOPS, ffn_down 6.62 -> 4.74 (re-measured 16 Oct). The ALUs are 8 lanes wide, so SIMD16 loses almost nothing in pure arithmetic, while the GEMM is limited by the loads, lane broadcasts and scale math around the DP4a, which SIMD8 needs twice as many instructions for. A peak microbenchmark measures the part that is not the bottleneck |
 | Software-pipelined GEMM loop, 32 tokens per sub-group, 24-bit multiplies | 7.0, 2.6 TOPS, no change |
 | SLM staging of q/k for the DeltaNet recurrence | 4x slower (local memory bandwidth) |
 | Several tokens per sub-group in the DeltaNet conv | 3x slower (too few sub-groups in flight) |
