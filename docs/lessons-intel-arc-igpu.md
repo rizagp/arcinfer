@@ -117,6 +117,8 @@ IQ4_XS / Q4_K reach ±62 in the same profile; codebook types need more arithmeti
 | A draft head over a fixed vocabulary prefix (`ARC_DRAFT_VOCAB`) with 7 MTP drafts | 27B: first 131,072 ids, code 15.1 -> 16.3 tok/s but Indonesian 6.9 -> 5.8 (its words lie beyond id 131,072); 65,536 slower for both |
 | Other MTP confidence cut-offs (`--mtp-min-p`) | 27B, 0.3 / 0.5 / 0.7 / 0.85: code 14.6 / 15.3 / 14.0 / 13.9, Indonesian 6.6 / 6.9 / 6.8 / 6.6 tok/s: 0.5 stays |
 | Loading the DFlash2 drafter before the main weights | 27B: its lm_head back from 21 to 10 ms per pass, but other weights slowed and the wall-clock speed was no better (6.1-6.3 vs 6.6 tok/s); which buffers land on slow pages varies with the load (a 35B hybrid run is ~20-30 % slower about one time in six, with identical work) |
+| Reading a token's few missing expert records in 512 KB pieces, so that more reads are in flight | ssd_bench: one 2.2 MB record 0.88 ms alone, ~0.53 ms as four concurrent pieces; Flash Next generation equal (7.19 vs 7.19 tok/s), SSD time slightly up |
+| Local-memory bank conflicts in the Flash Next mixers (activations read as x[16 l + j]) | transposed: hc_up1 / hc_down1 only 2-3 % faster (kept, bit-identical) |
 | Larger GPU pages / Level Zero virtual memory | the driver already uses 2 MiB pages; mapping physical memory is refused |
 
 ## 6. Compiler flags that this driver honors (tested 16 Oct, driver 32.0.101.9033)
