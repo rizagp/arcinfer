@@ -3992,6 +3992,18 @@ class Engine {
  public:
   int drafter_dflash_steps() const { return (int)dfl_steps_; }
  private:
+  // sum of exp(l[i] - mx) over n logits (mx their maximum): the drafts' confidence. float exp in blocks of 4096 (the
+  // compiler vectorizes it), the blocks summed in double; was one double exp per vocabulary entry, 2-3 ms per draft
+  static double softmax_den(const float* l, size_t n, float mx) {
+    double z = 0;
+    for (size_t i0 = 0; i0 < n; i0 += 4096) {
+      const size_t i1 = std::min(n, i0 + 4096);
+      float zs = 0.0f;
+      for (size_t i = i0; i < i1; ++i) zs += std::exp(l[i] - mx);
+      z += zs;
+    }
+    return z;
+  }
   std::vector<int> dflash_draft(int tok, int max_drafts) {
     const int E = hp.n_embd, B = dfl_B_, saved = cur_T_, start = pos, V = hp.n_vocab, F = dfl_F_;
     const int QW = dfl_nh_ * 128, KW = dfl_nkv_ * 128, ldd = 2 * dfl_K_ * (E / dfl_G_);
@@ -4104,9 +4116,7 @@ class Engine {
       if (min_p > 0) {
         float mx = l[idx[0]];
         for (int k = 1; k < K; ++k) mx = std::max(mx, l[idx[k]]);
-        double z = 0;
-#pragma omp parallel for reduction(+ : z)
-        for (int i = 0; i < V; ++i) z += std::exp((double)l[i] - mx);
+        const double z = softmax_den(l, V, mx);
         path_p *= std::exp((double)l[bt] - mx) / z;
         if (t > 0 && path_p < min_p) break;  // (the first draft always goes)
       }
@@ -4253,8 +4263,7 @@ class Engine {
       const int d = draft_ids_.empty() ? (int)(mx - first) : draft_ids_[mx - first];
       drafts.push_back(d);
       if ((int)drafts.size() >= max_drafts) break;
-      double z = 0;
-      for (auto it = first; it != last; ++it) z += std::exp((double)*it - *mx);
+      const double z = softmax_den(&*first, nl, *mx);
       if (1.0 / z < opt.mtp_min_p) break;  // not confident: verify one draft only
       mtp_rows(&d, mtp_h_, 1, pos + 1 + k, true, mtp_h_);
     }
