@@ -113,6 +113,10 @@ IQ4_XS / Q4_K reach ±62 in the same profile; codebook types need more arithmeti
 | A per-layer LRU for the expert cache (against the cyclic layer order of decoding) | a recorded Flash Next trace: 80 % hits vs 82 % for the global LRU (Belady's optimum: 90 %) |
 | Layer-major prompt segments of 32K instead of 16K for narrow models (experts decoded once per segment) | 35B, 40K prompt: 530 -> 521 tok/s (the larger residual buffer costs expert-cache room) |
 | Double-buffered K/V tiles, 8 or 32 tokens per work-group in prompt attention | within 4 % (35B shape at 32K) |
+| Running the next expert group's decode to W8 beside the current group's MoE GEMM, on the second compute engine (Level Zero queue group 1) | a 1 GiB stream kernel and a DP4a kernel: 109 ms one after the other, 89 ms on two engines; the MoE prompt GEMM itself is ALU-bound (35B, 4K chunk: 930 -> 675 ms with no loads at all), so at most ~7 % back for the cross-engine synchronization |
+| A draft head over a fixed vocabulary prefix (`ARC_DRAFT_VOCAB`) with 7 MTP drafts | 27B: first 131,072 ids, code 15.1 -> 16.3 tok/s but Indonesian 6.9 -> 5.8 (its words lie beyond id 131,072); 65,536 slower for both |
+| Other MTP confidence cut-offs (`--mtp-min-p`) | 27B, 0.3 / 0.5 / 0.7 / 0.85: code 14.6 / 15.3 / 14.0 / 13.9, Indonesian 6.6 / 6.9 / 6.8 / 6.6 tok/s: 0.5 stays |
+| Loading the DFlash2 drafter before the main weights | 27B: its lm_head back from 21 to 10 ms per pass, but other weights slowed and the wall-clock speed was no better (6.1-6.3 vs 6.6 tok/s); which buffers land on slow pages varies with the load (a 35B hybrid run is ~20-30 % slower about one time in six, with identical work) |
 | Larger GPU pages / Level Zero virtual memory | the driver already uses 2 MiB pages; mapping physical memory is refused |
 
 ## 6. Compiler flags that this driver honors (tested 16 Oct, driver 32.0.101.9033)
