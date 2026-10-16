@@ -324,6 +324,22 @@ Jadwal kasar (diubah sesuai hasil; pekerjaan yang gagal syarat dibatalkan, tidak
 - Senin 07:30 berhenti tes; 07:40 rapikan: semua proses tes dihentikan, server DIBIARKAN MATI (keputusan user),
   laporan akhir.
 
+**Urutan baru (keputusan user 16 Okt siang): Flash Next dulu.**
+1. Flash Next (qwen4exp) di arcinferzero, memakai ulang jalur 35B (streaming expert SSD + cache GPU, routing MoE,
+   DeltaNet, tokenizer/template/server). Baru: tipe Q2_0 (id 42), hyper-connections (4 aliran residual, low rank 320),
+   attention sparse (indexer top-2048, kompresi x4), MoE 512 expert / 10 aktif + shared expert, tabel n-gram PLE
+   (part 2, 26,8 GiB IQ4_NL) dibaca dari SSD per token, mmproj bila keluarga Qwen-VL. Acuan: llama.cpp upstream
+   (qwen4exp) + acuan CPU f32 sendiri. Expert dibaca langsung dari GGUF (C: sisa 81 GB). Perkiraan 20–30 jam.
+   Syarat lolos: acuan CPU vs GPU (KL kecil, greedy sama), jawaban masuk akal (kode + Indonesia), server + Pi jalan,
+   tidak ada crash 20 permintaan; ukur prompt dan generate (perkiraan 5–8 tok/s, prompt 150–250 tok/s).
+2. 17.1 + 17.2 (±6 jam): juga mempercepat 35B dan Flash Next.
+3. DFlash2 untuk 27B (17.3/17.4) dengan sisa waktu; bila belum selesai, dilanjutkan minggu berikutnya.
+4. 17.6 regresi + laporan (Senin 04:00–07:30).
+
+Ukuran Flash Next (header part 1): 1.223 tensor, 51,0 GiB: expert 46,8 GiB (512 x 48 layer, ±2 MiB per expert),
+non-expert ±4,2 GiB (attn_qkv 0,66, output 0,49, ssm_out 0,41, attn_gate 0,35, token_embd 0,31, hc_* 4 x 0,29,
+attn_q 0,24, shared expert 0,14, router 0,12, ...). Part 2: per_layer_token_embd IQ4_NL [160, 320.001.536] 26,8 GiB.
+
 Keputusan user (16 Okt pagi): mulai nanti malam saat user bilang (server dipakai user sampai sore); commit lokal saja,
 push ke GitHub setelah user cek laporan Senin; Senin pagi server dibiarkan mati; laptop dijaga tetap menyala lewat
 aplikasi selama kerja.
