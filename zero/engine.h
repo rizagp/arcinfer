@@ -2084,8 +2084,9 @@ class Engine {
     static const bool off = getenv("ARC_NO_GEMV_V") != nullptr;  // (A/B tests: the gemv / gemv_mt path)
     // (measured per type with bench/gemv_bench on the regrouped GPU forms; IQ3_S stays faster in gemv)
     return !off && (w.type == GGML_IQ4_XS || w.type == GGML_Q4_0 || w.type == GGML_IQ3_XXS || w.type == GGML_IQ2_XXS ||
-                    w.type == GGML_IQ2_XS || w.type == GGML_IQ2_S || w.type == GGML_IQ1_M ||
-                    (w.type == GGML_Q6_K && w.N > 65536));
+                    w.type == GGML_IQ2_XS || w.type == GGML_IQ2_S || w.type == GGML_IQ1_M || w.type == GGML_Q6_K);
+    // (Q6_K: every matrix, not only output heads: 27B MTP block FFN 63-67 -> 71-77 GB/s, attn_output 0.41 -> 0.34 ms,
+    //  eh_proj 0.78 -> 0.61 ms; tiny matrices equal; 16 Oct)
   }
   static int gemv_v_rows(const GpuWeight& w) {
     static const int force = getenv("ARC_GVROWS") ? atoi(getenv("ARC_GVROWS")) : 0;  // (tuning)
