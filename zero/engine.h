@@ -2956,13 +2956,13 @@ class Engine {
       if (!hc_rinv_) hc_rinv_ = buf(64 * 4);
       int rr = r0, e = E, hc = HC, n = down.N, lr = LR, kp = KP;
       cl_kernel k1 = kernel("ops", "", "hc_down1");
-      set_args(k1, 0, x_, rr, normw, e, hc, eps, down.raw, n, hc_lo_, hc_rinv_);
-      size_t g1 = (size_t)256 * ((n + 15) / 16), l1 = 256;
-      run("hc_mix1", k1, 1, &g1, &l1);
+      set_args(k1, 0, x_, rr, normw, e, hc, eps, down.raw, n, hc_xn_, hc_rinv_);
+      size_t g1[2] = {(size_t)256 * ((n + 15) / 16), 8}, l1[2] = {256, 1};  // (8 K slices: HC_KS)
+      run("hc_down1", k1, 2, g1, l1);
       cl_kernel k2 = kernel("ops", "", "hc_up1");
-      set_args(k2, 0, x_, rr, normw, hc_rinv_, hc_lo_, lr, kp, e, hc, up.raw, hco_);
-      size_t g2 = (size_t)256 * ((E + 15) / 16);
-      run("hc_mix1", k2, 1, &g2, &l1);
+      set_args(k2, 0, x_, rr, normw, hc_rinv_, hc_xn_, n, hc_lo_, lr, kp, e, hc, up.raw, hco_);
+      size_t g2 = (size_t)256 * ((E + 15) / 16), l2 = 256;
+      run("hc_up1", k2, 1, &g2, &l2);
       rd_bytes += raw_bytes(down) + raw_bytes(up);
       quant_rows(hco_, E, Mp, 1, act32);
       return;
