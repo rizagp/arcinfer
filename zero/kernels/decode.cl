@@ -1789,11 +1789,13 @@ __kernel void moe_down_q(__global const uchar* rd, int N, int K, __global const 
 // weight row's superblocks in registers instead of reading decode_w8's copy. The same int8 weights and scales and the
 // same order of operations, so the results are those of decode_w8 + gemm, bit for bit, without the decode pass and
 // its writes. Lanes = 16 rows of one expert; a tile's tokens are broadcast as in the GEMM. Types without per-block
-// mins that decode_w8 does not requantize (not Q2_K / Q4_K / Q5_K, nor the per-32 float types).
+// mins that decode_w8 does not requantize (not Q2_K / Q4_K / Q5_K). The per-32 float types (Q8_0, Q4_0, IQ4_NL,
+// Q2_0) as the GEMM's native Q8_0 form: the block scale times the activation scale per 32-block.
 // C[r][gc * 16 + lane] for the tiles tstart[0] .. tstart[ne] (moe_scan), looped with the launch's y size as stride;
-// accumulate: 0 store, 1 add, 2 C = silu(C) * result. grid (N, ny), local (16, 1).
+// accumulate: 0 store, 1 add, 2 C = silu(C) * result; kv: the columns that hold values (K, or less for rows padded to
+// whole superblocks). grid (N, ny), local (16, 1).
 #ifdef MOE_RG
-#define RG_SC32 (QT == IQ4_XS || QT == IQ3_S || QT == IQ3_XXS || QT == IQ2_XXS)
+#define RG_SC32 (QT == IQ4_XS || QT == IQ3_S || QT == IQ3_XXS || QT == IQ2_XXS || PER32)
 #ifndef RG_TP
 #define RG_TP 4  // tokens per step (no spills with 256 registers for IQ3_XXS / IQ4_XS / Q3_K; 8 or 16 spill)
 #endif
@@ -1809,7 +1811,7 @@ __kernel void moe_rg(__global const uchar* raw, int N, int K, __global const uin
                      __global const float* restrict asc, __global float* restrict C, int M, int ldc, int accumulate,
                      __global const int* restrict tiles, __global const int* restrict tstart, int ne,
                      __global const int* restrict rowmap, int use_map, __global const float* restrict rowscale,
-                     int use_scale XARGS_RG) {
+                     int use_scale, int kv XARGS_RG) {
   const int gy = get_group_id(1), ngy = get_num_groups(1);
   if (tstart[0] + gy >= tstart[ne]) return;  // (no tile for this work-group: before the staging)
 #ifdef GRID_OFF
@@ -1859,6 +1861,7 @@ __kernel void moe_rg(__global const uchar* raw, int N, int K, __global const uin
       float d = 0.0f;
 #pragma unroll
       for (int j = 0; j < 4; ++j) {
+        if (s * 256 + 64 * j >= kv) break;  // (columns past kv: padding, Flash Next's down projection; kv % 64 == 0)
         uint lo[8], hi[8];
         int a0, a1, b0, b1, mn0, mn1;
         float dl, dmin;
@@ -1887,8 +1890,12 @@ __kernel void moe_rg(__global const uchar* raw, int N, int K, __global const uin
 #pragma unroll
           for (int q = 0; q < RG_TP; ++q) {
             const int m = mg + q;
+#if PER32
+            res[m] = fma(RG_B(avl, m) * dl, (float)c0[q], fma(RG_B(avh, m) * d, (float)c1[q], res[m]));
+#else
             const int plo = c0[q] * (short)a0, phi = c1[q] * (short)b0;
             tq[m] = fma(RG_B(avl, m), (float)plo, fma(RG_B(avh, m), (float)phi, tq[m]));
+#endif
           }
 #else
           int c0[RG_TP], c1[RG_TP], c2[RG_TP], c3[RG_TP];
@@ -1912,8 +1919,10 @@ __kernel void moe_rg(__global const uchar* raw, int N, int K, __global const uin
 #endif
         }
       }
+#if !PER32
 #pragma unroll
       for (int m = 0; m < RG_TM; ++m) res[m] = fma(d, tq[m], res[m]);
+#endif
     }
     const float rsc = use_scale ? rowscale[rl] : 1.0f;
 #pragma unroll

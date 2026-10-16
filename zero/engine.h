@@ -3439,7 +3439,13 @@ class Engine {
     static const int rg_min = getenv("ARC_MOE_RG_MIN") ? atoi(getenv("ARC_MOE_RG_MIN")) : 320,
                      rg_max = getenv("ARC_MOE_RG_MAX") ? atoi(getenv("ARC_MOE_RG_MAX")) : 1280;
     static const bool no_rg = getenv("ARC_NO_MOE_RG") != nullptr;
-    const bool use_rg = !no_rg && hp.moe_std && tm == 16 && T >= rg_min && T < rg_max && Fp == F && moe_rg_layer_ok(L);
+    // Without decode + GEMM (Flash Next: F padded) only the down projection takes moe_rg, at every chunk size from
+    // rg_min: Flash Next, 8K prompt in 2048-token chunks: down 13.8 -> 6.2 s GPU time, 145 -> 165 tok/s, and KL to the
+    // CPU reference 0.0221 -> 0.0191 (337 tokens; max 0.96 -> 0.27); its gate / up stay per tile (15.4 vs 13.7 s, KL
+    // 0.0230 with both).
+    const bool gemm_ok = moe_group_ > 0 && Fp == F && moe_gemm_layer_ok(L);
+    const bool rg_ok = !no_rg && hp.moe_std && tm == 16 && T >= rg_min && F % 64 == 0 && moe_rg_layer_ok(L);
+    const bool use_rg = rg_ok && gemm_ok && T < rg_max, rg_down = rg_ok && (T < rg_max || !gemm_ok);
     const bool use_gemm = !use_rg && moe_group_ > 0 && tm == 16 && T >= gemm_min && moe_gemm_layer_ok(L);
     const std::string xdef = xc_ ? " -DXCACHE" : "";
     // standard expert types, per tile (kernels/decode.cl moe_gateup_q / moe_down_q): the tiles in `tiles`
@@ -3532,7 +3538,7 @@ class Engine {
       run("swiglu_quant", k_swiglu_, 2, gws, lws);
     }
     matmul("gemm_down_sh", L.down_sh, Mp, msh_, E, 0, 0, true);
-    if (use_rg) {
+    if (rg_down) {
       moe_rg(L, 2, Mp, max_tiles);
     } else if (use_gemm) {
       moe_gemm(L, 2, Mp);
@@ -3576,11 +3582,11 @@ class Engine {
       if (!moe_gemm_layer_ok(L)) return false;
     return true;
   }
-  // moe_rg's types: no per-block mins, not requantized by decode_w8, not the per-32 float types (IQ1_M: its own
-  // scale layout)
+  // moe_rg's types: no per-block mins, not requantized by decode_w8 (IQ1_M: its own scale layout)
   static bool moe_rg_type(uint32_t t) {
     return t == GGML_IQ4_XS || t == GGML_IQ3_S || t == GGML_IQ3_XXS || t == GGML_IQ2_XXS || t == GGML_IQ2_XS ||
-           t == GGML_IQ2_S || t == GGML_Q6_K || t == GGML_Q3_K;
+           t == GGML_IQ2_S || t == GGML_Q6_K || t == GGML_Q3_K || t == GGML_IQ4_NL || t == GGML_Q2_0 ||
+           t == GGML_Q4_0 || t == GGML_Q8_0;
   }
   static bool moe_rg_layer_ok(const Layer& L) {
     for (int i = 0; i < 3; ++i)
@@ -3597,14 +3603,17 @@ class Engine {
     for (int i = part; i < (part == 0 ? 2 : 3); ++i) {
       cl_kernel k = kernel("decode", "-cl-intel-256-GRF-per-thread -DMOE_RG -DQT=" + std::to_string(L.ex_type[i]) + xd,
                            "moe_rg");
-      int N = i == 2 ? E : F, K = i == 2 ? F : E, M = i == 2 ? slots_ : Mp, ldc = N, acc = i == 1 ? 2 : 0, ne = NE,
+      // (Flash Next: h rows of Fp = 768 for F = 640 values; the down projection's rows padded to Fp with zeros)
+      const int Fp = hp.n_ff_exp_pad;
+      int N = i == 2 ? E : F, K = i == 2 ? Fp : E, M = i == 2 ? slots_ : Mp, ldc = i == 2 ? E : Fp, acc = i == 1 ? 2 : 0, ne = NE,
           um = i == 2 ? 0 : 1, us = i == 2 ? 1 : 0;
       cl_mem a = i == 2 ? mhq_ : aq_, as = i == 2 ? mhsc_ : asc_, c = i == 2 ? my_ : mh_;
+      int kv = i == 2 ? F : K;
       if (xc_)
-        set_args(k, 0, xc_->xtab[L.il], N, K, tabs_, a, as, c, M, ldc, acc, mtiles_, mtstart_, ne, stok_, um, swt_, us,
+        set_args(k, 0, xc_->xtab[L.il], N, K, tabs_, a, as, c, M, ldc, acc, mtiles_, mtstart_, ne, stok_, um, swt_, us, kv,
                  xc_->xtab[L.il], xoff(L, i));
       else
-        set_args(k, 0, L.ex_q[i], N, K, tabs_, a, as, c, M, ldc, acc, mtiles_, mtstart_, ne, stok_, um, swt_, us);
+        set_args(k, 0, L.ex_q[i], N, K, tabs_, a, as, c, M, ldc, acc, mtiles_, mtstart_, ne, stok_, um, swt_, us, kv);
       const size_t ny = ny_env > 0 ? (size_t)ny_env : max_tiles;
       size_t gws[2] = {(size_t)N, ny}, lws[2] = {16, 1};
       run(i == 2 ? "moe_down" : "moe_gateup", k, 2, gws, lws);

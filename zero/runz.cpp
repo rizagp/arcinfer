@@ -272,7 +272,8 @@ static int run_main(int argc, char** argv) {
         for (float v : l) z += std::exp((double)v - mx);
         const float* rr = ref.data() + r * V;
         double kl = 0;
-        for (size_t i = 0; i < V; ++i) kl += std::exp((double)rr[i]) * (rr[i] - (l[i] - mx - std::log(z)));
+        for (size_t i = 0; i < V; ++i)  // (a reference log-prob of -inf adds nothing)
+          if (rr[i] > -1e30f) kl += std::exp((double)rr[i]) * (rr[i] - (l[i] - mx - std::log(z)));
         sum += kl;
         mxk = std::max(mxk, kl);
         agree += (std::max_element(l.begin(), l.end()) - l.begin()) == (std::max_element(rr, rr + V) - rr);
@@ -322,7 +323,8 @@ static int run_main(int argc, char** argv) {
         double z = 0;
         for (float v : l) z += std::exp((double)v - mx);
         double kl = 0;
-        for (size_t i = 0; i < V; ++i) kl += std::exp((double)ref[i]) * (ref[i] - (l[i] - mx - std::log(z)));
+        for (size_t i = 0; i < V; ++i)  // (a reference log-prob of -inf adds nothing)
+          if (ref[i] > -1e30f) kl += std::exp((double)ref[i]) * (ref[i] - (l[i] - mx - std::log(z)));
         return kl;
       };
       FILE* fi = fopen(kl_ref.c_str(), "rb");
