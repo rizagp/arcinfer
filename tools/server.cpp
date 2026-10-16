@@ -37,6 +37,7 @@
 #include "json_constraint.h"
 #include "tool_constraint.h"
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -1776,8 +1777,26 @@ static std::vector<ModelInfo> scan_models() {
       std::ifstream f(fs::path(la) / "arcinfer" / "model-dirs.txt");
       for (std::string line; std::getline(f, line);) add(line);
     }
+    // (a folder on a drive that hangs, e.g. a USB stick after the laptop slept, would stall every model list and so
+    //  every server start: each folder is first listed by a detached thread and skipped if that takes over 2 s)
+    auto reachable = [](const fs::path& d) {
+      auto st = std::make_shared<std::atomic<int>>(0);
+      std::thread([d, st] {
+        std::error_code e;
+        const bool ok = fs::is_directory(d, e);
+        if (ok) fs::directory_iterator it(d, e);
+        st->store(ok && !e ? 1 : 2);
+      }).detach();
+      for (int i = 0; i < 100 && st->load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      return st->load();
+    };
     int prio = 1;
-    for (const auto& d : extra) scan_hub(fs::path(d), prio++);
+    for (const auto& d : extra) {
+      const int r = reachable(fs::path(d));
+      if (r == 1) scan_hub(fs::path(d), prio);
+      else if (r == 0) fprintf(stderr, "model folder %s did not answer within 2 s (drive asleep or hung?): skipped\n", d.c_str());
+      ++prio;
+    }
   }
   if (const char* la = getenv("LOCALAPPDATA"))
     for (const auto& e : fs::directory_iterator(fs::path(la) / "arcinfer" / "models", ec))
