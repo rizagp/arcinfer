@@ -326,6 +326,13 @@ Jadwal kasar (diubah sesuai hasil; pekerjaan yang gagal syarat dibatalkan, tidak
 - Senin 07:30 berhenti tes; 07:40 rapikan: semua proses tes dihentikan, server DIBIARKAN MATI (keputusan user),
   laporan akhir.
 
+**Status (16 Okt malam):**
+- [x] Bagian A: GEMM 16 token berdampingan (+3-7 %), attention P·V (-12..17 %); prefetch decode, split, trik tanda
+  GEMV dicoba, tidak dipakai (docs/lessons §5).
+- [x] Flash Next jalan (engine, PLE, QSA, server): KL chat pendek 0,0014; generate ±4 tok/s; commit 9788df0.
+- [ ] Flash Next: validasi QSA di 3.566 token vs acuan CPU; kecepatan (cache 12 %, satu pool); MTP tidak ada.
+- [ ] DFlash2 untuk 27B: kode drafter ditulis (zero/engine.h dflash_*, --dflash DIR), belum diuji.
+
 **Urutan baru (keputusan user 16 Okt siang): Flash Next dulu.**
 1. Flash Next (qwen4exp) di arcinferzero, memakai ulang jalur 35B (streaming expert SSD + cache GPU, routing MoE,
    DeltaNet, tokenizer/template/server). Baru: tipe Q2_0 (id 42), hyper-connections (4 aliran residual, low rank 320),

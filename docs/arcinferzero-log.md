@@ -388,3 +388,15 @@ MoE 512 expert dengan streaming langsung dari GGUF + tambalan baris down, PLE di
 - Server: jawaban benar (Tokyo, fungsi is_prime). Generate ±4 tok/s, cache expert 7,9 GiB (12 %; satu pool karena
   5 ukuran record: pool terpisah butuh 1 layer penuh masing-masing -> GPU kehabisan memori). File expert 56 GB.
 - 27B / 35B logit identik per bit setelah semua perubahan.
+
+### DFlash2 untuk 27B (16 Okt malam)
+
+- Arsitektur dari z-lab/dflash model.py (dibaca lewat ringkasan, tensor dari header safetensors): konteks = hidden
+  state 27B setelah layer 5/19/33/47/61, fc (25600 -> 5120) + hidden_norm, lalu K/V tiap layer drafter (ring 4096,
+  jendela 2048). Draft: blok 8 baris [token, mask x7], 5 layer pre-norm, konvolusi dinamis 2-tap bergrup 16 di
+  sekitar attention dan MLP (prepare: kernel separuh 0 dari input; finish: separuh 1 pada keluaran), attention
+  non-kausal ke konteks + blok, head 27B, selector top-16 jalur rakus (logit + <pred[prev] * proj(h), succ[cand]>).
+- fc dihitung bertahap per layer target (GEMM slice 5120x5120, akumulasi) supaya fitur 5 layer tidak disimpan.
+- Hasil (greedy, identik dengan tanpa drafter): kode 4,85 -> 11,5 tok/s (89 % draft diterima, 6,9 token/pass);
+  teks Indonesia DFlash2 saja 2,9 tok/s (11 % diterima) -> mode gabungan dengan MTP: 5,6 (MTP saja 5,8-6,3).
+- Drafter memakan ±13 % waktu (dfl 7,9 %, head 4,7 %); sisanya verifikasi 8 baris 27B (±480 ms per pass).

@@ -63,6 +63,7 @@ Generation is memory-bound: the goal is reading the weights at close to 75 GB/s,
 
 | Change | Effect |
 |---|---|
+| **DFlash2 block drafter** (27B: 8 rows per draft pass, 7 drafts verified at once; switches to the MTP block when its drafts are rejected) | Python code 4.85 -> 11.5 tok/s (89 % of drafts taken); Indonesian prose ~MTP (the drafter is weak outside English / code) |
 | GEMVs straight on the raw GGUF blocks (no decode pass), block reads, codebooks in local memory | 11–49 -> 57–77 GB/s |
 | Raw blocks regrouped once at load for aligned vector loads (Q8_0 scales first; IQ2/IQ3 scale moved last) | Q8_0 GEMV 37 -> 77 GB/s, IQ2_XXS 27 -> 60, IQ3_XXS 41 -> 62 |
 | IQ4_XS: lanes vector-load their own bytes; 16-entry table pre-shifted per byte | E4B attention q 44 -> 67 GB/s, output head 48 -> 69; E4B 17 -> 21 tok/s |

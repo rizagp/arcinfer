@@ -79,6 +79,7 @@ static int run_main(int argc, char** argv) {
             "  --n N                 tokens to generate (default 16)     --show   print the generated text\n"
             "  --dump-logits F       write the prompt logits and every generation step's (f32) to F, to compare runs bitwise\n"
             "  --mtp                 speculative decoding (MTP block / Gemma drafter)  --mtp-drafts N  drafts per step\n"
+            "  --dflash DIR          speculative decoding with a DFlash2 block drafter (z-lab; Qwen3.8 27B)\n"
             "  --mtp-min-p P         draft a second token only above this MTP probability (default 0.5)\n"
             "engine:\n"
             "  --ctx N               context (default: what the prompt needs)     --chunk N   prompt tokens per step\n"
@@ -130,6 +131,7 @@ static int run_main(int argc, char** argv) {
     else if (a == "--act256") eo.act32_all = false;
     else if (a == "--attn-f32") eo.attn_int8 = false;
     else if (a == "--mtp") eo.mtp = true;
+    else if (a == "--dflash") { eo.dflash = argv[++i]; eo.mtp = true; }  // DFlash2 drafter folder
     else if (a == "--mtp-drafts") eo.mtp_drafts = atoi(argv[++i]);
     else if (a == "--mtp-min-p") eo.mtp_min_p = (float)atof(argv[++i]);
     else if (a == "--kl-ref") kl_ref = argv[++i];

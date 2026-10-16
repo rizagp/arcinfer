@@ -66,7 +66,8 @@ static void rmsnorm(float* x, int n, const float* w, float eps) {
   const float r = (float)(1.0 / std::sqrt(ss / n + eps));
   for (int i = 0; i < n; ++i) x[i] = x[i] * r * (w ? w[i] : 1.0f);
 }
-static float silu(float x) { return x / (1.0f + std::exp(-x)); }
+// (below -80 the result is 0 in float; /fp:fast turned x / (1 + exp(-x)) = x / inf into NaN there: Flash Next's mixers)
+static float silu(float x) { return x < -80.0f ? 0.0f : x / (1.0f + std::exp(-x)); }
 
 static float bf16f(uint16_t h) {
   uint32_t u = (uint32_t)h << 16;
@@ -313,6 +314,13 @@ static void qwen4exp_layers(const std::vector<int>& toks, std::vector<float>& x)
     matmul(pre + "_down.weight", xn, T, lo);
     for (auto& v : lo) v = silu(v / (float)HC);
     matmul(pre + "_up.weight", lo, T, gate);
+    if (getenv("REF_DEBUG_LAST") && !inject) {
+      int bx = 0, bl = 0, bg = 0;
+      for (int i = 0; i < HD; ++i) bx += !std::isfinite(xn[(size_t)(T - 1) * HD + i]);
+      for (int i = 0; i < hp("hyper_connection.low_rank"); ++i) bl += !std::isfinite(lo[(size_t)(T - 1) * hp("hyper_connection.low_rank") + i]);
+      for (int i = 0; i < HD; ++i) bg += !std::isfinite(gate[(size_t)(T - 1) * HD + i]);
+      fprintf(stderr, "\nmixer %s last row: non-finite xn %d lo %d gate %d (lo size %zu, T %d)\n", pre.c_str(), bx, bl, bg, lo.size(), T);
+    }
     mixed.assign((size_t)T * E, 0.0f);
     for (int t = 0; t < T; ++t)
       for (int i = 0; i < E; ++i) {
@@ -634,6 +642,12 @@ static void qwen4exp_layers(const std::vector<int>& toks, std::vector<float>& x)
   if (fdump) fclose(fdump);
   // the final mixer is the output norm
   hc_mix("output_hc", mixed, nullptr);
+  if (getenv("REF_DEBUG_LAST")) {  // (debug: non-finite values of the last row's streams / mixer output)
+    int bad_r = 0, bad_m = 0;
+    for (int i = 0; i < HD; ++i) bad_r += !std::isfinite(res[(size_t)(T - 1) * HD + i]);
+    for (int i = 0; i < E; ++i) bad_m += !std::isfinite(mixed[(size_t)(T - 1) * E + i]);
+    fprintf(stderr, "\nlast row: non-finite streams %d, mixer output %d\n", bad_r, bad_m);
+  }
   x = mixed;
 }
 

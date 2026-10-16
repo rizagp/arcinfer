@@ -2386,6 +2386,9 @@ int main(int argc, char** argv) {
     else if (a == "--budget") { so.eo.w8_budget_gb = std::stod(next()); so.budget_given = true; }
     else if (a == "--attn-f32") so.eo.attn_int8 = false;
     else if (a == "--mtp") so.eo.mtp = true;
+#ifdef ARC_ZERO
+    else if (a == "--dflash") { so.eo.dflash = next(); so.eo.mtp = true; }
+#endif
     else if (a == "--mmproj") so.mmproj = next();
     else if (a == "--no-mmproj") so.mmproj = "-";
     else if (a == "--image-min-tokens") so.img_min = atoi(next().c_str());
@@ -2416,6 +2419,10 @@ int main(int argc, char** argv) {
             "  --mtp                 speculative decoding with the model's MTP block or Gemma assistant drafter\n"
             "  --mtp-drafts N        drafts per step, 1..3, arcinferzero Qwen 1..7 (default 3 for Qwen 27B-class, 1 for\n"
             "                        MoE, else 2)\n"
+#ifdef ARC_ZERO
+            "  --dflash DIR          speculative decoding with a DFlash2 block drafter instead (z-lab, Qwen3.8 27B;\n"
+            "                        7 drafts per step)\n"
+#endif
             "  --think-budget N      default reasoning budget in tokens (requests can override it)\n"
             "  --preserve-thinking   earlier turns keep their reasoning (Qwen3.6 template option; requests can override it\n"
             "                        with chat_template_kwargs.preserve_thinking; Qwen3.8 always keeps it)\n"

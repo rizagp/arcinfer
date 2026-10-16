@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-10-16 (night): DFlash2 block drafter for Qwen3.8 27B
+
+- `--dflash DIR` (runz, serverz) loads a z-lab DFlash2 drafter (z-lab/Qwen3.8-27B-DFlash2): 5 layers fed by the
+  target's hidden states after layers 5 / 19 / 33 / 47 / 61 (fc + norm into a context K/V ring of 4096 positions,
+  attention window 2048), a block of 8 rows [token, mask x 7] per draft with two-tap grouped dynamic convolutions
+  around attention and MLP, the target's output head and the candidate selector (top 16, greedy bilinear path).
+  Weights BF16 -> Q8_0 on the GPU (~1.9 GB), selector codebooks read from the mapped file.
+- With the model's MTP block also loaded (the default with `--dflash`), each step picks the drafter: DFlash2 while
+  its recent accepted drafts per pass stay >= 2 (`ARC_DFL_MIN`), else the MTP block (3 drafts), with a DFlash2 step
+  every 8th to re-check. `ARC_DFL_P` (default 0.3) drops a DFlash2 path's tail below that probability.
+- 27B, greedy, answers identical to plain decoding: Python code 4.85 -> 11.5 tok/s (MTP alone ~8.9; 89 % of drafts
+  taken, 6.9 tokens per main-model pass); Indonesian prose 4.67 -> 5.6 (MTP alone 5.8-6.3; DFlash2 takes ~11 % of
+  its drafts there: its training data is mostly English and code).
+
 ## 2026-10-16 (evening): Qwen3.8 Flash Next on arcinferzero
 
 - New architecture `qwen4exp` (Qwen3.8 Flash Next, ISTA-DASLab GSQ-RCO IQ3_S, split GGUF of 2 parts) in arcinferzero:
