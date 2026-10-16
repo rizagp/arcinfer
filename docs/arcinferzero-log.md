@@ -352,3 +352,20 @@ GB/s efektif per peran (11,3 GB/token): attn_qkv 76, output 73,5, attn_gate 73; 
 ssm_out 51. Per jenis kuantisasi (profil per layer, angka absolut lebih rendah karena beban profil): IQ4_XS / Q4_K
 ≈ 62, IQ3_S / IQ3_XXS ≈ 51–55, IQ2_* ≈ 47–52, IQ1_M ≈ 33: dekode codebook (IQ3/IQ2) belum tertutup waktu baca memori.
 FFN 27B didominasi IQ3_S / IQ3_XXS (±5 GB). Perkiraan: dekode IQ3 setara IQ4_XS +5–10 %, gabung kernel kecil +2–4 %.
+
+## Qwen3.8 Flash Next (qwen4exp), mulai 16 Okt siang
+
+Spesifikasi: docs/flash-next-spec.md (dari llama.cpp src/models/qwen4exp.cpp). Selesai dan teruji (16 Okt 11:40–12:10):
+- Loader: tipe Q2_0 (42) dan dekode CPU IQ4_NL / Q2_0; cocok persis dengan dekoder Python independen (5 baris,
+  termasuk baris tambalan tabel n-gram). gguf_dump membaca 1.224 tensor / 77,9 GiB (2 part).
+- Acuan CPU (tools/ref_forward, qwen4exp): hyper-connections, DeltaNet dengan gate sigmoid, attention padat (sama
+  dengan QSA selama semua blok terpilih), MoE 512/10 + shared expert, PLE n-gram. "Apa ibu kota Indonesia? Jawab
+  singkat." -> "Jakarta" (p 0,89), greedy "Jakarta<|im_end|>"; 20 token 26 dtk di CPU.
+- K = 640 (`ffn_down`): baris IQ4_NL / Q2_0 ditambal blok nol ke 768 (pad_small_block_rows, tes PAD=1).
+- GPU (zero/kernels/decode.cl): IQ4_NL (seperti Q4_0 lewat tabel kvalues) dan Q2_0 (superblock 72 byte, unpack
+  2-bit SWAR) di decode32 / vblock; per-32 skala -> GEMM bentuk Q8_0 asli (engine + test_gemm). Bobot Flash Next:
+  gemv, gemv_v, JIT-W8 + GEMM semua OK (err 6e-8..1e-7 vs acuan CPU), tanpa spill.
+- Kernel hyper-connections (ops.cl: hc_norm_quant, hc_lo_quant (silu(lo/4), K 320 ditambal ke 512),
+  hc_gate_mean_quant, hc_combine): tests/test_hc.cpp vs CPU, err 2e-8..6e-8, int8 tidak meleset > 1 langkah.
+Berikutnya: engine qwen4exp di zero/engine.h (bobot BF16 hc_* / router sebagai Q8_0 dengan K tambalan, alur layer,
+MoE 512 expert dengan streaming langsung dari GGUF + tambalan baris down, PLE di host), lalu QSA untuk konteks panjang.

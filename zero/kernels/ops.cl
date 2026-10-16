@@ -2408,3 +2408,87 @@ __kernel void a4_glu_dw(__global const float* h, int E, int K, __global const fl
   out[(size_t)t * E + c] = s;
 }
 #endif  // VIT
+
+// ---- Qwen3.8 Flash Next (qwen4exp) hyper-connections (docs/flash-next-spec.md). The residual of a token is HC
+// streams of E floats ([M][HC*E], stream c at c*E); E is a multiple of 256, so every superblock of a row lies in
+// one stream.
+
+// xn = per-stream RMS norm of res times w ([HC][E]), stored as f32 and quantized for the low-rank down projection
+// (K = HC*E). grid (256, M), local (256, 1); rows >= M_valid store zeros.
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void hc_norm_quant(__global const float* res, __global const float* w, int E, int HC, int M, int M_valid,
+                            float eps, __global float* xn, __global char* aq, __global float* asc,
+                            __global ushort* absum, int act32) {
+  const int m = get_group_id(1), HCE = HC * E, lane = get_sub_group_local_id(), sg = get_sub_group_id();
+  const bool valid = m < M_valid;
+  __global const float* xr = res + (size_t)m * HCE;
+  __local float rs[16];
+  for (int c = 0; c < HC; ++c) {
+    float ss = 0.0f;
+    if (valid)
+      for (int i = get_local_id(0); i < E; i += get_local_size(0)) ss += xr[c * E + i] * xr[c * E + i];
+    ss = work_group_reduce_add(ss);
+    if (get_local_id(0) == 0) rs[c] = rsqrt(ss / E + eps);
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int s = sg; s < HCE / 256; s += get_num_sub_groups()) {
+    const int base = s * 256 + 16 * lane, c = (s * 256) / E;
+    const float r = rs[c];
+    float v[16];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) v[i] = valid ? xr[base + i] * r * w[base + i] : 0.0f;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) xn[(size_t)m * HCE + base + i] = v[i];
+    quant_store16(v, s, m, M, HCE, aq, asc, absum, act32);
+  }
+}
+
+// silu(lo / HC) of the low-rank activations ([M][LR]), padded with zeros to KP (a multiple of 256) and quantized
+// for the up projection. grid (16 * KP / 256, M), local (16, 1).
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void hc_lo_quant(__global const float* lo, int LR, int KP, int HC, int M, int M_valid, __global char* aq,
+                          __global float* asc, __global ushort* absum, int act32) {
+  const int m = get_global_id(1), s = get_group_id(0), lane = get_sub_group_local_id();
+  const float inv_hc = 1.0f / (float)HC;
+  float v[16];
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    const int k = s * 256 + 16 * lane + i;
+    v[i] = m < M_valid && k < LR ? silu(lo[(size_t)m * LR + k] * inv_hc) : 0.0f;
+  }
+  quant_store16(v, s, m, M, KP, aq, asc, absum, act32);
+}
+
+// The block input: mixed = mean over the streams of xn * sigmoid(gate) ([M][E], f32 and quantized for the block's
+// projections, K = E). grid (256, M), local (256, 1).
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void hc_gate_mean_quant(__global const float* xn, __global const float* gate, int E, int HC, int M,
+                                 int M_valid, __global float* mixed, __global char* aq, __global float* asc,
+                                 __global ushort* absum, int act32) {
+  const int m = get_group_id(1), HCE = HC * E, lane = get_sub_group_local_id(), sg = get_sub_group_id();
+  const bool valid = m < M_valid;
+  const float inv_hc = 1.0f / (float)HC;
+  for (int s = sg; s < E / 256; s += get_num_sub_groups()) {
+    const int base = s * 256 + 16 * lane;
+    float v[16];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+      float acc = 0.0f;
+      for (int c = 0; c < HC; ++c) {
+        const size_t j = (size_t)m * HCE + c * E + base + i;
+        acc += valid ? xn[j] / (1.0f + exp(-gate[j])) : 0.0f;
+      }
+      v[i] = acc * inv_hc;
+      mixed[(size_t)m * E + base + i] = v[i];
+    }
+    quant_store16(v, s, m, M, E, aq, asc, absum, act32);
+  }
+}
+
+// res[m][c] += 2 sigmoid(inject[m][c] / HC) * out[m] for rows < M_valid. grid (HC * E, M_valid).
+__kernel void hc_combine(__global float* res, __global const float* out, __global const float* inject, int E,
+                         int HC) {
+  const int j = get_global_id(0), m = get_global_id(1), c = j / E, i = j % E;
+  const float w = 2.0f / (1.0f + exp(-inject[(size_t)m * HC + c] / (float)HC));
+  res[(size_t)m * HC * E + j] += w * out[(size_t)m * E + i];
+}
