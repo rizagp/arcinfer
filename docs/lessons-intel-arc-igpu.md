@@ -127,6 +127,15 @@ assembly you need Intel's offline compiler `ocloc` (not shipped with the driver)
 kernel does not spill (more threads hide memory latency); use 256 GRF per kernel where it spills and measure, since a
 small spill can cost less than losing 3 of 7 threads per EU.
 
+**Reading the assembly** (`tools/kernel_isa.py`: Intel's `ocloc` compiles for Meteor Lake and disassembles; the
+driver's own binaries in arcinfer's kernel cache can be disassembled the same way, and they differ from ocloc's newer
+compiler). The prompt GEMM's hot loop (W8 per-32 scales, 256 GRF) is 1,957 instructions per superblock, 52 % DP4a;
+136 `mach` + extra `mul` come from `sc * acc`, an int32 multiply this GPU emulates. Removing it (a 16-bit scale, or
+the multiply done in float, both bit-identical) cut the loop to 1,751 instructions — and made the GEMM **3x slower**
+(8.2 -> 2.5-2.8 TOPS): the driver's scheduler then interleaved only 2 independent DP4a chains instead of ~5, so each
+DP4a waited on the one before it (`{I@2}` instead of `{I@5}` dependencies). Instruction count is not the metric;
+the number of independent chains in flight is. Any GEMM change has to be measured, not counted.
+
 ## 7. Mistakes worth avoiding
 
 - **Check what the compiler actually received.** I once concluded that Level Zero ignores the 256-register flag;
