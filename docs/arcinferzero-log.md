@@ -414,3 +414,21 @@ MoE 512 expert dengan streaming langsung dari GGUF + tambalan baris down, PLE di
   silu dengan /fp:fast (x / inf) di mixer -> diperbaiki di tools/ref_forward.
 - 35B: kernel moe_down -20 % (bit-identik); bench/moe_bench: gate/up IQ3_XXS 51 GB/s sendirian, ±35 di model.
 
+### Optimasi PP / TG / speculative decoding (16-17 Okt malam, F17)
+
+- GEMV multi-token (verifikasi spekulatif) token-outer: 8 baris 27B FFN 23 -> 39-43 GB/s. Default draft MTP baru:
+  27B 7, 35B 5 (kode 27B 12,6 -> 15,2 tok/s, 35B 34,2 -> 37,7; prosa Indonesia sama). Aturan baris per sub-group
+  untuk 2-5 token: prosa Indonesia 27B + MTP 6,95 -> 7,2.
+- DFlash2: bobot drafter Q4_0 (separuh byte, 0,84 GiB lebih hemat di 27B, draft diterima sama), selector top-16
+  satu lintasan (bukan nth_element atas 248K token, ±2 ms per posisi di CPU), softmax kepercayaan draft dengan exp
+  float tervektor. Kode: 27B 16,9 -> 18,3 tok/s, 35B 44 -> 53. Mode gabungan menunda probe DFlash2 di model dense
+  (8 -> sampai 32 langkah): prosa Indonesia 27B 6,2 -> 6,5.
+- Flash Next: expert yang sudah di cache dikerjakan GPU sambil yang belum dibaca dari SSD (6,6 -> 7,3 tok/s); mixer
+  hc prompt (gated mean) dengan load vektor: 45 -> 3,7 ms per chunk; proyeksi down prompt lewat moe_rg: prompt 8K
+  98 -> 165 tok/s, KL ke acuan CPU 0,0221 -> 0,0191.
+- moe_rg (baru): GEMM int8 MoE langsung dari baris expert mentah (didekode di register), hasil = decode + GEMM bit
+  demi bit; 35B prompt 384-1152 token +3..14 % dan logit tak lagi bergantung ukuran chunk.
+- serverz melaporkan chunk 4096 untuk MoE streaming (35B 8K: 620 -> 750 tok/s dibanding chunk 2048).
+- Dicoba, tidak dipakai (docs/lessons, bagian 5): overlap dua engine, daftar token draft, arena alokasi, pangkas
+  working set saat load, baca SSD dipecah, tile 32 slot moe_rg, grid ditukar. Variasi run 10-30 % (kadang semua
+  bobot dense 2x lebih lambat) tercatat di QUEUE F16.
