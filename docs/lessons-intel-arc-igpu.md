@@ -119,6 +119,7 @@ IQ4_XS / Q4_K reach ±62 in the same profile; codebook types need more arithmeti
 | Loading the DFlash2 drafter before the main weights | 27B: its lm_head back from 21 to 10 ms per pass, but other weights slowed and the wall-clock speed was no better (6.1-6.3 vs 6.6 tok/s); which buffers land on slow pages varies with the load (a 35B hybrid run is ~20-30 % slower about one time in six, with identical work) |
 | Reading a token's few missing expert records in 512 KB pieces, so that more reads are in flight | ssd_bench: one 2.2 MB record 0.88 ms alone, ~0.53 ms as four concurrent pieces; Flash Next generation equal (7.19 vs 7.19 tok/s), SSD time slightly up |
 | Local-memory bank conflicts in the Flash Next mixers (activations read as x[16 l + j]) | transposed: hc_up1 / hc_down1 only 2-3 % faster (kept, bit-identical) |
+| Dense weights carved from 512 MB device allocations (an arena) instead of one allocation each, against the runs where every dense-weight kernel is ~2x slower (35B: ~1 run in 5; the expert-cache pool, 1 GB chunks, stays at full speed in those runs) | 35B DFlash2 hybrid 22.7 -> 23.2 tok/s and steadier, but 27B prompts 2-5 % slower (also with only the weights in the arena); 2 MiB alignment alone: no change. Not kept |
 | Larger GPU pages / Level Zero virtual memory | the driver already uses 2 MiB pages; mapping physical memory is refused |
 
 ## 6. Compiler flags that this driver honors (tested 16 Oct, driver 32.0.101.9033)
