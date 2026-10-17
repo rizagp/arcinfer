@@ -366,3 +366,24 @@ attn_q 0.24, shared expert 0.14, router 0.12, ...). Part 2: per_layer_token_embd
 User decisions (16 Oct morning): start tonight when the user says so (the server is in use by the user until late afternoon); push to GitHub
 for every stage that passes (changed 16 Oct midday; originally local commits only); Monday morning the server is left off; the laptop is kept awake by an
 app during the work.
+
+## F18: DeepSeek review follow-up + 35B long context (Saturday 17 Oct night, user asleep)
+
+Source: `deepseek-v4.1-flash-evaluation-of-arcinfer.md` (sections 3-17), every finding checked against the code
+first. Standing rules: logits / greedy text identical (or KL measured and reported), A/B alternated, one GPU job at a
+time, no model GGUF deleted, no large new disk use without asking (Flash Next expert file = 53 GB), server off at the end.
+
+| # | Task | Status | Notes |
+|---|---|---|---|
+| 18.1 | P0-1..4: HTTP parser, media lock, send timeout, empty prompt | ✅ | commit 2112264, tests/test_http.cpp |
+| 18.2 | P1-4..6: sampler (presence penalty in greedy, logit_bias -100 bans, sample_allowed without a vocab-sized index), API metadata; P1-1 run_tests.ps1 for zero | ✅ | commit c697b40, tests/test_sampler.cpp |
+| 18.3 | Level Zero launch safety (review 13/16): suggested group size divides the global size; explicit mismatches fail loudly; guards in conv_state_update / moe_combine; gemv odd-nsb over-read (tail slack 256 -> 1024 B); GEMM shape invariants; dfl_attn bound; ARC_KV4 validated | 🔄 | 27B greedy identical (plain, MTP), 0 launch errors; waiting for the 35B identity check, then commit |
+| 18.4 | 35B UD-IQ4_XS: expert file, context sweep 32K / 64K / 96K / 131K / 262K (cache %, hit rate, SSD, tok/s, hybrid), prompts 250K / 125K, MTP-only and plain at 131K / 262K | 🔄 | sweep35.sh + sweep35b.sh |
+| 18.5 | 35B: optimal context (hit rate >= 80-85 %) and whether DFlash2 should be off at large contexts; propose the auto-context default | ⏳ | from 18.4 |
+| 18.6 | 35B identity: plain vs MTP vs DFlash2 greedy; run_tests.ps1 (zero) with 27B + 35B | ⏳ | |
+| 18.7 | KV 4-bit accuracy on 35B (ARC_KV4 simulation, 8K / 32K); 27B done: V-only KL 0.0024-0.0027, K+V 0.0060-0.0064 | ⏳ | decide whether a real V-only 4-bit cache is worth it (memory for the expert cache at 262K) |
+| 18.8 | Decode attention at deep context (27B / 35B, 64K+): split tuning (ARC_ATTN_DEC_SG / SMAX) | ⏳ | measure first |
+| 18.9 | MOE_TILES balance (review N-3): profile 35B prompt tiles before changing anything | ⏳ | |
+| 18.10 | RoPE pow table (P1-7): only if attn_prep shows up in a profile | ⏳ | attn_prep ~0.5 % of generation |
+| 18.11 | Flash Next QSA row tiling (N-5): needs its expert file (53 GB) -> ask the user first | ⚠️ | |
+| 18.12 | Docs: speed-progress (35B IQ4_XS, sweep), lessons (mach scan, KV 4-bit results), README 35B line | ⏳ | |
