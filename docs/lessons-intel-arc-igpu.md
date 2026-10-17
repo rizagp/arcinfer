@@ -194,6 +194,7 @@ MoE expert kernels read small scattered blocks: the 35B's gate/up IQ3_XXS runs 5
 | f16 (half2) GEMM or larger key tiles in the vision encoder; int8 vision weights and activations | no faster, error 0.8–2.4 %; spills; 10–23 % off the f32 reference: activations must stay f32 |
 | Opting out of Windows power throttling (EcoQoS) | no measurable effect |
 | IQ4_XS / IQ4_NL value lookup by sub-group shuffle (the 16 values in registers) instead of local-memory tables | one matrix in bench/gemv_bench: 69.5 -> 75.8 GB/s, bit-identical, memory instructions 196 -> 38 in moe_down_q; in the model slower: 27B 4.95 -> 3.5 tok/s plain, MTP code 14.5 -> 12.7, 35B and Flash Next 2-5 % slower. Not kept |
+| IQ2 / IQ3_XXS sign table computed (`i | parity(i) << 7`) instead of read from local memory | bit-identical, 16 fewer memory instructions per GEMV (ocloc); in the model 27B 5.03 -> 4.65 tok/s (-7 %), Flash Next 6.8 -> 7.2 (+5 %), 35B within noise. Not kept |
 | Larger GPU pages / Level Zero virtual memory | the driver already uses 2 MiB pages; mapping physical memory is refused |
 
 ## 6. Compiler flags that this driver honors (tested 16 Oct, driver 32.0.101.9033)
