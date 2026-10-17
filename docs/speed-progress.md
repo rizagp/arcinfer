@@ -128,7 +128,12 @@ first row of each model is the cost of int8 itself: f16 K/V (`--attn-f32`) again
 - The MoE models react more to any change (a slightly different attention output can pick other experts): for the
   35B even f16 against int8 gives KL 0.011, and V 4-bit adds about as much again.
 - Flash Next has no f16 baseline: `--attn-f32` had no QSA masks (perplexity 42.6); it is refused for QSA models now.
-- Candidate: a real V-only 4-bit cache for long contexts (35B at 250K: the K/V reads are ~45 ms of a 92 ms step).
+- Scale granularity of a 4-bit V at 8K (KL vs int8): 27B 0.0027 (per 32 dims) / 0.0032 (per 64) / 0.0047 (per
+  256 = one scale per key, which the current P x V kernels can fold into P like the int8 scale); 35B 0.016 / 0.021 /
+  0.030 (perplexity 2.6838 / 2.6690 / 2.6884, int8 2.6718).
+- Candidate: a real V-only 4-bit cache for long contexts (35B at 250K: the K/V reads are ~45 ms of a 92 ms step). A
+  per-key scale is the simple kernel change (nibbles, an 8 x sum(P) correction per tile) but doubles the error of
+  q4_0's per-32 scales; per-64 scales need the SB > 1 path of every attention kernel.
 
 ## 2026-10-17: speculative decoding, MoE prompts, Flash Next
 
