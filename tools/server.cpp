@@ -36,6 +36,7 @@
 #include "api_compat.h"
 #include "json_constraint.h"
 #include "tool_constraint.h"
+#include "sampler.h"
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -53,7 +54,8 @@ static double ms_since(clk::time_point t) { return std::chrono::duration<double,
 // LM Studio ("type": "vlm"). Only models whose image encoder arcinfer runs are marked (Gemma 4 12B, gemma4uv).
 // llama-server's own model list next to "data": a "models" array (Ollama style) whose "capabilities" hold
 // "multimodal" for a model with an image encoder. Clients that treat arcinfer as a llama.cpp server read it there.
-static Json llama_models(const Json& data) {
+// bytes: model id -> its file size ("size"; 0 when not known).
+static Json llama_models(const Json& data, const std::map<std::string, uint64_t>& bytes) {
   Json out = Json::array();
   for (const Json& m : data.items()) {
     Json e = Json::object();
@@ -61,7 +63,8 @@ static Json llama_models(const Json& data) {
     e.set("name", id);
     e.set("model", id);
     e.set("modified_at", "");
-    e.set("size", "");
+    const auto b = bytes.find(id);
+    e.set("size", (double)(b != bytes.end() ? b->second : 0));
     e.set("digest", "");
     e.set("type", "model");
     e.set("description", "");
@@ -88,7 +91,28 @@ static Json llama_models(const Json& data) {
   return out;
 }
 
-static void set_modalities(Json& j, bool vision) {
+// The bytes of a model file; a split GGUF (name-00001-of-0000N.gguf) counts every part that is present.
+static uint64_t gguf_bytes(const std::string& path) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const fs::path p(path);
+  const std::string f = p.filename().string();
+  const size_t k = f.find("-00001-of-");
+  uint64_t n = fs::file_size(p, ec);
+  if (ec) return 0;
+  if (k == std::string::npos) return n;
+  const int parts = atoi(f.c_str() + k + 10);
+  for (int i = 2; i <= parts; ++i) {
+    char num[16];
+    snprintf(num, sizeof num, "%05d", i);
+    const uint64_t b = fs::file_size(p.parent_path() / (f.substr(0, k + 1) + num + f.substr(k + 6)), ec);
+    if (!ec) n += b;
+  }
+  return n;
+}
+
+// audio: a Gemma 4 audio encoder (mmproj audio projector gemma4ua or gemma4a)
+static void set_modalities(Json& j, bool vision, bool audio) {
   Json caps = Json::array();
   caps.push("completion");
   caps.push("tools");
@@ -100,6 +124,7 @@ static void set_modalities(Json& j, bool vision) {
   Json in = Json::array();
   in.push("text");
   if (vision) in.push("image");
+  if (audio) in.push("audio");
   Json out = Json::array();
   out.push("text");
   Json arch = Json::object();
@@ -108,160 +133,10 @@ static void set_modalities(Json& j, bool vision) {
   j.set("architecture", arch);
   Json mod = Json::object();
   mod.set("vision", vision);
-  mod.set("audio", false);
+  mod.set("audio", audio);
   j.set("modalities", mod);
   j.set("type", vision ? "vlm" : "llm");
 }
-
-struct SamplingParams {
-  float temperature = 1.0f, top_p = 0.95f, min_p = 0.0f, presence_penalty = 0.0f;
-  // OpenAI frequency_penalty: subtracted once per earlier occurrence in the generated text; llama.cpp
-  // repeat_penalty: a positive logit divided by it, a negative one multiplied, for tokens among the last
-  // repeat_last_n generated (-1: all of them, 0: none)
-  float frequency_penalty = 0.0f, repeat_penalty = 1.0f;
-  int repeat_last_n = 64;
-  int top_k = 20;
-  uint64_t seed = 0;
-  std::vector<std::pair<int, float>> logit_bias;  // OpenAI logit_bias: token id -> added to its logit (-100: never)
-};
-
-class Sampler {
- public:
-  explicit Sampler(const SamplingParams& p) : p_(p), rng_(p.seed ? p.seed : std::random_device{}()) {}
-  int sample(const std::vector<float>& raw, const std::vector<int>& recent) {
-    const std::vector<float>& logits = adjusted(raw, recent);
-    if (p_.temperature <= 0.0f) return (int)(std::max_element(logits.begin(), logits.end()) - logits.begin());
-    const int V = (int)logits.size(), k = p_.top_k > 0 ? std::min<int>(p_.top_k, V) : 256;
-    const float pp = p_.presence_penalty;
-    std::vector<char> seen;
-    if (pp != 0.0f) {
-      seen.assign(V, 0);
-      for (int t : recent)
-        if (t >= 0 && t < V) seen[t] = 1;
-    }
-    std::vector<std::pair<float, int>> c;
-    auto penalize = [&] {
-      if (pp != 0.0f)
-        for (auto& e : c)
-          if (seen[e.second]) e.first -= pp;
-    };
-    // Only the top k (penalized) logits are drawn from. Candidates: tokens within 40 temperatures of the best logit
-    // (widened by a negative penalty, a boost). Every other token ends below that threshold after its penalty, so
-    // when at least k candidates stay at or above it, they contain the exact top k: the result is the same as
-    // sorting the whole vocabulary, without building a pair for each of its ~262K entries per token.
-    const float best = *std::max_element(logits.begin(), logits.end()), thr = best - 40.0f * p_.temperature;
-    const float cut = thr - std::max(0.0f, -pp);
-    for (int i = 0; i < V; ++i)
-      if (logits[i] >= cut) c.push_back({logits[i], i});
-    penalize();
-    int above = 0;
-    for (const auto& e : c) above += e.first >= thr;
-    if (above < k) {  // not enough: the whole vocabulary
-      c.clear();
-      c.reserve(V);
-      for (int i = 0; i < V; ++i) c.push_back({logits[i], i});
-      penalize();
-    }
-    std::partial_sort(c.begin(), c.begin() + k, c.end(), [](auto& a, auto& b) { return a.first > b.first; });
-    c.resize(k);
-    const float mx = c[0].first;
-    double z = 0;
-    std::vector<double> pr(k);
-    for (int i = 0; i < k; ++i) z += pr[i] = std::exp((c[i].first - mx) / p_.temperature);
-    int n = k;
-    double cum = 0;
-    for (int i = 0; i < k; ++i) {
-      pr[i] /= z;
-      if (p_.min_p > 0 && pr[i] < p_.min_p * pr[0]) { n = std::max(1, i); break; }
-      cum += pr[i];
-      if (cum >= p_.top_p) { n = i + 1; break; }
-    }
-    double tot = 0;
-    for (int i = 0; i < n; ++i) tot += pr[i];
-    std::uniform_real_distribution<double> u(0.0, tot);
-    double r = u(rng_);
-    for (int i = 0; i < n; ++i) {
-      r -= pr[i];
-      if (r <= 0) return c[i].second;
-    }
-    return c[n - 1].second;
-  }
-  // A token the predicate allows (constrained output), drawn like sample() from the allowed ones: candidates are
-  // tested from the most likely down until top_k (1 when greedy) are found. -1 when no token is allowed.
-  int sample_allowed(const std::vector<float>& raw, const std::vector<int>& recent, const std::function<bool(int)>& ok) {
-    const std::vector<float>& logits = adjusted(raw, recent);
-    const int V = (int)logits.size();
-    const int need = p_.temperature <= 0.0f ? 1 : (p_.top_k > 0 ? std::min(p_.top_k, V) : 40);
-    std::vector<char> seen;
-    if (p_.presence_penalty != 0.0f) {
-      seen.assign(V, 0);
-      for (int t : recent)
-        if (t >= 0 && t < V) seen[t] = 1;
-    }
-    auto val = [&](int i) { return logits[i] - (seen.empty() || !seen[i] ? 0.0f : p_.presence_penalty); };
-    std::vector<int> idx(V);
-    for (int i = 0; i < V; ++i) idx[i] = i;
-    const int head = std::min(V, 512);
-    std::partial_sort(idx.begin(), idx.begin() + head, idx.end(), [&](int a, int b) { return val(a) > val(b); });
-    std::vector<int> c;
-    for (int r = 0; r < V && (int)c.size() < need; ++r) {
-      if (r == head) std::sort(idx.begin() + head, idx.end(), [&](int a, int b) { return val(a) > val(b); });
-      if (ok(idx[r])) c.push_back(idx[r]);
-    }
-    if (c.empty()) return -1;
-    if (p_.temperature <= 0.0f || c.size() == 1) return c[0];
-    const float mx = val(c[0]);
-    std::vector<double> pr(c.size());
-    double z = 0;
-    for (size_t i = 0; i < c.size(); ++i) z += pr[i] = std::exp((val(c[i]) - mx) / p_.temperature);
-    size_t n = c.size();
-    double cum = 0;
-    for (size_t i = 0; i < c.size(); ++i) {
-      pr[i] /= z;
-      if (p_.min_p > 0 && pr[i] < p_.min_p * pr[0]) { n = std::max<size_t>(1, i); break; }
-      cum += pr[i];
-      if (cum >= p_.top_p) { n = i + 1; break; }
-    }
-    double tot = 0;
-    for (size_t i = 0; i < n; ++i) tot += pr[i];
-    std::uniform_real_distribution<double> u(0.0, tot);
-    double r = u(rng_);
-    for (size_t i = 0; i < n; ++i) {
-      r -= pr[i];
-      if (r <= 0) return c[i];
-    }
-    return c[n - 1];
-  }
-  // The logits after the frequency / repeat penalties and the logit bias (the input itself when none is set; the
-  // presence penalty is applied in sample() on the candidates only)
-  const std::vector<float>& adjusted(const std::vector<float>& logits, const std::vector<int>& recent) {
-    const bool fp = p_.frequency_penalty != 0.0f, rp = p_.repeat_penalty != 1.0f && p_.repeat_penalty > 0.0f &&
-                                                       p_.repeat_last_n != 0;
-    if (!fp && !rp && p_.logit_bias.empty()) return logits;
-    adj_ = logits;
-    const int V = (int)adj_.size();
-    for (const auto& [t, b] : p_.logit_bias)
-      if (t >= 0 && t < V) adj_[t] += b;
-    if (fp) {
-      std::unordered_map<int, int> cnt;
-      for (int t : recent) ++cnt[t];
-      for (const auto& [t, n] : cnt)
-        if (t >= 0 && t < V) adj_[t] -= p_.frequency_penalty * (float)n;
-    }
-    if (rp) {
-      const size_t n = p_.repeat_last_n < 0 ? recent.size() : std::min(recent.size(), (size_t)p_.repeat_last_n);
-      std::unordered_set<int> seen(recent.end() - n, recent.end());
-      for (int t : seen)
-        if (t >= 0 && t < V) adj_[t] = adj_[t] > 0.0f ? adj_[t] / p_.repeat_penalty : adj_[t] * p_.repeat_penalty;
-    }
-    return adj_;
-  }
-
- private:
-  SamplingParams p_;
-  std::mt19937_64 rng_;
-  std::vector<float> adj_;
-};
 
 class Server {
  public:
@@ -298,7 +173,8 @@ class Server {
   }
 
   bool has_vision() const { return vision_ != nullptr || qvision_ != nullptr; }
-  bool has_audio() const { return audio_ != nullptr; }
+  bool has_audio() const { return audio_ != nullptr && aud_tok_ >= 0; }  // (what a chat request with audio needs)
+  uint64_t model_bytes_ = 0;  // the model file's size (/v1/models "models": "size"), set by load_model
   // The prompt tokens of a chat request (Anthropic's count_tokens): its rendered prompt, each image or audio part
   // counted as its placeholder token
   int count_tokens(const Json& body) {
@@ -318,12 +194,12 @@ class Server {
       m.set("object", "model");
       m.set("owned_by", "arcinfer");
       m.set("context_length", eng_.ctx);
-      set_modalities(m, has_vision());
+      set_modalities(m, has_vision(), has_audio());
       Json d = Json::array();
       d.push(m);
       Json r = Json::object();
       r.set("object", "list");
-      r.set("models", llama_models(d));
+      r.set("models", llama_models(d, {{model_id_, model_bytes_}}));
       r.set("data", d);
       return rs.send(200, "application/json", r.dump());
     }
@@ -333,15 +209,19 @@ class Server {
       Json r = Json::object();
       r.set("model", model_id_);
       r.set("n_ctx", eng_.ctx);
+#ifdef ARC_ZERO
+      r.set("engine", "arcinferzero");
+#else
       r.set("engine", "arcinfer");
+#endif
       r.set("chunk", eng_.max_chunk);
       r.set("weights", eng_.w8_resident ? "w8-resident" : "w8-just-in-time");
       r.set("vision", has_vision());
       Json mod = Json::object();  // (llama-server's form)
       mod.set("vision", has_vision());
-      mod.set("audio", audio_ != nullptr);
+      mod.set("audio", has_audio());
       r.set("modalities", mod);
-      r.set("audio", audio_ != nullptr);
+      r.set("audio", has_audio());
       r.set("mtp", eng_.has_mtp);
       r.set("mtp_drafts", eng_.opt.mtp_drafts);
       {  // GPU memory now (bytes): parts of the loaded model, encoders loaded since (on first use)
@@ -1717,10 +1597,11 @@ class Server {
 };
 
 // ---------------------------------------------------------------- model catalog
-// The GGUF models in the Hugging Face cache and in arcinfer's model folder: name (org/repo), file, path, size,
-// architecture, trained context, whether an image projector (mmproj-*) or a Gemma drafter (mtp-*) sits next to it,
-// Qwen MTP layers, and the model id clients use (the alias; the six models arcinfer was tuned on keep their short
-// ids). Projectors, drafters and the later parts of split files are not models.
+// The GGUF models in the Hugging Face cache and in arcinfer's model folder: name (org/repo), file, path, size (a
+// split file: all its parts), architecture, trained context, whether an image projector (mmproj-*, with or without
+// a Gemma 4 audio encoder) or a Gemma drafter (mtp-*) sits next to it, Qwen MTP layers, and the model id clients use
+// (the alias; the six models arcinfer was tuned on keep their short ids). Projectors, drafters and the later parts
+// of split files are not models.
 struct ModelInfo {
   std::string name, file, path, arch, alias, shortcut;
   uint64_t bytes = 0;
@@ -1729,6 +1610,7 @@ struct ModelInfo {
   // once per combination (expand_variants): the full one under the file's id, the others with -mtp (MTP, no
   // vision), -vision (vision, no MTP) and -std (neither). base: the file's id; tags: "MTP + vision", ...
   bool supported = false, vision = false, mtp = false;
+  bool audio = false;  // the image projector also holds a Gemma 4 audio encoder (loaded with it: vision variants only)
   std::string base, tags;
 };
 // Two spellings of one model file (separators, case, a path given on the command line vs one found by the scan).
@@ -1865,7 +1747,7 @@ static std::vector<ModelInfo> scan_models() {
     m.name = c.name;
     m.file = c.file;
     m.path = c.path.lexically_normal().string();  // (HF_HOME and the cache folder joined: one kind of separator)
-    m.bytes = fs::file_size(c.path, ec);
+    m.bytes = gguf_bytes(c.path.string());  // (a split file: all its parts)
     m.arch = "?";
     int64_t nextn = 0;
     bool gsq = false;  // qwen35moe: only GSQ 2-bit experts (tools/convert_gsq.py) have kernels
@@ -1877,7 +1759,7 @@ static std::vector<ModelInfo> scan_models() {
       nextn = g.get_int(m.arch + ".nextn_predict_layers", 0);
     } catch (const std::exception&) {
     }
-    bool mmproj = false, drafter = false;
+    bool mmproj = false, drafter = false, audio = false;
     for (const auto& s : fs::directory_iterator(c.path.parent_path(), ec)) {
       const std::string f = lower(s.path().filename().string());
       if (s.path().extension() != ".gguf") continue;
@@ -1887,6 +1769,9 @@ static std::vector<ModelInfo> scan_models() {
           const std::string pt = g.get_str("clip.vision.projector_type", "");
           mmproj = m.arch == "gemma4" ? pt == "gemma4uv" || pt == "gemma4v"
                                       : (m.arch == "qwen35" || m.arch == "qwen35moe") && VisionQwen3VL::usable(g);
+          // (audio: the encoders load_model loads, AudioGemma4A for gemma4a, AudioGemma4 for gemma4ua)
+          const std::string at = g.get_str("clip.audio.projector_type", "");
+          audio = mmproj && m.arch == "gemma4" && (at == "gemma4a" || at == "gemma4ua");
         } catch (const std::exception&) {
         }
       }
@@ -1898,6 +1783,7 @@ static std::vector<ModelInfo> scan_models() {
 #endif
     (void)gsq;
     m.vision = mmproj;  // (Gemma 4 12B: gemma4uv; E2B / E4B: gemma4v)
+    m.audio = audio;
     m.mtp = (m.arch == "gemma4" && drafter) || nextn > 0;
     const auto k = known.find(m.file);
     if (k != known.end()) {
@@ -1958,6 +1844,7 @@ static std::vector<ModelInfo> scan_models() {
       e.base = m.alias;
       e.mtp = v.mtp;
       e.vision = v.vision;
+      e.audio = v.vision && m.audio;  // (the audio encoder comes with the projector)
       e.alias = m.alias + v.suffix;
       if (!m.shortcut.empty()) e.shortcut = m.shortcut + v.suffix;
       e.tags = v.mtp && v.vision ? "MTP + vision" : v.mtp ? "MTP" : v.vision ? "vision" : "standard";
@@ -2395,6 +2282,7 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
 #endif
   L->srv = std::make_unique<Server>(eng, *L->tok, alias, so.webui);
   Server& srv = *L->srv;
+  srv.model_bytes_ = gguf_bytes(model);
   std::string mmproj = so.mmproj;
   if (!eng.hp.gemma && mmproj != "-") {
     // Qwen vision (dense and MoE): --mmproj, or an mmproj-*.gguf next to the model with a Qwen3-VL projector arcinfer runs
@@ -2825,6 +2713,7 @@ int main(int argc, char** argv) {
     if (swap && (rq.path == "/v1/models" || rq.path == "/models")) {  // every model a request can switch to
       std::shared_lock<std::shared_mutex> lk(swap_mu);
       Json d = Json::array();
+      std::map<std::string, uint64_t> sizes;  // (llama_models "size")
       bool listed = false;
       for (const ModelInfo& m : catalog) {
         if (!m.supported) continue;
@@ -2837,7 +2726,9 @@ int main(int argc, char** argv) {
         j.set("name", m.name);
         j.set("loaded", loaded);
         if (loaded) j.set("context_length", cur->eng->ctx);
-        set_modalities(j, m.vision);
+        // (the loaded model: the encoders that did load)
+        set_modalities(j, loaded ? cur->srv->has_vision() : m.vision, loaded ? cur->srv->has_audio() : m.audio);
+        sizes[m.alias] = m.bytes;
         // the loaded model first (clients that take the first entry get the running one)
         if (loaded) {
           Json d2 = Json::array();
@@ -2856,14 +2747,15 @@ int main(int argc, char** argv) {
         j.set("name", cur->alias);
         j.set("loaded", true);
         j.set("context_length", cur->eng->ctx);
-        set_modalities(j, cur->srv->has_vision());
+        set_modalities(j, cur->srv->has_vision(), cur->srv->has_audio());
+        sizes[cur->alias] = cur->srv->model_bytes_;
         d2.push(j);
         for (const Json& e : d.items()) d2.push(e);
         d = d2;
       }
       Json r = Json::object();
       r.set("object", "list");
-      r.set("models", llama_models(d));
+      r.set("models", llama_models(d, sizes));
       r.set("data", d);
       return rs.send(200, "application/json", r.dump());
     }

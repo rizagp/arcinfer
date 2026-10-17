@@ -214,7 +214,7 @@ Options for start / restart:
   -Vision on|off                 image / audio input (default on). off: the projector (mmproj) is not loaded and
                                  --ctx auto keeps no GPU memory for it, so the context is longer
   -Port <N>                      port (default 8090; also for status / stop)
-  -MtpDrafts <1..3>              drafts per step (default: 3 for Qwen 27B-class, 1 for MoE, 2 otherwise)
+  -MtpDrafts <1..7>              drafts per step (default arcinferzero: 7 for Qwen 27B-class, 5 for MoE, 3 for 4B, 2 otherwise)
   -ThinkBudget <N>               default reasoning budget in tokens (default 8192; requests can override it)
   -ImageMinTokens / -ImageMaxTokens <N>  tokens per image (defaults: Qwen 256..2048, Gemma 4 12B 1120..2048)
   -BudgetGb <GB>                 keep decoded weights resident up to GB (default: chosen with the context)

@@ -152,7 +152,7 @@ SERVER COMMANDS (arc-server)
   arc-server clear-cache         delete all saved conversations (session cache)
   arc-server help                its own options:
     -Model <shortcut|text|path>  -Ctx <N|auto>  -Chunk <N>  -SessionCacheGb <N>  -NoMtp  -Vision on|off  -Zero  -NoStream
-    -Port <N> (default 8090)  -MtpDrafts <1..3>  -ThinkBudget <N>  -ImageMinTokens / -ImageMaxTokens <N>
+    -Port <N> (default 8090)  -MtpDrafts <1..7>  -ThinkBudget <N>  -ImageMinTokens / -ImageMaxTokens <N>
     -BudgetGb <GB>  -AttnF32  -NoPrefixCache  -PrefixCacheGb <N>  -NoSwap  -ListenHost <addr>  -SessionDir <dir>
     -Quiet
   arc-launcher.cmd (project folder)  a window: every model and variant with its memory and automatic context, a
