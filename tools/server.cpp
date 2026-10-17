@@ -1966,6 +1966,9 @@ static std::vector<ModelInfo> scan_models() {
 // in the Hugging Face cache or an extra model folder whose config is a DFlash2DraftModel of the model's width
 // (hidden_size = <arch>.embedding_length) and depth (num_target_layers = <arch>.block_count without the MTP layers);
 // the newest snapshot of the first folder that has one. Empty if none.
+// a DFlash2 drafter found next to a model is used only when the automatic context with it is at least this long (27B
+// with images, MTP and the drafter: 8,192 tokens; without the drafter 45,056)
+constexpr int kDflashMinCtx = 32768;
 static std::string find_dflash(const std::string& model) {
   namespace fs = std::filesystem;
   int64_t n_embd = 0, n_layer = 0;
@@ -2039,7 +2042,7 @@ static std::string ctx_key(const std::string& model, const EngineOptions& eo) {
          (eo.dflash.empty() ? std::string() : "|dflash") + "|" +  // (DFlash2 drafter: its weights and buffers)
 #endif
          (eo.min_chunk ? "/" + std::to_string(eo.min_chunk) : std::string()) + "|" + (eo.mtp ? "mtp" : "-") + "|" + (eo.attn_int8 ? "i8" : "f32") + "|" + std::to_string(device_global_mem()) +
-         "|m10";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
+         "|m11";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
                  // for 27B, m6: MoE prompt GEMM staging, m7: MoE buffers shared, m8: MoE MTP 1 draft, Q3_K experts, m9: memory parts in the cache); bump on changes
 }
 // "ctx\tresident" lines (older lines without the second field are computed again)
@@ -2121,6 +2124,7 @@ static AutoCtx auto_ctx(const std::string& model, EngineOptions eo, bool budget_
     EngineOptions e2 = eo;
     e2.ctx = std::min(16384, trained);
     e2.dry = true;
+    e2.stream_reserve = std::max(e2.stream_reserve, reserve);  // (streamed experts: the cache leaves room for the encoders)
     e2.w8_budget_gb = budget_gb;
     Engine probe(model, e2);
     res = probe.w8_resident;
@@ -2229,7 +2233,18 @@ static int list_models() {
     AutoCtx a;  // computed now (dry load) if not known yet; per variant (MTP block, encoders' memory)
     a.ctx = 0;
     if (m.supported)
-      try { a = auto_ctx(m.path, eo, false, m.vision ? encoder_reserve(m.path, "", 0) : 0); } catch (const std::exception&) {}
+      try {
+        const size_t enc = m.vision ? encoder_reserve(m.path, "", 0) : 0;
+        a = auto_ctx(m.path, eo, false, enc);
+#ifdef ARC_ZERO
+        // (the drafter only where it leaves kDflashMinCtx tokens of context: the server drops it there too)
+        if (!eo.dflash.empty() && a.ctx < kDflashMinCtx) {
+          eo.dflash.clear();
+          a = auto_ctx(m.path, eo, false, enc);
+          j.set("dflash", false);
+        }
+#endif
+      } catch (const std::exception&) {}
     j.set("ctx", a.ctx);
     if (m.supported) {  // the values the server picks for this variant when not given (the launcher fills them in)
       Json d = Json::object();
@@ -2316,8 +2331,10 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
   fprintf(stderr, "arcinfer-server: loading %s\n", model.c_str());
   EngineOptions eo = so.eo;
 #ifdef ARC_ZERO
+  bool dfl_auto = false;
   if (eo.mtp && eo.dflash.empty() && so.dflash_auto) {  // (before --ctx auto: the drafter takes GPU memory)
     eo.dflash = find_dflash(model);
+    dfl_auto = !eo.dflash.empty();
     if (!eo.dflash.empty()) fprintf(stderr, "DFlash2 drafter found: %s (--no-dflash: MTP block only)\n", eo.dflash.c_str());
   }
 #endif
@@ -2339,7 +2356,14 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
   if (so.ctx_auto) {
     const size_t enc = encoder_reserve(model, so.mmproj, so.img_max);
     if (enc) fprintf(stderr, "--ctx auto: %.2f GiB kept for the image / audio encoders\n", enc / 1073741824.0);
-    const AutoCtx a = auto_ctx(model, eo, so.budget_given, enc);
+    AutoCtx a = auto_ctx(model, eo, so.budget_given, enc);
+#ifdef ARC_ZERO
+    if (dfl_auto && a.ctx < kDflashMinCtx) {  // (a drafter that leaves little context: the MTP block only)
+      fprintf(stderr, "DFlash2 drafter not used: it would leave %d tokens of context (--dflash DIR: use it anyway)\n", a.ctx);
+      eo.dflash.clear();
+      a = auto_ctx(model, eo, so.budget_given, enc);
+    }
+#endif
     eo.ctx = a.ctx;
     if (!so.budget_given) eo.w8_budget_gb = a.resident ? 1e9 : eo.w8_budget_gb;
   }
