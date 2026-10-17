@@ -19,7 +19,7 @@ Target hardware it was built and tuned on: Intel Core Ultra 5 125H (Arc iGPU, 7 
 
 - **What made LLM inference fast on this iGPU, and what did not:** [docs/lessons-intel-arc-igpu.md](docs/lessons-intel-arc-igpu.md)
 - Results and the story of the build, with the speed from the first version to now: [docs/review.md](docs/review.md)
-- Speed per model (Level Zero, 2026-10-16): [docs/performance-zero-2026-10-16.md](docs/performance-zero-2026-10-16.md); speed log: [docs/speed-log.md](docs/speed-log.md)
+- Speed progress from the first version to now (tracked by date): [docs/speed-progress.md](docs/speed-progress.md)
 - arcinferzero development log: [docs/arcinferzero-log.md](docs/arcinferzero-log.md)
 - What changed recently: [CHANGELOG.md](CHANGELOG.md)
 - Usage guide (step by step): [USAGE.md](USAGE.md)
@@ -539,7 +539,7 @@ scripts/    arc-server.ps1 (server in the background), arc-launcher.ps1 (launche
             pi-arc.ps1 (Pi launcher), install-pi.ps1 (commands and Pi's model list), pi-models.ps1 (writes that list)
 tests/      run_tests.ps1 and its reference data
 webui/      index.html
-docs/       review.md (results), performance-zero-2026-10-16.md, speed-log.md, lessons-intel-arc-igpu.md,
+docs/       review.md (results), speed-progress.md (speed by date), lessons-intel-arc-igpu.md,
             arcinferzero-log.md, review_notes.md (working notes)
 setup.cmd   setup.ps1: checks, builds, downloads models, connects Pi;  build.ps1: builds one or more tools
 ```

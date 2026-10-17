@@ -1,4 +1,162 @@
-# arcinfer speed log
+# arcinfer speed progress
+
+One file that tracks the speed of arcinfer over time on the same laptop (Core Ultra 5 125H, Arc Xe-LPG 112 EU, no
+XMX, DP4a, ~75 GB/s, 32 GB LPDDR5x-6400, Windows 11). The newest measurements come first; each dated section keeps
+what was measured then. Add a new dated section at the top when the speed changes, and update the current table.
+The story behind the numbers: [review.md](review.md); what helped and what did not: [lessons-intel-arc-igpu.md](lessons-intel-arc-igpu.md).
+
+## Current speed (2026-10-17, arcinferzero)
+
+Greedy answers of 96 tokens, identical to plain decoding in every column (`runz`, warm kernels):
+
+| Model, text | plain | MTP alone | DFlash2 + MTP |
+|---|---|---|---|
+| Qwen3.8 27B, Python code | 4.91 tok/s | 15.5 | 18.1 |
+| Qwen3.8 27B, Indonesian prose | 4.88 | 7.0 | 6.8 |
+| Qwen3.6 35B-A3B, Python code | 21.2 | 39.3 | 49.8 |
+| Qwen3.6 35B-A3B, Indonesian prose | 21.0 | 22.7 | 22.7 |
+
+| Model | Prompt | Generation |
+|---|---|---|
+| Qwen3.8 27B (IQ3_S GSQ) | pp4096 ~135 tok/s, pp16384 ~130 | 4.9 tok/s (207 ms per token; 231 ms at 32K context) |
+| Qwen3.6 35B-A3B (UD-Q3_K_M) | pp4096 ~795 tok/s, pp8192 ~757 | ~21 tok/s |
+| Qwen3.8 Flash Next (IQ3_S GSQ, experts streamed from the SSD) | pp8192 ~165 tok/s | 7.3 tok/s |
+
+## 2026-10-17: speculative decoding, MoE prompts, Flash Next
+
+| Change | Before | After |
+|---|---|---|
+| Token-outer multi-token GEMVs (verification rows) | 27B FFN, 8 rows: 23 GB/s | 39-43 GB/s |
+| Default MTP drafts 27B 3 -> 7, 35B 3 -> 5 | 27B code 12.6 tok/s, 35B code 34.2 | 15.2, 37.7 |
+| 2-5-token GEMVs: 4 rows per sub-group for codebook types / long rows | 27B Indonesian with MTP 6.95 tok/s | 7.2 |
+| DFlash2 drafter weights Q4_0 (was Q8_0) | 27B code 16.9 tok/s | 17.2 (drafter 0.84 GiB smaller) |
+| DFlash2 selector: one-pass top-16 instead of nth_element | 35B code 48.4 tok/s, 27B 16.9 | 52.7, 18.3 |
+| Draft confidence with a vectorized float exp | 35B code DFlash2 49.4 tok/s, MTP 37.5 | 53.3, 39.1 |
+| DFlash2 probes backed off on dense models | 27B Indonesian hybrid 6.2 tok/s | 6.5 |
+| Cached experts computed while missing ones are read from the SSD | Flash Next generation 6.6 tok/s | 7.3 |
+| Flash Next prompt mixer (gated mean) with vector loads | 45 ms per 2048-row chunk; pp8192 98 tok/s | 3.7 ms; 127 |
+| moe_rg (MoE GEMM on raw expert rows) for Flash Next's down projection | pp8192 145 tok/s | 165 |
+| moe_rg for 35B 384-1152-token chunks | 412 / 440 / 449 / 486 / 529 tok/s (384 / 512 / 768 / 1024 / 1152) | 424 / 459 / 511 / 520 / 548 |
+| serverz reports 4096-token chunks for streamed MoE (was 2048) | 35B pp8192 620 tok/s | 750 |
+
+Details of each change: [arcinferzero-log.md](arcinferzero-log.md) (16-17 October entries).
+
+## 2026-10-16: arcinferzero (Level Zero) becomes the default engine
+
+arcinfer, overnight results, 15 → 16 October 2026.
+
+Tests ran from 17:00 to 06:05. Since this morning zero is the default engine; the old OpenCL engine is still available with `--opencl`. Every number here comes from real runs on this laptop.
+
+Hardware: Core Ultra 5 125H, Arc Xe-LPG 112 EU, no XMX (DP4a), 32 GB RAM.
+
+
+### Summary
+
+| Measurement | Result | Context |
+|---|---|---|
+| Qwen3.6 35B, MTP 3 drafts (code) | 31.5 tok/s | 19.9 without MTP, identical answers |
+| Gemma E4B, 2K prompt | 827 tok/s | 733 the evening before (+13 %) |
+| Qwen3.8 27B, MTP (code) | 9.1 tok/s | 5.1 without MTP; 5 drafts used to be 3.8 |
+| Match with OpenCL | 6 / 6 models | bit-identical logits, same image and audio answers |
+
+### Answer speed through the server
+
+400-token answers at temperature 0 to two questions: Python code, and an explanation of TCP/UDP in Indonesian. Answers with MTP are always exactly the same as without it. Values in tok/s.
+
+| Model | Drafts | Without MTP | MTP, code answer | MTP, Indonesian answer |
+|---|---|---|---|---|
+| Qwen3.5 4B | 3 drafts | 20.5 | 30.4 | 25.9 |
+| Qwen3.5 9B | 2 drafts | 12.1 | 16.7 | 15.0 |
+| Qwen3.8 27B | 3 drafts | 5.1 | 9.1 | 7.4 |
+| Qwen3.6 35B | 3 drafts | 19.9 | 31.5 | 24.6 |
+| Gemma E4B | drafter | 21.6 | 39.6 | – |
+| Gemma 12B | drafter | 9.8 | 21.1 | – |
+
+Gemma uses its assistant drafter (not MTP) and was measured with the code question only (baseline, evening of 15 Oct). The Qwen numbers come from the last runs with the final build.
+
+### Number of MTP drafts
+
+Mean of the code and Indonesian answers, tok/s. More drafts are not automatically faster: every draft runs the MTP block with the full output head.
+
+| Model | 1 | 2 | 3 | 4 | 5 | 7 | Default |
+|---|---|---|---|---|---|---|---|
+| Qwen3.5 4B | – | 22.9 | 24.8 | 25.2 | – | – | 3 (was 2) |
+| Qwen3.5 9B | – | 15.8 | 15.6 | 15.9 | – | – | 2 |
+| Qwen3.8 27B | – | – | 8.3 | – | 8.2 | 8.2 | 3 |
+| Qwen3.6 35B | 23.9 | – | 26.1 | – | – | – | 3 (was 1) |
+
+### Prompt and generation at different context lengths
+
+`runz --bench-pp`: a prompt of N tokens, then 64 generated tokens. Prompt = tok/s processing the prompt; gen = tok/s generating after it. The "later" columns are a second, later measurement: for Gemma, evening of 15 Oct → morning of 16 Oct; for the Qwen3.8 27B prompt, morning → afternoon of 16 Oct (faster prompt GEMM; generation not re-measured). "–" means not re-measured.
+
+| Model | Context | Prompt | Gen | Prompt, later | Gen, later |
+|---|---|---|---|---|---|
+| Qwen3.5 4B | 2K | 862.5 | 20.2 | – | – |
+| | 16K | 696.9 | 18.7 | – | – |
+| | 131K | 280.5 | 9.5 | – | – |
+| Qwen3.5 9B | 2K | 399.1 | 12.1 | – | – |
+| | 16K | 387.9 | 11.5 | – | – |
+| | 131K | 221.9 | 8.8 | – | – |
+| Qwen3.8 27B | 2K | 110.2 | 5.1 | 130.1 | – |
+| | 16K | 102.8 | 4.7 | 125.4 | – |
+| | 64K | 79.6 | 4.0 | – | – |
+| Qwen3.6 35B | 2K | 660.0 | 20.1 | – | – |
+| | 16K | 678.7 | 18.8 | – | – |
+| | 131K | 253.5 | 13.8 | – | – |
+| | 262K | 146.1 | 10.1 | – | – |
+| Gemma E4B | 2K | 733.3 | 21.0 | 827.5 | 21.5 |
+| | 16K | 571.1 | 19.6 | 624.9 | 20.1 |
+| | 131K | 209.4 | 9.5 | 197.2 | 9.4 |
+| Gemma 12B | 2K | 270.6 | 9.5 | 289.4 | 9.6 |
+| | 16K | 218.4 | 9.2 | 227.7 | 9.2 |
+| | 131K | 86.1 | 7.4 | 86.5 | 7.6 |
+
+Generation after a long prompt is sometimes very noisy (one E4B run at 32K dropped to 10.8 from 17.9 tok/s). Seven repeat runs were steady at 18.5–19.0, so the E4B drop at 131K in a single run (209 → 197) is not treated as a regression yet.
+
+### Kernels improved
+
+| Kernel | Before | After |
+|---|---|---|
+| 35B generation attention, 64K | 1.16 ms | 0.94 ms (improved) |
+| GEMV for 4–7 drafts (27B, 5 drafts) | 3.8 tok/s | 9.2 tok/s (improved) |
+| attn_prep_g Gemma HD512, spill | 4,608 B | 0 (improved) |
+| add_norm_quant Gemma, spill | 3,712 B | 64 B (improved) |
+| gdn_conv Qwen, spill | 1,024 B | 1,024 B |
+| moe_gateup_q 35B, spill | 2 KB | 2 KB |
+
+The last two spills go away with 256 registers, but that is not faster, so they stay.
+
+### Qwen prompt attention
+
+The last 4K chunk at 64K depth, ms per layer. The current kernel (256 registers) against the best variant that splits the head dimensions.
+
+| Model | Heads | attn_q8 (in use) | best attn_ps |
+|---|---|---|---|
+| 4B / 9B | 16 q / 4 kv | 926 ms | 1,117 ms |
+| 35B | 16 q / 2 kv | 923 ms | 1,138 ms |
+| 27B | 24 q / 4 kv | 1,516 ms | 1,669 ms |
+
+### Correctness
+
+| Test | Result |
+|---|---|
+| Logits, zero vs OpenCL, 11K tokens (4B, 9B, 27B, E4B, 12B) | bit-identical |
+| Qwen3.6 35B with the same prompt chunking | bit-identical |
+| Gemma E4B / 12B after this morning's spill fixes | bit-identical |
+| Images (E4B, 12B, 9B) and audio (E4B, 12B) | same answers |
+| MTP with 1–7 drafts, every Qwen model | same answers |
+| Gemma tool calls with the constraint (stress test) | 9/10 valid (was 2/10) |
+| API formats (OpenAI, Anthropic, Ollama, Responses, JSON schema, logprobs) | all working |
+| API unit tests and tool-call streaming | all passed |
+| New 35B generation attention, KL vs the f32 reference | within noise (flagged for attention) |
+
+### Notes
+
+- Correction: during the night I first concluded that Level Zero ignores the 256-register flag. That was wrong; my own environment switch came out empty. Every number on this page was measured again with the correct build.
+- A server started right after another one stops sometimes runs at half speed. `arc-server stop` now waits 5 seconds, and runz logs the time of every step so the cause can be seen if it happens again.
+- Not done yet: cheaper MTP drafts (a dynamic token list or a draft tree), and the two small spills above.
+
+## 2026-10-10 to 2026-10-14: the OpenCL engine, from the first version
 
 Performance test report for arcinfer, 10–14 October 2026: prompt processing (prefill) and token generation for models from 4B to 35B on the Intel Arc iGPU, from the first version to the current state.
 
@@ -6,9 +164,8 @@ Performance test report for arcinfer, 10–14 October 2026: prompt processing (p
 
 Every measurement was taken on the same machine. Data sources: the arcinfer CHANGELOG, QUEUE, review_notes and bench/results.
 
-Note: this report uses the OpenCL engine (10–14 October). Since 16 October the default engine is arcinferzero (the same kernels through Level Zero, bit-identical results); the latest numbers are in [performance-zero-2026-10-16.md](performance-zero-2026-10-16.md).
 
-## Test platform
+### Test platform
 
 | Item | Value |
 |---|---|
@@ -21,7 +178,7 @@ Note: this report uses the OpenCL engine (10–14 October). Since 16 October the
 | GPU allocation | 18.3 GiB (shared with Windows) |
 | API | OpenCL 3.0 |
 
-## The main limit: memory bandwidth
+### The main limit: memory bandwidth
 
 During token generation the model reads all of its weights once for every generated token. With a measured memory bandwidth of about 75 GB/s, the upper bound on generation speed is simply `75 GB/s ÷ weight size`. For example, Qwen3.8 27B with about 11 GB of weights can reach only about 6.5 tokens per second in theory, however good the kernels are.
 
@@ -31,7 +188,7 @@ So the most useful measure for generation is not tokens per second alone but **t
 - **Unaligned reads:** most blocks start at addresses that are not a multiple of 4 bytes, so they cannot be read with vector instructions.
 - **Kernel launch overhead:** too many small kernels, each with a fixed cost.
 
-### Bandwidth use during token generation (% of ~75 GB/s)
+#### Bandwidth use during token generation (% of ~75 GB/s)
 
 | Model | First measurement | After the GEMV optimizations |
 |---|---|---|
@@ -46,7 +203,7 @@ First measurement: QUEUE item 2. After the optimizations: quantization blocks re
 
 The largest gain came from a step that looks simple: **re-laying-out the bytes**. GGUF puts the `f16` scale at the start of every block, so the quantized data after it lands on an address that is not a multiple of 4 bytes. Moving the scale to the end (IQ2/IQ3) or gathering the scales at the start of the superblock (Q8_0, Q4_0) lets every GPU lane load its block in one vector instruction. The effect on GEMV speed per quantization type:
 
-### GEMV speed per quantization type (GB/s)
+#### GEMV speed per quantization type (GB/s)
 
 | Type | Before | After |
 |---|---|---|
@@ -59,11 +216,11 @@ The largest gain came from a step that looks simple: **re-laying-out the bytes**
 
 Source: CHANGELOG 12 October (GEMV bandwidth) and review_notes (IQ4_XS gemv_v on E4B: q matrix 44 → 67 GB/s).
 
-## Token generation: from the first version to now
+### Token generation: from the first version to now
 
 The table below compares generation speed in the first measurement with the current state. For models that have an MTP block (Qwen) or a drafter (Gemma), the result with speculative decoding is shown too: a small model guesses several tokens at once and the main model verifies them in one pass. The output stays bit-identical to plain decoding, only faster.
 
-### Token generation speed (tokens/s)
+#### Token generation speed (tokens/s)
 
 | Model | First measurement | Now, without MTP | Now, with MTP / drafter |
 |---|---|---|---|
@@ -76,7 +233,7 @@ The table below compares generation speed in the first measurement with the curr
 
 Qwen3.8 27B with MTP reaches 9.5 tok/s on code (3 drafts); on general text the number is lower. Gemma 4 12B and E4B: the first measurement used a community quantization file that was later replaced by Google's official QAT file (Q4_0). Qwen3.6 35B: the first measurement used the standard Unsloth file (12 October); the earlier 2-bit GSQ version was around 15 tok/s.
 
-## Prefill: getting the most out of int8 compute
+### Prefill: getting the most out of int8 compute
 
 Prefill behaves differently from generation. Thousands of tokens are processed together, so the weights are reused many times and the limit moves from memory bandwidth to compute. This iGPU has no matrix units (XMX) and relies only on the `DP4a` instruction, four int8 multiplies in one step, with a peak of about 13 TOPS. arcinfer converts all weights to int8 (W8), quantizes the activations per 32 values, and runs them through its own DP4a GEMM kernels, which reach 6–9 TOPS.
 
@@ -89,7 +246,7 @@ For comparison, here are results against llama.cpp (build b11527, Vulkan and SYC
 | 3.8× | Qwen3.5 4B pp2048: 911 tok/s, against 242 (Vulkan) and 337 (SYCL) |
 | 4.9× | Gemma 4 12B, 35,957-token prompt: 240 s, against 1,165 s (Vulkan) |
 
-### Prefill speed pp2048 (tokens/s)
+#### Prefill speed pp2048 (tokens/s)
 
 | Model | arcinfer | llama.cpp Vulkan | llama.cpp SYCL |
 |---|---|---|---|
@@ -103,7 +260,7 @@ Source: bench/results/results.jsonl, 10 October (first test). Gemma 4 12B used a
 
 The lead also shows in generation after a long prompt. At 34K tokens of context Qwen3.8 27B still generates 3.70 tok/s, against 2.06 tok/s for Vulkan and 1.09 tok/s for SYCL. The difference comes from int8 attention: keys and values are stored as int8 with a per-row scale, and both the `Q·K` scores and `P·V` also use DP4a.
 
-## Qwen3.8 27B: time to first token down from 116 to 89 seconds
+### Qwen3.8 27B: time to first token down from 116 to 89 seconds
 
 The 11,240-token prompt on Qwen3.8 27B has been the reference since the start of development. Each step below is one optimization that proved to work:
 
@@ -118,7 +275,7 @@ The 11,240-token prompt on Qwen3.8 27B has been the reference since the start of
 
 Attention alone went from **33 seconds to 5.1 seconds**. This was done in stages: int8 scores with the key tile in local memory, then int8 `P·V` (probabilities quantized to 8 bits per block, following the SageAttention approach), then splitting heads across sub-groups.
 
-## Qwen3.6 35B-A3B: mixture of experts on an iGPU
+### Qwen3.6 35B-A3B: mixture of experts on an iGPU
 
 Qwen3.6 35B has 256 experts in every layer, but only 8 are active for each token. For generation this is a big advantage, since only about 2.4 GB is read per token, so the 35B runs about 4 times faster than the 27B. For prefill it is the opposite: each expert gets only about 64 tokens per 2,048-token prompt chunk, too few for GEMM to work efficiently. The optimizations done so far:
 
@@ -133,7 +290,7 @@ Qwen3.6 35B has 256 experts in every layer, but only 8 are active for each token
 | MoE buffers share memory with the attention buffers | context 86K | 102,400 |
 | Prompt attention with 4 heads per sub-group (21,590 tokens) | 9.4 s | 8.4 s |
 
-## Accuracy: speed must not cost correctness
+### Accuracy: speed must not cost correctness
 
 > An optimization that changes the output, however slightly, is not accepted.
 
@@ -144,7 +301,7 @@ Every optimization on the decode path is checked in two ways:
 
 The second check caught a well-hidden bug on the 35B. Two-token verification used an attention kernel that split the keys differently from the one-token kernel. As a result the text started to diverge after about 40 tokens, and only on long prompts. After the fix, the 35B MTP output is bit-identical again.
 
-## Long context
+### Long context
 
 Automatic context uses as much of the remaining GPU memory as possible after the weights, the work buffers and about 1.2 GiB kept free for Windows. Results at the extremes:
 
@@ -157,7 +314,7 @@ Automatic context uses as much of the remaining GPU memory as possible after the
 
 When used as an agent (Pi), these numbers are rarely felt directly. The server keeps the running conversation, so each turn processes only the new tokens. The per-project system prompt is also cached on disk, so a new Qwen3.8 27B session on a project that was opened before can start in about 5 seconds, against about 40 seconds before.
 
-## Optimizations that did not pay off
+### Optimizations that did not pay off
 
 Not every idea worked. These approaches were tried and dropped, with the reason:
 
@@ -174,7 +331,7 @@ Not every idea worked. These approaches were tried and dropped, with the reason:
 - **attn_ps for the Qwen configurations.** Only 1.0–1.6 T MAC/s, below attn_q8 at about 2.2.
 - **A third MTP draft on the 4B and the MoE.** No speed gain. Defaults: 3 drafts for the 27B, 1 for the MoE, and 2 for the other models.
 
-## Next steps
+### Next steps
 
 Two priorities matter most to keep long-context performance up:
 

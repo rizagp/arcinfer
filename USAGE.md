@@ -286,8 +286,8 @@ Qwen3.5/3.8 keep a state that cannot "forget" individual tokens.
 
 ## 6. How fast
 
-Measured on this laptop with arcinferzero, 15–16 October 2026 (details: `docs/performance-zero-2026-10-16.md`;
-comparison with llama.cpp: `docs/review.md`; speed history: `docs/speed-log.md`). Prompt speed = tokens per second
+Measured on this laptop with arcinferzero, 15–16 October 2026 (details and the speed history:
+`docs/speed-progress.md`; comparison with llama.cpp: `docs/review.md`). Prompt speed = tokens per second
 while reading a 16K-token prompt; writing speed = a 400-token answer through the server (code / Indonesian text;
 MTP does not change the content of the answer).
 
