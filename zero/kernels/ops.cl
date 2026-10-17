@@ -2826,6 +2826,53 @@ __kernel void qsa_score(__global const float* qx, __global const float* pk, int 
   }
   sc[(size_t)i * lds + b] = s;
 }
+// qsa_score for QRT rows at a time: each block's keys are read once for the QRT rows (qsa_score reads them once per
+// row: the whole pooled key array per row, ~64 GB per layer of a 32K prompt). Per row and head the same sum in the
+// same order (k ascending, then the heads), so the scores are the same. grid (blocks rounded to 64, ceil(R / QRT)),
+// local (64, 1).
+#ifndef QRT
+#define QRT 8
+#endif
+__kernel void qsa_score_rt(__global const float* qx, __global const float* pk, int r0, int pos0, int R,
+                           __global float* sc, int lds) {
+  const int b = get_global_id(0), i0 = get_global_id(1) * QRT;
+  __local float q[QRT * QH * QD];
+  for (int k = get_local_id(0); k < QRT * QH * QD; k += get_local_size(0)) {
+    const int r = k / (QH * QD);
+    q[k] = i0 + r < R ? qx[(size_t)(r0 + i0 + r) * QH * QD + k % (QH * QD)] : 0.0f;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (b >= lds) return;
+  float d[QRT][QH];
+#pragma unroll
+  for (int r = 0; r < QRT; ++r)
+#pragma unroll
+    for (int hh = 0; hh < QH; ++hh) d[r][hh] = 0.0f;
+  __global const float4* kp = (__global const float4*)(pk + (size_t)b * QD);
+  for (int k = 0; k < QD / 4; ++k) {
+    const float4 kv = kp[k];
+#pragma unroll
+    for (int r = 0; r < QRT; ++r)
+#pragma unroll
+      for (int hh = 0; hh < QH; ++hh) {
+        __local const float* qq = q + (r * QH + hh) * QD + 4 * k;
+        d[r][hh] += qq[0] * kv.x + qq[1] * kv.y + qq[2] * kv.z + qq[3] * kv.w;
+      }
+  }
+#pragma unroll
+  for (int r = 0; r < QRT; ++r) {
+    const int i = i0 + r, nv = (pos0 + r0 + i + 1) / QR;
+    if (i >= R) break;
+    float s = -1.0f;
+    if (b < nv) {
+      s = 0.0f;
+#pragma unroll
+      for (int hh = 0; hh < QH; ++hh) s += fmax(d[r][hh], 0.0f);
+      s *= rsqrt((float)QD);
+    }
+    sc[(size_t)i * lds + b] = s;
+  }
+}
 // the mask of row r0 + i: its top `ntop` visible blocks (ties: the lower blocks), all of them when it sees no more.
 // Exact selection by a radix select on the score bits (scores >= 0, so their bits sort as the values). mask
 // [M][qmw] words, bit b = block b. grid (256, R), local (256, 1).

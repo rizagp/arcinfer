@@ -1104,6 +1104,9 @@ class Engine {
               throw std::runtime_error("unsupported QSA block size");
           if (hp.qsa_dim != 128 || hp.qsa_heads < 1 || hp.qsa_heads > 16 || hp.ple_layer < 0)
             throw std::runtime_error("unsupported QSA indexer");
+          // (attn_fa, the f32 path, has no QSA masks: a Flash Next 8K perplexity of 42.6 instead of 2.20)
+          if (!opt.attn_int8)
+            throw std::runtime_error("f32 attention (--attn-f32) does not support QSA sparse attention (Qwen3.8 Flash Next)");
         }
       }
     }
@@ -3270,17 +3273,27 @@ class Engine {
     for (int r0 = 0; r0 < T; r0 += 256) {
       const int R = std::min(256, T - r0);
       int rr = r0;
-      {
+      // (ARC_QSA_RT: query rows per qsa_score_rt work-group, each block's keys read once for them; 1 = qsa_score,
+      //  one row per work-group. Flash Next 32K prompt: qsa_score 13.8 -> 2.4 s, 131-146 -> 153-154 tok/s, the same
+      //  logits)
+      static const int qrt = getenv("ARC_QSA_RT") ? std::max(1, atoi(getenv("ARC_QSA_RT"))) : 8;
+      if (qrt > 1) {
+        cl_kernel k = kernel("ops", defs + " -DQRT=" + std::to_string(qrt), "qsa_score_rt");
+        int RR = R;
+        set_args(k, 0, qsa_qx_, L.pk, rr, p0, RR, qsa_sc_, lds);
+        size_t gws[2] = {(size_t)(lds + 63) / 64 * 64, (size_t)(R + qrt - 1) / qrt}, lws[2] = {64, 1};
+        run("qsa_score", k, 2, gws, lws);
+      } else {
         cl_kernel k = kernel("ops", defs, "qsa_score");
         set_args(k, 0, qsa_qx_, L.pk, rr, p0, qsa_sc_, lds);
         size_t gws[2] = {(size_t)(lds + 63) / 64 * 64, (size_t)R}, lws[2] = {64, 1};
-        run("qsa", k, 2, gws, lws);
+        run("qsa_score", k, 2, gws, lws);
       }
       {
         cl_kernel k = kernel("ops", defs, "qsa_select");
         set_args(k, 0, qsa_sc_, lds, rr, p0, nt, qsa_mask_, qmw);
         size_t gws[2] = {256, (size_t)R}, lws[2] = {256, 1};
-        run("qsa", k, 2, gws, lws);
+        run("qsa_select", k, 2, gws, lws);
       }
       static const int dbg_qsa = getenv("ARC_DBG_QSA") ? atoi(getenv("ARC_DBG_QSA")) : -1;
       if (L.il == dbg_qsa && T > 1 && r0 + R == T) {  // (debug: scores and mask of the last row)
