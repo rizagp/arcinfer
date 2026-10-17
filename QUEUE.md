@@ -385,5 +385,5 @@ time, no model GGUF deleted, no large new disk use without asking (Flash Next ex
 | 18.8 | Decode attention at deep context (27B / 35B, 64K+): split tuning (ARC_ATTN_DEC_SG / SMAX) | ⏳ | measure first |
 | 18.9 | MOE_TILES balance (review N-3): profile 35B prompt tiles before changing anything | ⏳ | |
 | 18.10 | RoPE pow table (P1-7): only if attn_prep shows up in a profile | ⏳ | attn_prep ~0.5 % of generation |
-| 18.11 | Flash Next QSA row tiling (N-5): needs its expert file (53 GB) -> ask the user first | ⚠️ | |
+| 18.11 | Flash Next QSA row tiling (N-5): rebuild its expert file (53 GB, user OK 17 Oct 22:55), profile qsa_* at 8K / 32K, tiled qsa_score only if it matters | ⏳ | after the 35B sweep |
 | 18.12 | Docs: speed-progress (35B IQ4_XS, sweep), lessons (mach scan, KV 4-bit results), README 35B line | ⏳ | |
