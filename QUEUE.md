@@ -1,368 +1,368 @@
-# Antrian optimisasi (mulai 2026-10-12)
+# Optimization queue (started 2026-10-12)
 
-Target: generasi token memakai > 90 % bandwidth terukur (~75 GB/dtk, jadi > 67,5 GB/dtk rata-rata per token) untuk
-semua model chat di cache Hugging Face, dan vision / audio berfungsi di setiap model yang punya encoder-nya.
-Status: ✅ selesai · 🔄 dikerjakan · ⏳ antri · ⚠️ catatan · [~] sebagian
+Target: token generation using > 90 % of measured bandwidth (~75 GB/s, so > 67.5 GB/s average per token) for
+every chat model in the Hugging Face cache, and vision / audio working on every model that has the encoder for it.
+Status: ✅ done · 🔄 in progress · ⏳ queued · ⚠️ note · [~] partial
 
-| # | Tugas | Status | Catatan |
+| # | Task | Status | Notes |
 |---|---|---|---|
-| 1 | Dukungan Q4_0 (Gemma 4 QAT dari Google): prefill, GEMV cepat, GLU gabungan | ✅ | E4B: prefill 788 tok/dtk, generasi 20,9 (drafter 26,8) tok/dtk |
-| 2 | Alat ukur: bobot dibaca per token dan efisiensi bandwidth, per model | ✅ | `run.exe` mencetak `weights read: … GB/s (… % of ~75 GB/s)`. Pengukuran awal (unduhan 12B berjalan, angka berfluktuasi): 4B 60–67 %, 9B 72 %, E4B 68 %, 27B 36 % |
-| 3 | Deteksi mmproj Google (`gemma-4-E4B-it-mmproj.gguf` tidak diawali `mmproj`) | ✅ | juga: 35B non-GSQ ditandai belum didukung |
-| 4 | Gemma 4 12B (Google): uji teks, gambar, audio (gemma4ua) | ✅ | generasi 9,1 tok/dtk (85 % bandwidth), drafter 17–20; gambar dan audio jalan. Diperbaiki: template Google memakai string berdampingan (`"a" "b"`) yang tidak didukung minja → server crash saat start |
-| 5 | Efisiensi bandwidth per model (ukur → optimasi yang paling jauh dari target) | 🔄 | tahap 1 selesai: bobot Q8_0 dan IQ2/IQ3 disusun ulang di GPU (blok rata) → GEMV Q8_0 37→77, IQ2_XXS 27→60, IQ3_XXS 41→62 GB/dtk. Sekarang: 4B 79 %, 9B 86 %, E4B 81 %, 12B 82 %, 27B / Swift 72 % (dulu 77/83/76/80/65 %). Sisa: kernel non-bobot (rekurensi DeltaNet, norm, attention), IQ1_M |
-| 6 | Vision E4B di GPU (gemma4v: ViT 16 lapis, 768 lebar) | ✅ | error vs referensi f32 0,11–0,17 %; 1120 token 3,2 dtk (attention 2,8 TFLOPS, GEMM 2,2). Diperbaiki juga: input per-layer (PLE) untuk token gambar, token gambar E2B/E4B kausal (llama.cpp) |
-| 7 | Audio E4B di GPU (gemma4a: conformer 12 lapis, 1024 lebar) | ✅ | transkripsi tepat kata per kata; 7,2 dtk audio di-encode 226 ms (request pertama ~23 dtk: kompilasi kernel + unggah bobot) |
-| 8 | Vision Qwen3.5 9B (encoder 1152 lebar, head 72 dimensi) | ✅ | error 0,38 % vs f32; screenshot 0,75 dtk, gambar 2025 token 8,2 dtk (attention head 72 masih ~40 % di atas ideal: register spill) |
-| 9 | Qwen3.6 35B-A3B UD-Q3_K_S: kernel MoE untuk tipe GGUF standar | ✅ | jalan: generasi 18,9 tok/dtk (58 %), prefill 465–480 tok/dtk, konteks otomatis 61K (17 GiB); hasil prefill = token-per-token, jawaban benar |
-| 10 | Tes regresi: referensi baru untuk Gemma Google, run_tests.ps1 | ✅ | semua lulus (12 cek); Gemma 12B Google KL 0,0206 |
+| 1 | Q4_0 support (Google's Gemma 4 QAT): prefill, fast GEMV, fused GLU | ✅ | E4B: prefill 788 tok/s, generation 20.9 (drafter 26.8) tok/s |
+| 2 | Measurement tool: weights read per token and bandwidth efficiency, per model | ✅ | `run.exe` prints `weights read: … GB/s (… % of ~75 GB/s)`. First measurements (12B download running, numbers fluctuate): 4B 60–67 %, 9B 72 %, E4B 68 %, 27B 36 % |
+| 3 | Detect Google mmproj (`gemma-4-E4B-it-mmproj.gguf` does not start with `mmproj`) | ✅ | also: non-GSQ 35B marked as not supported yet |
+| 4 | Gemma 4 12B (Google): test text, image, audio (gemma4ua) | ✅ | generation 9.1 tok/s (85 % bandwidth), drafter 17–20; image and audio work. Fixed: the Google template uses adjacent strings (`"a" "b"`), which minja does not support → server crashed at start |
+| 5 | Bandwidth efficiency per model (measure → optimize the one furthest from target) | 🔄 | stage 1 done: Q8_0 and IQ2/IQ3 weights rearranged on the GPU (aligned blocks) → GEMV Q8_0 37→77, IQ2_XXS 27→60, IQ3_XXS 41→62 GB/s. Now: 4B 79 %, 9B 86 %, E4B 81 %, 12B 82 %, 27B / Swift 72 % (before 77/83/76/80/65 %). Remaining: non-weight kernels (DeltaNet recurrence, norm, attention), IQ1_M |
+| 6 | E4B vision on the GPU (gemma4v: 16-layer ViT, width 768) | ✅ | error vs f32 reference 0.11–0.17 %; 1120 tokens 3.2 s (attention 2.8 TFLOPS, GEMM 2.2). Also fixed: per-layer input (PLE) for image tokens, E2B/E4B image tokens causal (llama.cpp) |
+| 7 | E4B audio on the GPU (gemma4a: 12-layer conformer, width 1024) | ✅ | transcription exact word for word; 7.2 s of audio encoded in 226 ms (first request ~23 s: kernel compilation + weight upload) |
+| 8 | Qwen3.5 9B vision (encoder width 1152, head dim 72) | ✅ | error 0.38 % vs f32; screenshot 0.75 s, 2025-token image 8.2 s (head-72 attention still ~40 % above ideal: register spill) |
+| 9 | Qwen3.6 35B-A3B UD-Q3_K_S: MoE kernels for standard GGUF types | ✅ | works: generation 18.9 tok/s (58 %), prefill 465–480 tok/s, automatic context 61K (17 GiB); prefill result = token-by-token, answers correct |
+| 10 | Regression tests: new references for Google Gemma, run_tests.ps1 | ✅ | all pass (12 checks); Google Gemma 12B KL 0.0206 |
 
-Tidak termasuk: Qwen3-ASR 1.7B (tidak diperlukan), bge-small (embedding), laya (bukan model chat).
-⚠️ Pengukuran kecepatan yang final dilakukan setelah unduhan 12B selesai (CPU dan GPU berbagi daya dan panas).
+Not included: Qwen3-ASR 1.7B (not needed), bge-small (embedding), laya (not a chat model).
+⚠️ Final speed measurements are taken after the 12B download finishes (CPU and GPU share power and heat).
 
 ---
 
-# Fase 2: rencana optimisasi berikutnya (disusun 2026-10-13)
+# Phase 2: next optimization plan (drawn up 2026-10-13)
 
-Dasar: profil per kernel tiap model. Ringkasan posisi sekarang:
-- Generasi token model dense (4B, 9B, 12B, E4B, 27B) sudah dekat batas praktis: 72–86 % bandwidth; sisa waktu
-  di kernel non-bobot. Pengungkit utamanya MTP / drafter (27B: 4,5 → 7,9 tok/dtk), dan itu sudah aktif.
-- Prefill model dense hampir seluruhnya GEMM int8 di ~65 % puncak DP4a (batas praktis). DeltaNet hanya 4–9 %.
-- Yang masih jauh dari batas: **kernel expert 35B** (prefill 0,04 TOPS, generasi ~41 GB/dtk) dan
-  **attention di konteks panjang**.
+Basis: per-kernel profile of each model. Summary of where things stand:
+- Token generation for dense models (4B, 9B, 12B, E4B, 27B) is already close to the practical limit: 72–86 % bandwidth; the
+  remaining time is in non-weight kernels. The main lever is MTP / drafter (27B: 4.5 → 7.9 tok/s), and that is already on.
+- Dense-model prefill is almost entirely int8 GEMM at ~65 % of DP4a peak (practical limit). DeltaNet is only 4–9 %.
+- Still far from the limit: **35B expert kernels** (prefill 0.04 TOPS, generation ~41 GB/s) and
+  **attention at long context**.
 
-Urutan dari dampak terbesar per usaha. Setiap tugas: ukur sebelum dan sesudah (best-of-two / bergantian A-B),
-hasil harus identik (greedy sama, prefill = token-per-token), lalu run_tests.ps1.
+Order by largest impact per effort. Every task: measure before and after (best-of-two / alternating A-B),
+results must be identical (same greedy output, prefill = token-by-token), then run_tests.ps1.
 
-| # | Tugas | Status | Perkiraan hasil | Biaya / risiko |
+| # | Task | Status | Expected result | Cost / risk |
 |---|---|---|---|---|
-| F1 | **Prefill expert 35B dengan GEMM int8**: dekode expert ke int8 per 64 expert (`decode_w8`), lalu satu kernel GEMM berkelompok (lane = kolom, aktivasi dibagikan, DP4a) untuk semua tile (expert × token) | ✅ prefill 2048 token **476 → 642 tok/dtk** (+35 %); hasil per layer sama dengan kernel lama (selisih ~1e-7). Dekode expert ke int8 per 64 expert lewat kernel baru `decode_w8_sl` (baris disalin dulu ke memori lokal: IQ3_XXS 1038 → 518 ms, IQ4_XS 433 → 303 ms per chunk), lalu `gemm.cl` mode `MOE_TILES`. Dipakai untuk chunk ≥ 1152 token (dekode semua expert ~1 dtk per chunk; di 1024 token impas). Staging 75 MB | kerja expert 2,7 → ~1,1 dtk per chunk 2048; prefill 35B **476 → ~700–750 tok/dtk**; TTFT prompt panjang turun ~1/3 | beberapa jam; buffer staging ~70 MB → konteks otomatis −~7K token |
-| F2 | **Attention prefill konteks panjang** (27B, 9B, 35B): ukur dulu porsinya di 16K / 32K token, lalu perbaiki kernel attention prefill (tile lebih besar, K/V lewat memori lokal, skor int8 + akumulasi f32) | ✅ (sebagian) diukur di prompt 21.590 token: attention 35B 22 % (9,4 dtk), 9B 14 %, 27B 12 % (22 dtk). Perbaikan: 4 head-q per sub-group untuk Qwen bila rasio GQA bisa dibagi 4 (attn_q8): 35B 9,4 → 8,4 dtk, 9B 8,2 → 7,0 dtk, hasil sama; 27B (6 per kv head) tetap. `attn_ps` (dim dibagi) dicoba: lebih lambat. Sisa terbesar 35B di prompt panjang: dekode expert per chunk (~0,85 dtk × 11 chunk); butuh dekode sekali per layer untuk semua chunk (pekerjaan berikutnya) | belum diketahui; 27B di 11K dulu ~6,4 dtk attention, porsinya naik terus seiring konteks | sedang; harus dicek akurasinya di konteks panjang (KL) |
-| F3 | **Generasi 35B: kernel expert** (~41 GB/dtk → target ~60): matriks down barisnya pendek (512) → beberapa baris per sub-group dengan reduksi gabungan; gate/up: kurangi overhead per tile | ✅ (sebagian) kernel expert sudah di batas praktis: variasi baris per sub-group ±2 %, down + combine digabung 212 vs 211 ms (tidak dipakai). Gantinya: qkv + z (+ ab) DeltaNet ditumpuk jadi satu GEMV saat generasi (`load_gdn_in`, tanpa salinan ganda): 35B **19,2 → 19,8 tok/dtk** (+3 %), 27B 4,75 → 4,8–5,0; 9B sama (tipe qkv / z beda di banyak layer). Q8_0 lewat `gemv_v` dicoba: lebih lambat | generasi 35B **18,8 → ~20 tok/dtk** (+6–7 %) | sedang; tanpa efek ke memori |
-| F4 | **MTP 3 tebakan per langkah** untuk Qwen (27B, 9B, 4B): engine sekarang dibatasi 2 | ✅ 27B kode 7,8 → 9,5 tok/dtk (+21 %), teks +2,5 %; 4B / 9B sama → default otomatis 3 untuk 27B-class, 2 lainnya; konteks 27B 86K → 82K | 27B kode: 7,9 → mungkin ~8,5 tok/dtk; teks biasa lebih kecil | kecil; hasil wajib identik dengan tanpa MTP |
-| F5 | **Q8_0 satu salinan dalam susunan GEMM** (35B): GEMV baru yang membaca susunan selang-seling, sehingga dekode Q8_0 per chunk (0,22 dtk) hilang | ⏸️ tidak dikerjakan: setelah kernel dekode baru (`decode_w8_sl`) dekode Q8_0 per chunk 2048 tinggal 211 → 72 ms (~2 % prefill), jadi GEMV baru untuk susunan lain tidak sebanding | prefill 35B +~5 % | sedang; GEMV baru harus secepat yang sekarang |
-| F6 | **Vision 35B**: repo Unsloth punya mmproj (encoder Qwen3-VL yang sama dengan 4B/9B); server belum memuat vision untuk model MoE | ✅ berfungsi (2026-10-14, mmproj-BF16 Unsloth): teks di gambar terbaca persis, encode 1.008 token ~3 dtk (pertama kali ~60 dtk: kompilasi kernel), prefill ~400 tok/dtk, generasi ~18 tok/dtk. Tapi encoder (~1,1–1,3 GB) hampir tidak muat bersama 35B di 18,3 GiB: konteks dengan gambar hanya 4.096. Karena itu `35b` tetap tanpa vision (40.960), gambar lewat `35b-vision` saja. Pilihan berikutnya: bobot encoder Q8_0 (hemat ~0,45 GB), encoder dimuat hanya saat ada gambar, atau jatah GPU dinaikkan | fitur baru: 35B bisa membaca gambar | kecil–sedang; memori encoder (~1 GB) mengurangi konteks |
-| F7 | (opsional) **Attention vision 9B head 72**: satu baris query dibagi ke dua lane supaya register muat | ⏸️ tidak dikerjakan (opsional; kompiler tetap memakai 128 register untuk kernel ini, hasilnya tidak pasti) | attention vision 9B ~1,6 → ~1,1 dtk per gambar besar | hasil belum pasti (kompiler) |
-| F8 | (perlu keputusan) **MTP untuk 35B**: butuh file versi MTP, dukungan Q3_K, expert Q2_K/Q4_K, dan MoE di blok MTP | ✅ `35b-mtp` (file repo MTP): hasil **identik bit** dengan tanpa MTP, generasi **19,7 → 22,3 tok/dtk** (+13 %, 83 % tebakan diterima), prefill −3,4 %, konteks otomatis 40K (varian `35b-mtp-std` 98K). Ditambah: Q3_K di kernel GPU, expert ber-min (Q4_K / Q2_K / Q5_K) di kernel expert, MoE di blok MTP, 1 tebakan default untuk MoE (1 dan 2 sama cepat; hemat satu salinan state). Diperbaiki: attention verifikasi 35B kini lewat kernel yang sama dengan token tunggal (sebelumnya teks MTP menyimpang setelah ~40 token) | generasi 35B ~1,5× | besar; konteks Q3_K_M turun ke ~40–50K |
+| F1 | **35B expert prefill with int8 GEMM**: decode experts to int8 per 64 experts (`decode_w8`), then one grouped GEMM kernel (lane = column, shared activations, DP4a) for all tiles (expert × token) | ✅ prefill 2048 tokens **476 → 642 tok/s** (+35 %); per-layer results match the old kernel (difference ~1e-7). Experts are decoded to int8 per 64 experts with the new kernel `decode_w8_sl` (rows copied to local memory first: IQ3_XXS 1038 → 518 ms, IQ4_XS 433 → 303 ms per chunk), then `gemm.cl` in `MOE_TILES` mode. Used for chunks ≥ 1152 tokens (decoding all experts takes ~1 s per chunk; break-even at 1024 tokens). Staging 75 MB | expert work 2.7 → ~1.1 s per 2048 chunk; 35B prefill **476 → ~700–750 tok/s**; TTFT for long prompts down ~1/3 | a few hours; staging buffer ~70 MB → automatic context −~7K tokens |
+| F2 | **Long-context prefill attention** (27B, 9B, 35B): first measure its share at 16K / 32K tokens, then improve the prefill attention kernel (larger tiles, K/V through local memory, int8 scores + f32 accumulation) | ✅ (partial) measured on a 21,590-token prompt: attention 35B 22 % (9.4 s), 9B 14 %, 27B 12 % (22 s). Fix: 4 q-heads per sub-group for Qwen when the GQA ratio is divisible by 4 (attn_q8): 35B 9.4 → 8.4 s, 9B 8.2 → 7.0 s, same results; 27B (6 per kv head) unchanged. `attn_ps` (split dim) tried: slower. Largest remaining cost for 35B on long prompts: per-chunk expert decode (~0.85 s × 11 chunks); needs one decode per layer for all chunks (next piece of work) | unknown; 27B at 11K used to spend ~6.4 s in attention, and its share keeps growing with context | medium; accuracy must be checked at long context (KL) |
+| F3 | **35B generation: expert kernels** (~41 GB/s → target ~60): the down matrix has short rows (512) → several rows per sub-group with a combined reduction; gate/up: reduce per-tile overhead | ✅ (partial) the expert kernels are already at the practical limit: rows-per-sub-group variants ±2 %, down + combine fused 212 vs 211 ms (not used). Instead: DeltaNet qkv + z (+ ab) stacked into one GEMV during generation (`load_gdn_in`, no double copy): 35B **19.2 → 19.8 tok/s** (+3 %), 27B 4.75 → 4.8–5.0; 9B same (qkv / z types differ in many layers). Q8_0 through `gemv_v` tried: slower | 35B generation **18.8 → ~20 tok/s** (+6–7 %) | medium; no effect on memory |
+| F4 | **MTP with 3 guesses per step** for Qwen (27B, 9B, 4B): the engine is currently limited to 2 | ✅ 27B code 7.8 → 9.5 tok/s (+21 %), text +2.5 %; 4B / 9B same → automatic default 3 for 27B-class, 2 for the others; 27B context 86K → 82K | 27B code: 7.9 → maybe ~8.5 tok/s; plain text less | small; results must be identical to running without MTP |
+| F5 | **Q8_0 single copy in the GEMM layout** (35B): a new GEMV that reads the interleaved layout, so the per-chunk Q8_0 decode (0.22 s) goes away | ⏸️ not done: after the new decode kernel (`decode_w8_sl`) the Q8_0 decode per 2048 chunk is down 211 → 72 ms (~2 % of prefill), so a new GEMV for another layout is not worth it | 35B prefill +~5 % | medium; the new GEMV must be as fast as the current one |
+| F6 | **35B vision**: the Unsloth repo has an mmproj (the same Qwen3-VL encoder as 4B/9B); the server does not load vision for MoE models yet | ✅ works (2026-10-14, Unsloth mmproj-BF16): text in the image read exactly, encoding 1,008 tokens ~3 s (first time ~60 s: kernel compilation), prefill ~400 tok/s, generation ~18 tok/s. But the encoder (~1.1–1.3 GB) barely fits next to 35B in 18.3 GiB: context with images only 4,096. So `35b` stays without vision (40,960), images only through `35b-vision`. Next options: Q8_0 encoder weights (saves ~0.45 GB), load the encoder only when there is an image, or raise the GPU budget | new feature: 35B can read images | small–medium; encoder memory (~1 GB) reduces context |
+| F7 | (optional) **9B vision attention, head 72**: split one query row across two lanes so the registers fit | ⏸️ not done (optional; the compiler still uses 128 registers for this kernel, outcome uncertain) | 9B vision attention ~1.6 → ~1.1 s per large image | outcome uncertain (compiler) |
+| F8 | (needs a decision) **MTP for 35B**: needs the MTP version of the file, Q3_K support, Q2_K/Q4_K experts, and MoE in the MTP block | ✅ `35b-mtp` (MTP repo file): results **bit-identical** to running without MTP, generation **19.7 → 22.3 tok/s** (+13 %, 83 % of guesses accepted), prefill −3.4 %, automatic context 40K (variant `35b-mtp-std` 98K). Added: Q3_K in the GPU kernels, experts with min (Q4_K / Q2_K / Q5_K) in the expert kernels, MoE in the MTP block, 1 guess by default for MoE (1 and 2 equally fast; saves one state copy). Fixed: 35B verification attention now goes through the same kernel as single tokens (before, MTP text diverged after ~40 tokens) | 35B generation ~1.5× | large; Q3_K_M context drops to ~40–50K |
 
-Sudah dicoba / diukur dan **tidak** dilanjutkan:
-- Level Zero (jeda antar kernel cuma ~1,6–2 %), antrian out-of-order + event.
-- DeltaNet "chunked" (DeltaNet hanya 4–9 % prefill), state DeltaNet f16 (hemat ~1,5 %, risiko error menumpuk).
-- Split-K GEMV untuk matriks kecil (tidak lebih cepat secara total), aturan GEMV per tipe hasil benchmark
-  matriks tunggal (tidak lebih cepat di dalam model), gemv_glu untuk 27B (hanya 24/64 lapis cocok, ~0,3 %).
+Already tried / measured and **not** pursued:
+- Level Zero (gaps between kernels only ~1.6–2 %), out-of-order queue + events.
+- "Chunked" DeltaNet (DeltaNet is only 4–9 % of prefill), f16 DeltaNet state (saves ~1.5 %, risk of accumulating error).
+- Split-K GEMV for small matrices (not faster overall), per-type GEMV rules from single-matrix benchmarks
+  (not faster inside the model), gemv_glu for 27B (only 24/64 layers fit, ~0.3 %).
 
-Saran urutan kerja (diperbarui 2026-10-13, file MTP 35B sedang diunduh): **F8 → F1 → F4 → F3 → F2 → F5 → F9 → F6**, lalu F7.
+Suggested work order (updated 2026-10-13, 35B MTP file downloading): **F8 → F1 → F4 → F3 → F2 → F5 → F9 → F6**, then F7.
 
-## F8 (prioritas 1): MTP untuk Qwen3.6 35B-A3B, rincian
+## F8 (priority 1): MTP for Qwen3.6 35B-A3B, details
 
-Tujuan: generasi 35B 18,8 → ~27–30 tok/dtk dengan blok MTP, hasil identik dengan tanpa MTP, prefill tidak turun
-lebih dari ~5 %.
+Goal: 35B generation 18.8 → ~27–30 tok/s with the MTP block, results identical to running without MTP, prefill not slower
+by more than ~5 %.
 
-| Langkah | Isi | Catatan |
+| Step | Content | Notes |
 |---|---|---|
-| 8.1 | Periksa file yang diunduh: tensor `blk.40.*` (blok MTP, `nextn.*`), tipe expert-nya, ukuran; perkiraan konteks | file repo MTP: lapis utama sama dengan versi non-MTP, blok MTP ±0,5 GB |
-| 8.2 | **Tipe Q3_K**: dekoder GPU (`decode32`), referensi CPU, dekode ke int8 untuk prefill, GEMV; tes kernel di `test_gemm` | belum didukung sama sekali; di file MTP dipakai expert blok MTP |
-| 8.3 | **Expert bertipe dengan nilai minimum (Q2_K, Q4_K)** di kernel MoE: jumlah aktivasi per 16 (`absum`) untuk gate/up dan down (`moe_quant` ikut menulisnya) | sekarang kernel MoE menolak tipe ini |
-| 8.4 | **Blok MTP versi MoE**: muat router, shared expert dan expert blok MTP (`load_moe`), lalu jalankan lapis MoE di jalur MTP (`mtp_rows`) — untuk prompt (batch) dan untuk menebak token | blok MTP 4B/9B/27B memakai FFN biasa |
-| 8.5 | Verifikasi 2–3 token sekaligus di lapis MoE utama (tile kecil) + pembatalan state DeltaNet (sudah ada) | ukur: kecepatan verifikasi vs 1 token |
-| 8.6 | **Uji**: greedy identik dengan/tanpa MTP; prefill dengan MTP ≤ 5 % lebih lambat (A/B bergantian); tingkat penerimaan dan tok/dtk di prompt kode dan teks biasa | syarat lulus |
-| 8.7 | Alias: nama file sama dengan versi non-MTP (`Qwen3.6-35B-A3B-UD-Q3_K_M.gguf`), jadi dibedakan lewat nama repo → `35b-mtp` (id `qwen3.6-35b-a3b-mtp`); daftar Pi, CHANGELOG, README | `35b` / `35b-s` tetap |
+| 8.1 | Inspect the downloaded file: `blk.40.*` tensors (MTP block, `nextn.*`), their expert types, size; context estimate | MTP repo file: main layers same as the non-MTP version, MTP block ±0.5 GB |
+| 8.2 | **Q3_K type**: GPU decoder (`decode32`), CPU reference, decode to int8 for prefill, GEMV; kernel tests in `test_gemm` | not supported at all yet; in the MTP file it is used by the MTP-block experts |
+| 8.3 | **Typed experts with a minimum value (Q2_K, Q4_K)** in the MoE kernels: activation sums per 16 (`absum`) for gate/up and down (`moe_quant` writes them too) | the MoE kernels currently reject these types |
+| 8.4 | **MoE version of the MTP block**: load the router, shared expert and experts of the MTP block (`load_moe`), then run the MoE layer in the MTP path (`mtp_rows`) — for the prompt (batch) and for guessing tokens | the 4B/9B/27B MTP blocks use a plain FFN |
+| 8.5 | Verify 2–3 tokens at once in the main MoE layers (small tiles) + DeltaNet state rollback (already exists) | measure: verification speed vs 1 token |
+| 8.6 | **Test**: greedy identical with/without MTP; prefill with MTP ≤ 5 % slower (alternating A/B); acceptance rate and tok/s on code and plain-text prompts | pass criteria |
+| 8.7 | Alias: the file name is the same as the non-MTP version (`Qwen3.6-35B-A3B-UD-Q3_K_M.gguf`), so it is distinguished by repo name → `35b-mtp` (id `qwen3.6-35b-a3b-mtp`); Pi list, CHANGELOG, README | `35b` / `35b-s` unchanged |
 
-Risiko: konteks Q3_K_M dengan MTP turun ke ~40–50K token (dari 94K); verifikasi beberapa token di lapis MoE
-membaca lebih banyak expert sekaligus (token berbeda memilih expert berbeda), jadi percepatannya bisa di bawah 27B.
+Risk: Q3_K_M context with MTP drops to ~40–50K tokens (from 94K); verifying several tokens in the MoE layers
+reads more experts at once (different tokens pick different experts), so the speedup may be below 27B's.
 
-## Tugas kecil baru
+## New small tasks
 
-| # | Tugas | Status | Perkiraan hasil |
+| # | Task | Status | Expected result |
 |---|---|---|---|
-| F9 | Daftar model Pi mengikuti setelan vision: `pi-arc --vision off` → model ditandai teks saja dan konteks yang ditampilkan lebih panjang | ✅ (lewat F10) | konsistensi /model; tanpa efek kecepatan |
-| F11 | **Bobot encoder gambar int8, aktivasi tetap F32**: varian `vit_gemm` dengan bobot Q8_0 yang dibuka ke F16 di kernel; uji selisih vs referensi f32 dan teks kecil di gambar uji; dipakai bila tidak ada penurunan | ⏸️ ditunda (2026-10-14): arcinferzero (expert 35B di cache GPU + SSD) memberi ruang untuk encoder 0,9 GB, jadi vision 35B tidak lagi bergantung pada F11. Catatan: mmproj Q8_0 pun sekarang tetap dibuka ke F16 di GPU | encoder 35B ~0,9 → ~0,48 GB, `35b-vision` 4K → ~40K token; 4B / 9B sedikit lebih banyak konteks | ~1 hari; dulu int8 penuh (aktivasi juga) meleset 10–23 %, jadi aktivasi wajib tetap F32 |
-| ✅ | Opsi vision on/off: `pi-arc --vision off` / `arc-server -Vision off` (dikerjakan 2026-10-13) | ✅ | Qwen3.5 9B: 143K → 217K token saat vision mati; ganti model lewat /model mengikuti setelan saat server dinyalakan |
+| F9 | Pi model list follows the vision setting: `pi-arc --vision off` → model marked text-only and the displayed context is longer | ✅ (via F10) | /model consistency; no speed effect |
+| F11 | **Int8 image-encoder weights, activations stay F32**: a `vit_gemm` variant with Q8_0 weights unpacked to F16 in the kernel; test the difference vs the f32 reference and small text in test images; used if there is no degradation | ⏸️ postponed (2026-10-14): arcinferzero (35B experts in GPU cache + SSD) leaves room for the 0.9 GB encoder, so 35B vision no longer depends on F11. Note: a Q8_0 mmproj is currently also unpacked to F16 on the GPU | 35B encoder ~0.9 → ~0.48 GB, `35b-vision` 4K → ~40K tokens; 4B / 9B a bit more context | ~1 day; full int8 earlier (activations too) was off by 10–23 %, so activations must stay F32 |
+| ✅ | Vision on/off option: `pi-arc --vision off` / `arc-server -Vision off` (done 2026-10-13) | ✅ | Qwen3.5 9B: 143K → 217K tokens with vision off; switching models via /model follows the setting used when the server was started |
 
-## F10: semua model dan variannya otomatis muncul di Pi /model
+## F10: all models and their variants show up automatically in Pi /model
 
-Permintaan: saat Pi dibuka, /model menampilkan setiap model yang terunduh beserta semua variannya: standar, dengan
-MTP, dengan vision, dengan keduanya. Tanpa mengedit apa pun saat ada model baru.
+Request: when Pi is opened, /model shows every downloaded model with all its variants: standard, with
+MTP, with vision, with both. Without editing anything when a new model arrives.
 
-Sudah ada (dasar):
-- Server memindai cache Hugging Face + `%LOCALAPPDATA%\arcinfer\models` di setiap start; `pi-arc` / `arc-server`
-  menulis ulang daftar model Pi dari hasil pindaian itu.
-- Setiap file punya id unik (2026-10-13): file dengan nama sama dari repo lain mendapat `-mtp` bila membawa blok
-  MTP, sisanya `-2`, `-3`; id lama (`qwen3.5-4b`, `35b`, ...) tidak berubah.
+Already in place (basis):
+- The server scans the Hugging Face cache + `%LOCALAPPDATA%\arcinfer\models` on every start; `pi-arc` / `arc-server`
+  rewrite Pi's model list from that scan.
+- Every file has a unique id (2026-10-13): a file with the same name from another repo gets `-mtp` if it carries an
+  MTP block, otherwise `-2`, `-3`; old ids (`qwen3.5-4b`, `35b`, ...) do not change.
 
-Rancangan:
+Design:
 
-| Langkah | Isi |
+| Step | Content |
 |---|---|
-| 10.1 | **Kemampuan per file** dari isinya, bukan dari tabel nama: blok MTP (`nextn_predict_layers` atau drafter `mtp-*.gguf` Gemma di folder yang sama), encoder gambar / audio (mmproj di folder yang sama yang bisa dijalankan engine), arsitektur didukung atau tidak |
-| 10.2 | **Varian per file**: hanya kombinasi yang memang ada. Id = id dasar + akhiran: `<id>` (standar: tanpa MTP, tanpa vision), `<id>-mtp`, `<id>-vision`, `<id>-mtp-vision`. Contoh: Qwen3.5 9B → 4 varian; Qwen3.8 27B (MTP, tanpa mmproj) → 2; Qwen3.6 35B non-MTP (tanpa mmproj lokal) → 1 |
-| 10.3 | **Konteks otomatis per varian**: dihitung sendiri-sendiri (vision mati → tanpa cadangan encoder; MTP mati → tanpa blok MTP), disimpan di cache ctx-auto seperti sekarang; ditampilkan di nama varian |
-| 10.4 | **Nama di Pi**: mudah dibaca, mis. `Qwen3.5 9B · MTP · vision · 143K`; urut per model, varian terlengkap dulu; input `text`/`image` sesuai varian |
-| 10.5 | **Server**: memilih varian lewat /model = memuat ulang file yang sama dengan setelan berbeda (mmproj on/off, MTP on/off); bila hanya varian yang berbeda dari yang sedang jalan, tetap dimuat ulang (10–70 dtk) |
-| 10.6 | **`pi-arc` / `arc-server`**: menerima id varian (`pi-arc 9b-vision`, `pi-arc 35b-mtp`); singkatan lama = varian default model itu (default: MTP + vision bila ada, sama seperti sekarang) |
-| 10.7 | **Uji**: setiap varian muncul di /model, berpindah varian lewat /model benar-benar mengganti setelan (cek `/props`: vision, MTP, n_ctx), id lama tetap jalan, model baru yang diunduh muncul tanpa edit kode |
+| 10.1 | **Capabilities per file** from its contents, not from a name table: MTP block (`nextn_predict_layers` or a Gemma `mtp-*.gguf` drafter in the same folder), image / audio encoder (an mmproj in the same folder that the engine can run), architecture supported or not |
+| 10.2 | **Variants per file**: only combinations that actually exist. Id = base id + suffix: `<id>` (standard: no MTP, no vision), `<id>-mtp`, `<id>-vision`, `<id>-mtp-vision`. Examples: Qwen3.5 9B → 4 variants; Qwen3.8 27B (MTP, no mmproj) → 2; non-MTP Qwen3.6 35B (no local mmproj) → 1 |
+| 10.3 | **Automatic context per variant**: computed separately (vision off → no encoder reserve; MTP off → no MTP block), stored in the ctx-auto cache as now; shown in the variant name |
+| 10.4 | **Names in Pi**: easy to read, e.g. `Qwen3.5 9B · MTP · vision · 143K`; sorted per model, most complete variant first; `text`/`image` input according to the variant |
+| 10.5 | **Server**: picking a variant via /model = reloading the same file with different settings (mmproj on/off, MTP on/off); if only the variant differs from the one running, it is still reloaded (10–70 s) |
+| 10.6 | **`pi-arc` / `arc-server`**: accept variant ids (`pi-arc 9b-vision`, `pi-arc 35b-mtp`); old short names = that model's default variant (default: MTP + vision when available, same as now) |
+| 10.7 | **Test**: every variant appears in /model, switching variants via /model really changes the settings (check `/props`: vision, MTP, n_ctx), old ids still work, a newly downloaded model appears without code edits |
 
-Catatan:
-- Jumlah entri: dengan 9 file sekarang sekitar 20 entri. Kalau terasa terlalu ramai, bisa diberi opsi untuk
-  menyembunyikan varian "standar".
-- Pindaian dan hitung konteks per varian butuh beberapa detik per varian baru (sekali saja, lalu disimpan di cache).
-- Opsi `--vision off` / `--no-mtp` di `pi-arc` tetap ada, setara dengan memilih variannya.
+Notes:
+- Number of entries: with the current 9 files, about 20 entries. If that feels too crowded, an option can be added to
+  hide the "standard" variants.
+- Scanning and computing context per variant takes a few seconds per new variant (only once, then cached).
+- The `--vision off` / `--no-mtp` options of `pi-arc` stay, equivalent to picking the corresponding variant.
 
-**Status F10: ✅ selesai (2026-10-13).** 22 entri dari 9 file; id lama tetap (= varian terlengkap); varian lain
-`-mtp`, `-vision`, `-std`; konteks per varian (mis. 27B: 86K dengan MTP, 123K tanpa; 9B: 143K penuh, 262K
-standar); /model berpindah varian = memuat ulang dengan setelan varian (diuji: vision dan MTP mengikuti);
-`pi-arc --vision off` / `--no-mtp` memilih varian yang sesuai.
+**F10 status: ✅ done (2026-10-13).** 22 entries from 9 files; old ids unchanged (= most complete variant); other variants
+`-mtp`, `-vision`, `-std`; context per variant (e.g. 27B: 86K with MTP, 123K without; 9B: 143K full, 262K
+standard); switching variants via /model = reloading with the variant's settings (tested: vision and MTP follow);
+`pi-arc --vision off` / `--no-mtp` picks the matching variant.
 
-Urutan bersama tugas lain: F10 kecil–sedang dan tidak bergantung pada F8. Usul: F10 dikerjakan selagi file MTP
-35B diunduh, lalu F8 (yang otomatis menambah varian `35b-mtp`).
+Ordering with other tasks: F10 is small–medium and does not depend on F8. Proposal: do F10 while the 35B MTP file
+downloads, then F8 (which automatically adds the `35b-mtp` variant).
 
-## arcinferzero: MoE dengan expert di cache GPU + SSD (Level Zero), dimulai 2026-10-14
+## arcinferzero: MoE with experts in GPU cache + SSD (Level Zero), started 2026-10-14
 
-- Fase 1 ✅ uji Level Zero (`zero/ze_probe.cpp`): biner kernel OpenCL bisa dimuat Level Zero; memori device 69,9 GB/s,
-  host 60,5 GB/s; memori host di atas jatah GPU bisa dipakai tapi hanya 9–21 GB/s (Windows memindah-mindah memori),
-  jadi cache tetap di dalam jatah GPU. SSD Kingston NVMe (`bench/ssd_bench.cpp`): ~3,5–4,2 GB/s untuk baca acak
-  1–4 MB dengan 16 permintaan sekaligus.
-- Rekaman rute expert 35B (`ARC_DUMP_ROUTES`, 3 sesi x 400 token) + simulasi (`zero/cache_sim.py`): LRU paling baik
-  (pin expert populer lebih buruk); hit rate 99,8 % (cache 88 %), 98 % (70 %), 95 % (50 %), 87 % (30 %).
-- Keputusan: **Windows minimal 14 GB**; ukuran cache expert **bisa diatur** — bawaan dihitung otomatis supaya total
-  server <= RAM - 14 GB (35B di 262K: cache ~10,8 GiB ≈ 83 %, ~19,5 tok/s); `--expert-cache-gb` / `--expert-cache-pct`,
-  `--windows-reserve-gb`; tidak ada cache di RAM; baca SSD langsung (FILE_FLAG_NO_BUFFERING).
-- File expert di SSD (`%LOCALAPPDATA%\arcinfer\zero\<model>.experts`): setiap expert utuh, berurutan, rata 4 KB, dalam
-  susunan siap-GPU (blok seperti arcinfer), sehingga satu expert = satu baca SSD langsung tanpa konversi. Tidak ada →
-  dibuat otomatis saat model pertama dijalankan; ada dan cocok (ukuran, tanggal, sidik GGUF) → dipakai; tidak cocok →
-  dibuat ulang. Boleh dihapus kapan saja (35B ~14 GB, Flash Next ~40–45 GB).
-- Fase 2 hasil (2026-10-14), `zero/` (`bin/runz.exe`, `bin/serverz.exe`; arcinfer biasa tidak diubah):
-  - Shim OpenCL→Level Zero (`zero/clrt.h`) identik bit dengan arcinfer dan lebih cepat (35B tanpa streaming: TTFT
-    6,45 → 4,07 dtk, generasi 16,9 → 18,3 tok/s; 27B identik, prefill sama).
-  - Streaming expert (`zero/expert_store.h`, `zero/xcache.h`, kernel `-DXCACHE` di `zero/kernels/decode.cl`): file
-    expert 15,1 GB (41 layer termasuk MTP) dibuat sekali dalam 144 dtk; hasil **identik bit** dengan arcinfer (chunk
-    2048, logit 48 token sama persis).
-  - Cache: satu daftar LRU per ukuran record; prompt memakai ujung belakang daftar sebagai area sementara (tidak
-    menyapu cache); staging host 2 x 64 record (244 MiB); prefetch layer berikutnya di thread selama GPU bekerja;
-    isi cache disimpan (`.lru`) dan dimuat ulang saat start (10,6 GB dalam ~6 dtk).
-  - 35B, konteks 262K, chunk 4096 (p1, 2216 token, generasi 256 token): **MTP 22,2 tok/s** (cache 79 %, hit 97,6 %),
-    tanpa MTP 19,3 tok/s (hit 98,6 %), TTFT 3,3–3,5 dtk (~640–680 tok/s; arcinfer 4,1–6,5 dtk). Cache penuh: MTP
-    23,9 tok/s.
-  - Batas memori: jatah GPU − 1,4 GiB (1,13 GiB sisa → kernel gagal: out of device memory) dan RAM − 14 GiB.
-  - Server zero: chat, tool call, gambar + MTP bersamaan (konteks 262K, cache ~70 %) jalan; **masih ada crash
-    "device lost" sesekali pada gambar kedua** — ✅ diperbaiki 2026-10-14 (zeKernelSetIndirectAccess untuk kernel
-    XCACHE; 5/5 urutan server lolos).
-- Fase 2 ✅ (rencana awal; hasil di atas) engine MoE di Level Zero + cache LRU + prefetch dari router; uji 35B 262K, hasil harus identik. Juga
-  **dengan MTP**: target generasi **~21 tok/s** di 262K (arcinfer sekarang 22,3 tok/s tapi hanya 40K); blok MTP ~0,46 GB
-  ikut di memori GPU (cache expert ~80 %), verifikasi 2 token per langkah ikut diukur hit rate-nya.
-- Prefill: **chunk 4096** (expert yang tidak di cache dibaca dari SSD sekali per potongan; per token separuh dari
-  chunk 2048; buffer +~0,3 GB). Expert untuk prompt dialirkan lewat buffer sementara terpisah, tidak masuk cache LRU,
-  supaya satu prompt panjang tidak menyapu cache yang dipakai generasi.
-- Fase 3 ⏳ Qwen3.8 Flash Next (qwen4exp: QSA, tabel n-gram di SSD, 512 expert top-10).
+- Phase 1 ✅ Level Zero test (`zero/ze_probe.cpp`): OpenCL kernel binaries can be loaded by Level Zero; device memory 69.9 GB/s,
+  host 60.5 GB/s; host memory above the GPU budget can be used but only at 9–21 GB/s (Windows moves the memory around),
+  so the cache stays within the GPU budget. Kingston NVMe SSD (`bench/ssd_bench.cpp`): ~3.5–4.2 GB/s for random reads
+  of 1–4 MB with 16 requests in flight.
+- Recording of 35B expert routes (`ARC_DUMP_ROUTES`, 3 sessions x 400 tokens) + simulation (`zero/cache_sim.py`): LRU is best
+  (pinning popular experts is worse); hit rate 99.8 % (cache 88 %), 98 % (70 %), 95 % (50 %), 87 % (30 %).
+- Decision: **Windows minimum 14 GB**; expert cache size **is configurable** — the default is computed automatically so the
+  server total <= RAM - 14 GB (35B at 262K: cache ~10.8 GiB ≈ 83 %, ~19.5 tok/s); `--expert-cache-gb` / `--expert-cache-pct`,
+  `--windows-reserve-gb`; no cache in RAM; direct SSD reads (FILE_FLAG_NO_BUFFERING).
+- Expert file on the SSD (`%LOCALAPPDATA%\arcinfer\zero\<model>.experts`): each expert whole, sequential, 4 KB aligned, in a
+  GPU-ready layout (blocks as in arcinfer), so one expert = one direct SSD read with no conversion. Missing →
+  created automatically the first time the model runs; present and matching (size, date, GGUF fingerprint) → used; not matching →
+  recreated. Can be deleted at any time (35B ~14 GB, Flash Next ~40–45 GB).
+- Phase 2 results (2026-10-14), `zero/` (`bin/runz.exe`, `bin/serverz.exe`; regular arcinfer unchanged):
+  - OpenCL→Level Zero shim (`zero/clrt.h`) bit-identical to arcinfer and faster (35B without streaming: TTFT
+    6.45 → 4.07 s, generation 16.9 → 18.3 tok/s; 27B identical, prefill the same).
+  - Expert streaming (`zero/expert_store.h`, `zero/xcache.h`, `-DXCACHE` kernels in `zero/kernels/decode.cl`): expert
+    file 15.1 GB (41 layers including MTP) created once in 144 s; results **bit-identical** to arcinfer (chunk
+    2048, logits of 48 tokens exactly the same).
+  - Cache: one LRU list per record size; the prompt uses the tail of the list as a scratch area (does not
+    sweep the cache); host staging 2 x 64 records (244 MiB); prefetch of the next layer in a thread while the GPU works;
+    cache contents saved (`.lru`) and reloaded at start (10.6 GB in ~6 s).
+  - 35B, context 262K, chunk 4096 (p1, 2216 tokens, generating 256 tokens): **MTP 22.2 tok/s** (cache 79 %, hit 97.6 %),
+    without MTP 19.3 tok/s (hit 98.6 %), TTFT 3.3–3.5 s (~640–680 tok/s; arcinfer 4.1–6.5 s). Full cache: MTP
+    23.9 tok/s.
+  - Memory limits: GPU budget − 1.4 GiB (1.13 GiB left → kernels fail: out of device memory) and RAM − 14 GiB.
+  - Zero server: chat, tool calls, images + MTP together (context 262K, cache ~70 %) work; **still an occasional
+    "device lost" crash on the second image** — ✅ fixed 2026-10-14 (zeKernelSetIndirectAccess for the
+    XCACHE kernels; 5/5 server sequences pass).
+- Phase 2 ✅ (original plan; results above) MoE engine on Level Zero + LRU cache + prefetch from the router; test 35B 262K, results must be identical. Also
+  **with MTP**: generation target **~21 tok/s** at 262K (arcinfer currently 22.3 tok/s but only 40K); the MTP block ~0.46 GB
+  lives in GPU memory too (expert cache ~80 %), the hit rate of verifying 2 tokens per step is measured as well.
+- Prefill: **chunk 4096** (experts not in the cache are read from the SSD once per chunk; per token half of
+  chunk 2048; buffer +~0.3 GB). Experts for the prompt are streamed through a separate scratch buffer, not into the LRU cache,
+  so one long prompt does not sweep the cache that generation uses.
+- Phase 3 ⏳ Qwen3.8 Flash Next (qwen4exp: QSA, n-gram table on SSD, 512 experts top-10).
 
 
-## F12: API server lengkap (diminta 2026-10-15, semua tahap; tanpa --api-key)
+## F12: complete server API (requested 2026-10-15, all stages; no --api-key)
 
-Semua di sisi server (`tools/server.cpp`); `zero/serverz.cpp` dibuat otomatis dari situ saat build supaya kedua
-server selalu sama. Setiap tahap diuji dengan klien sungguhan (paket Python openai / ollama / anthropic, curl) dan
-fitur lama dicek tetap sama (Pi, tool call, gambar, MTP).
+All on the server side (`tools/server.cpp`); `zero/serverz.cpp` is generated from it automatically at build time so both
+servers are always the same. Each stage is tested with real clients (Python openai / ollama / anthropic packages, curl) and
+existing features are checked to stay the same (Pi, tool calls, images, MTP).
 
-| Tahap | Isi | Status |
+| Stage | Content | Status |
 |---|---|---|
-| 12.0 | serverz.cpp dibuat dari server.cpp saat build | ✅ (kode; tes malam) |
-| 12.1 | `frequency_penalty`, `repeat_penalty`, `logit_bias`, `tool_choice` (none / auto / required / fungsi tertentu) | ✅ kode (tool_choice lewat pembuka tool call yang dipaksa); tes malam |
-| 12.2 | `logprobs` + `top_logprobs`; `n` > 1 (snapshot state prompt) | ✅ kode (n > 1 tanpa streaming); tes malam |
-| 12.3 | `/v1/completions` (prompt mentah, autocomplete kode) | ✅ kode; tes malam |
-| 12.4 | `response_format`: `json_object`, `json_schema` (sampling dibatasi, JSON pasti valid) | ✅ kode + 26 tes unit CPU; tes model malam |
-| 12.5 | API Ollama: `/api/chat`, `/api/generate`, `/api/tags`, `/api/show` (NDJSON) | ✅ kode (+ /api/tags, /api/show, /api/ps, /api/version); tes malam |
-| 12.6 | `/v1/messages` (Anthropic: tool_use, streaming event) | ✅ kode (+ /v1/messages/count_tokens); tes malam |
-| 12.7 | `/v1/responses` (OpenAI Responses API, Codex CLI) | ✅ kode; tes malam |
-| 12.8 | `/v1/audio/transcriptions` (multipart upload, encoder audio Gemma) | ✅ kode (+ /v1/audio/translations); tes malam |
-| 12.9 | `/v1/embeddings` dengan EmbeddingGemma 2 (`unsloth/embeddinggemma-2-GGUF`, BF16 558 MB; mmproj BF16 982 MB opsional untuk gambar/audio) + pilihan fitur tanya-jawab dokumen (RAG) di web UI | ⏳ besok (2026-10-16), unduh dengan izin; user sedang mengunduh Qwen3.8 Flash Next |
-| 12.10 | Launcher: base URL + tombol copy; help; README / CARA_PAKAI | ✅ (launcher: alamat API per format + Copy; dokumen); tes tampilan malam |
+| 12.0 | serverz.cpp generated from server.cpp at build time | ✅ (code; overnight test) |
+| 12.1 | `frequency_penalty`, `repeat_penalty`, `logit_bias`, `tool_choice` (none / auto / required / a specific function) | ✅ code (tool_choice through a forced tool-call opener); overnight test |
+| 12.2 | `logprobs` + `top_logprobs`; `n` > 1 (prompt state snapshot) | ✅ code (n > 1 without streaming); overnight test |
+| 12.3 | `/v1/completions` (raw prompt, code autocomplete) | ✅ code; overnight test |
+| 12.4 | `response_format`: `json_object`, `json_schema` (constrained sampling, JSON always valid) | ✅ code + 26 CPU unit tests; overnight model test |
+| 12.5 | Ollama API: `/api/chat`, `/api/generate`, `/api/tags`, `/api/show` (NDJSON) | ✅ code (+ /api/tags, /api/show, /api/ps, /api/version); overnight test |
+| 12.6 | `/v1/messages` (Anthropic: tool_use, streaming events) | ✅ code (+ /v1/messages/count_tokens); overnight test |
+| 12.7 | `/v1/responses` (OpenAI Responses API, Codex CLI) | ✅ code; overnight test |
+| 12.8 | `/v1/audio/transcriptions` (multipart upload, Gemma audio encoder) | ✅ code (+ /v1/audio/translations); overnight test |
+| 12.9 | `/v1/embeddings` with EmbeddingGemma 2 (`unsloth/embeddinggemma-2-GGUF`, BF16 558 MB; optional BF16 mmproj 982 MB for images/audio) + a document question-answering (RAG) feature option in the web UI | ⏳ tomorrow (2026-10-16), download with permission; user is downloading Qwen3.8 Flash Next |
+| 12.10 | Launcher: base URL + copy button; help; README / USAGE.md | ✅ (launcher: API address per format + Copy; docs); overnight display test |
 
-## F13: arcinferzero jadi satu-satunya engine (keputusan 2026-10-15)
+## F13: arcinferzero becomes the only engine (decision 2026-10-15)
 
-Kalau zero sudah lolos semua, OpenCL tidak dipakai lagi untuk menjalankan model (OpenCL.dll tetap dipakai hanya
-untuk mengompilasi kernel).
+Once zero passes everything, OpenCL is no longer used to run models (OpenCL.dll is still used only
+to compile kernels).
 
-| Langkah | Isi | Status |
+| Step | Content | Status |
 |---|---|---|
-| 13.1 | (Gemma + drafter ikut pindah: disetujui 2026-10-15, kode drafter tidak diubah) Validasi semua model di zero: 4B, 9B, 27B, 35B, Gemma 12B / E4B (identik bit vs arcinfer, kecepatan bergantian 3x, MTP, drafter Gemma, gambar, audio, Pi, tool call) | ✅ 2026-10-16 malam: semua lolos (identik, MTP, gambar/audio, Pi, tool call); lihat docs/arcinferzero-log.md |
-| 13.2 | Zero jadi bawaan: `bin\server.exe` dibangun dari engine zero, `serverz.exe` dihapus (begitu juga `runz.exe` → `run.exe`); OpenCL sementara sebagai `server-opencl.exe` (`--opencl`); `--zero` tidak perlu | 🟡 2026-10-16: zero jadi bawaan di arc-server / pi-arc / launcher (`-OpenCL` / `--opencl` untuk engine lama); exe belum diganti nama |
-| 13.3 | Dipakai sehari-hari 1–2 minggu | ⏳ |
-| 13.4 | Hapus jalur OpenCL (src/engine.h OpenCL, server.exe / run.exe lama) | ⏳ |
+| 13.1 | (Gemma + drafter move too: approved 2026-10-15, drafter code unchanged) Validate all models on zero: 4B, 9B, 27B, 35B, Gemma 12B / E4B (bit-identical vs arcinfer, speed alternating 3x, MTP, Gemma drafter, images, audio, Pi, tool calls) | ✅ 2026-10-16 night: all pass (identical, MTP, images/audio, Pi, tool calls); see docs/arcinferzero-log.md |
+| 13.2 | Zero becomes the default: `bin\server.exe` built from the zero engine, `serverz.exe` removed (likewise `runz.exe` → `run.exe`); OpenCL temporarily as `server-opencl.exe` (`--opencl`); `--zero` not needed | 🟡 2026-10-16: zero is the default in arc-server / pi-arc / launcher (`-OpenCL` / `--opencl` for the old engine); exes not renamed yet |
+| 13.3 | Daily use for 1–2 weeks | ⏳ |
+| 13.4 | Remove the OpenCL path (src/engine.h OpenCL, old server.exe / run.exe) | ⏳ |
 
-## F14: drafting paralel dan DFlash di Level Zero (setelah F13)
+## F14: parallel drafting and DFlash on Level Zero (after F13)
 
-Diminta 2026-10-15: Level Zero dimantapkan dulu (F13), lalu:
-- Drafting paralel: drafter (MTP / drafter Gemma) jalan di antrian Level Zero terpisah, tumpang tindih dengan
-  verifikasi model utama; ukur dulu seberapa banyak yang bisa tumpang tindih di iGPU (satu engine komputasi).
-- DFlash (drafter blok, mis. z-lab/Qwen3.5-27B-DFlash): satu langkah menebak satu blok token; sasaran utama 27B
-  (sekarang 5–7 tok/s). Unduh model hanya dengan izin.
+Requested 2026-10-15: stabilize Level Zero first (F13), then:
+- Parallel drafting: the drafter (MTP / Gemma drafter) runs on a separate Level Zero queue, overlapping with
+  main-model verification; first measure how much can overlap on the iGPU (one compute engine).
+- DFlash (block drafter, e.g. z-lab/Qwen3.5-27B-DFlash): one step guesses a block of tokens; main target 27B
+  (currently 5–7 tok/s). Download models only with permission.
 
-F14 rincian (2026-10-15, dari config.json + README `z-lab/Qwen3.8-27B-DFlash2`, mirror `incoai/...`; bobot belum diunduh):
-- Drafter DFlash2: 5 layer gaya Qwen3 (hidden 5120, 32 head / 8 KV, head 128, FFN 17408, sliding window 2048,
-  non-kausal), masukan hidden state layer 5 / 19 / 33 / 47 / 61 model utama, blok 8 token (7 tebakan), top-16
-  kandidat per posisi + selector (rank 256), konvolusi dua-tap (kernel 2, grup 16); 3,85 GB BF16 (~1,9B),
-  Q8 ~2 GB / Q4 ~1,1 GB. Apache-2.0.
-- Tabel resmi (H200): token diterima per langkah MTP-7 vs DFlash2: GSM8K 5,02 / 5,46; HumanEval 3,91 / 4,39;
-  MT-Bench 3,74 / 4,10. Qwen3.8 punya MTP 7 tebakan; arcinfer sekarang maksimal 3.
-- Urutan: (1) MTP 27B sampai 7 tebakan (verifikasi blok panjang + rollback state DeltaNet tanpa 7 salinan penuh),
-  (2) DFlash2 di atasnya (unduh 3,85 GB dengan izin). Perkiraan kasar 27B: 10–12 tok/s bila ~4 token diterima.
+F14 details (2026-10-15, from config.json + README of `z-lab/Qwen3.8-27B-DFlash2`, mirror `incoai/...`; weights not downloaded yet):
+- DFlash2 drafter: 5 Qwen3-style layers (hidden 5120, 32 heads / 8 KV, head 128, FFN 17408, sliding window 2048,
+  non-causal), input = hidden states of main-model layers 5 / 19 / 33 / 47 / 61, blocks of 8 tokens (7 guesses), top-16
+  candidates per position + selector (rank 256), two-tap convolution (kernel 2, group 16); 3.85 GB BF16 (~1.9B),
+  Q8 ~2 GB / Q4 ~1.1 GB. Apache-2.0.
+- Official table (H200): tokens accepted per step MTP-7 vs DFlash2: GSM8K 5.02 / 5.46; HumanEval 3.91 / 4.39;
+  MT-Bench 3.74 / 4.10. Qwen3.8 has MTP with 7 guesses; arcinfer currently at most 3.
+- Order: (1) 27B MTP up to 7 guesses (long-block verification + DeltaNet state rollback without 7 full copies),
+  (2) DFlash2 on top of that (download 3.85 GB with permission). Rough estimate for 27B: 10–12 tok/s if ~4 tokens are accepted.
 
-## Paket arcinferzero (2026-10-15): model MoE tanpa GGUF asli
+## arcinferzero package (2026-10-15): MoE models without the original GGUF
 
-- `serverz --pack <gguf>` (part 1 bila dipecah): `%LOCALAPPDATA%\arcinfer\zero\models\<nama>\<nama>.gguf` (bobot
-  non-expert + semua metadata + expert sebagai tensor "virtual") dan `<nama>.experts` (file expert). Sumber boleh
-  dari flashdisk; setelah itu GGUF asli boleh dipindah. Paket muncul di daftar model (serverz) dan hanya jalan
-  dengan streaming.
-- GGUF reader: model berbagi part (`-00001-of-0000N`) dibaca sebagai satu; tipe metadata disimpan untuk ditulis ulang.
-- Uji: salin ulang GGUF drafter Gemma identik (45 kunci, 49 tensor). ⏳ malam: paket 35B (buat, jalankan tanpa
-  GGUF asli, hasil identik bit dengan zero biasa). Flash Next (JANGAN hapus GGUF-nya: user yang memutuskan kapan, setelah backup): unduh (IQ3_S 83,6 GB, 2 part) → backup ke flashdisk
-  (1 TB, exFAT/NTFS) → hapus dari SSD → `--pack` dari flashdisk; arsitektur `qwen4exp` dikerjakan terpisah.
+- `serverz --pack <gguf>` (part 1 if split): `%LOCALAPPDATA%\arcinfer\zero\models\<name>\<name>.gguf` (non-expert
+  weights + all metadata + experts as "virtual" tensors) and `<name>.experts` (expert file). The source may
+  be on a flash drive; afterwards the original GGUF may be moved. The package shows up in the model list (serverz) and only runs
+  with streaming.
+- GGUF reader: split models (`-00001-of-0000N`) are read as one; metadata types are kept so they can be rewritten.
+- Test: re-copying the Gemma drafter GGUF is identical (45 keys, 49 tensors). ⏳ overnight: 35B package (create, run without the
+  original GGUF, results bit-identical to regular zero). Flash Next (DO NOT delete its GGUF: the user decides when, after backup): download (IQ3_S 83.6 GB, 2 parts) → back up to flash drive
+  (1 TB, exFAT/NTFS) → delete from the SSD → `--pack` from the flash drive; the `qwen4exp` architecture is handled separately.
 
-## F15: dua percakapan sekaligus dan perbaikan tool call Gemma (diminta 2026-10-15)
+## F15: two conversations at once and Gemma tool-call fixes (requested 2026-10-15)
 
-Target (2026-10-15): E4B "minimal jago Pi" (semua tool Pi: read, bash, edit, write, web, browser).
-- [x] Tool call terbatasi skema untuk Gemma 4 (`tools/tool_constraint.h`, 12 unit test). Di server-new.exe.
-- [x] Qwen: snapshot ke-3 di awal giliran asisten setelah pesan user terakhir (server-new.exe). Template Qwen membuang
-      reasoning giliran lama begitu user menulis lagi, jadi tiap pesan baru di Pi memproses ulang semua dari akhir
-      system prompt (siang ini: 8K -> 4K cached, 10 s; di 57K: ~3 menit). Dengan slot ini: hanya giliran terakhir.
-- [x] Uji di GPU (malam 15 Okt, A1): Pi + Qwen 9B, dua pesan berturut-turut dengan tool call di antaranya: output
-      identik dengan proses dari nol; pesan baru 5,2 dtk vs 16,8 dtk tanpa snapshot.
-- [x] Uji di GPU (malam 15 Okt, A3): tes edit create_word.py (salinan di folder tiruan) dengan E4B,
-      ARC_TOOL_CONSTRAINT=0 vs 1: tool call sah 2/10 → 9/10.
-- [ ] Format XML Qwen (`<tool_call><function=...><parameter=...>`) dengan pembatas yang sama.
-- [ ] Tes Pi otomatis: tugas tetap (read, run, edit kecil, edit besar, write, web_search/fetch, browser) di folder
-      kosong, skor per model (E4B, 12B, 4B, 9B, 35B), sebelum dan sesudah pembatas.
-- [ ] Kalau E4B masih kurang: fine-tune LoRA dengan percakapan Pi yang berhasil dari model besar (GPU cloud).
+Target (2026-10-15): E4B "at least good at Pi" (all Pi tools: read, bash, edit, write, web, browser).
+- [x] Schema-constrained tool calls for Gemma 4 (`tools/tool_constraint.h`, 12 unit tests). In server-new.exe.
+- [x] Qwen: a 3rd snapshot at the start of the assistant turn after the last user message (server-new.exe). The Qwen template drops
+      the reasoning of old turns as soon as the user writes again, so every new message in Pi reprocessed everything from the end of the
+      system prompt (this afternoon: 8K -> 4K cached, 10 s; at 57K: ~3 minutes). With this slot: only the last turn.
+- [x] GPU test (night of 15 Oct, A1): Pi + Qwen 9B, two consecutive messages with a tool call in between: output
+      identical to processing from scratch; new message 5.2 s vs 16.8 s without the snapshot.
+- [x] GPU test (night of 15 Oct, A3): create_word.py edit test (copy in a mock folder) with E4B,
+      ARC_TOOL_CONSTRAINT=0 vs 1: valid tool calls 2/10 → 9/10.
+- [ ] Qwen XML format (`<tool_call><function=...><parameter=...>`) with the same constraint.
+- [ ] Automated Pi tests: fixed tasks (read, run, small edit, large edit, write, web_search/fetch, browser) in an
+      empty folder, score per model (E4B, 12B, 4B, 9B, 35B), before and after the constraint.
+- [ ] If E4B is still not good enough: LoRA fine-tune on successful Pi conversations from large models (cloud GPU).
 
-- [x] Web UI compaction: ringkas otomatis saat konteks hampir penuh / server menolak, tombol Compact (CHANGELOG).
-- [x] Log teks mentah tool call: `ARC_LOG_TOOLCALLS=file.jsonl` (CARA_PAKAI).
-- [ ] Tool call Gemma: `edits` ganda diratakan; `path` yang hilang diisi dari satu-satunya file yang dibaca
-      (`read`) di percakapan itu (kalau lebih dari satu file: tidak ditebak); `&amp;` di perintah bash.
-- [ ] Slot tahap 1: beberapa cache percakapan, tidak dibagi rata: satu kolam, percakapan aktif memakai sesuai
-      kebutuhan; kalau penuh, slot yang paling lama tidak dipakai disimpan ke SSD (bukan dibuang) dan dimuat lagi saat
-      kembali. Di Level Zero (F13).
-- [ ] Slot tahap 2 = batch decode (continuous batching, seperti llama.cpp `-np` / vLLM; user 16 Okt: batch lebih umum
-      dari sekadar slot): beberapa permintaan dalam satu langkah GPU, bobot dibaca sekali (dense: total hampir 2x,
-      MoE: lebih kecil karena expert beda); MTP/drafter per permintaan; prefill disela. Tahap 1 (cache) jadi dasarnya.
-- [ ] Cek: web UI di browser headless Pi turun ke 4,9 tok/s (dugaan: GPU direbut render browser).
+- [x] Web UI compaction: automatic summary when the context is nearly full / the server refuses, Compact button (CHANGELOG).
+- [x] Raw tool-call text log: `ARC_LOG_TOOLCALLS=file.jsonl` (USAGE.md).
+- [ ] Gemma tool calls: flatten nested `edits`; fill a missing `path` from the only file read
+      (`read`) in that conversation (if more than one file: no guessing); `&amp;` in bash commands.
+- [ ] Slots stage 1: several conversation caches, not split evenly: one pool, active conversations use what they
+      need; when full, the least recently used slot is saved to the SSD (not discarded) and reloaded when it
+      comes back. On Level Zero (F13).
+- [ ] Slots stage 2 = batch decode (continuous batching, like llama.cpp `-np` / vLLM; user 16 Oct: batching is more general
+      than just slots): several requests in one GPU step, weights read once (dense: total nearly 2x,
+      MoE: less because experts differ); MTP/drafter per request; prefill interleaved. Stage 1 (cache) is its basis.
+- [ ] Check: web UI in Pi's headless browser drops to 4.9 tok/s (suspected: GPU taken by browser rendering).
 
-## Flash Next (qwen4exp): unduhan selesai 2026-10-15 13:02
+## Flash Next (qwen4exp): download finished 2026-10-15 13:02
 
-File (HF cache, JANGAN dihapus): `~/.cache/huggingface/hub/models--ISTA-DASLab--Qwen3.8-Flash-Next-GSQ-RCO-GGUF/snapshots/ed59f920.../IQ3_S/`
-part 1 54,8 GB (semua weight), part 2 28,8 GB (hanya `per_layer_token_embd` [160, 320.001.536] IQ4_NL, tabel n-gram).
-Header terbaca (v3, 1224 tensor). Arsitektur yang perlu dibuat:
-- 48 layer, hidden 2560, 3 DeltaNet : 1 attention penuh (sama pola Qwen3.6), MoE 512 expert, 10 aktif, ffn 640, + shared expert.
-- Hyper-connections: 4 aliran residual (10240 = 4 x 2560), low rank 320 (`hc_attn_*`, `hc_ffn_*`, `output_hc_*`).
-- Attention penuh: indexer sparse (4 head, key 128, top_k 2048) + `compress_ratios` 4 di layer attention.
-- PLE n-gram: tabel hash 320 juta baris x 160 (part 2), 1 baris per token -> dibaca langsung dari SSD (tidak perlu di GPU).
-- Tipe baru: 42 = Q2_0 (blok 64) di 9 `ffn_down_exps`; lainnya IQ3_S/IQ3_XXS/IQ2_S/IQ4_NL/IQ4_XS/Q4_K..Q6_K/BF16.
-- Belum ada MTP di GGUF ini. mmproj BF16 0,91 GB tersedia (belum diunduh, perlu izin).
-- Referensi: llama.cpp upstream mendukung (`-lm mmap --lazy-mode on`); GSQ/RCO di github IST-DASLab.
-Disk: C: sisa ~67 GB. Paket expert (~50 GB) muat tapi mepet -> utamakan baca expert langsung dari GGUF.
+File (HF cache, DO NOT delete): `~/.cache/huggingface/hub/models--ISTA-DASLab--Qwen3.8-Flash-Next-GSQ-RCO-GGUF/snapshots/ed59f920.../IQ3_S/`
+part 1 54.8 GB (all weights), part 2 28.8 GB (only `per_layer_token_embd` [160, 320,001,536] IQ4_NL, n-gram table).
+Header read (v3, 1224 tensors). Architecture to build:
+- 48 layers, hidden 2560, 3 DeltaNet : 1 full attention (same pattern as Qwen3.6), MoE 512 experts, 10 active, ffn 640, + shared expert.
+- Hyper-connections: 4 residual streams (10240 = 4 x 2560), low rank 320 (`hc_attn_*`, `hc_ffn_*`, `output_hc_*`).
+- Full attention: sparse indexer (4 heads, key 128, top_k 2048) + `compress_ratios` 4 in the attention layers.
+- N-gram PLE: hash table of 320 million rows x 160 (part 2), 1 row per token -> read directly from the SSD (no need for it on the GPU).
+- New type: 42 = Q2_0 (block 64) in 9 `ffn_down_exps`; others IQ3_S/IQ3_XXS/IQ2_S/IQ4_NL/IQ4_XS/Q4_K..Q6_K/BF16.
+- No MTP in this GGUF yet. BF16 mmproj 0.91 GB available (not downloaded, needs permission).
+- Reference: upstream llama.cpp supports it (`-lm mmap --lazy-mode on`); GSQ/RCO on IST-DASLab's GitHub.
+Disk: C: ~67 GB left. The expert package (~50 GB) fits but tightly -> prefer reading experts directly from the GGUF.
 
-## F16: optimasi kernel Level Zero semaksimal mungkin (diminta 2026-10-15, mulai malam itu)
+## F16: optimize the Level Zero kernels as far as possible (requested 2026-10-15, started that night)
 
-"Tanpa jalan pintas." Hanya jalur zero (kernels/*.cl lewat zero/clrt.h). Baseline dulu (prefill/decode tok/s per model).
-- [~] D1 Register spill (sebagian, lihat status di bawah): `ARC_ZE_KPROPS=1` mencetak private/spill per kernel; semua model + encoder mmproj; target 0 spill.
-- [~] D2 Flag compile Intel (256 GRF diuji per kernel, lihat status; subgroup 32 belum): large GRF (256 per thread / auto), subgroup 16 vs 32, opsi buffer > 4 GB; uji per kernel.
-- [ ] D3 Grouping/tiling: tile & bentuk work-group GEMM prefill, baris per subgroup GEMV decode, block read, SLM;
-      autotune per bentuk matriks per model, hasil disimpan.
-- [ ] D4 GEMM prefill tanpa XMX: GPU ini (Core Ultra 5 125H, Arc Xe-LPG 112 EU) TIDAK punya XMX
-      (matrix_multiply_accumulate dan 2d_block_io tidak ada); maksimalkan DP4a (sudah dipakai) + register blocking + fp16.
-- [~] D5 (decode 35B dsplit dan prefill Qwen selesai; sliding window Gemma / konteks pendek belum) Attention untuk konteks pendek (~1-4K), sedang (~16-32K), panjang (~128K-262K): decode split-K untuk konteks
-      panjang, prefill ala flash-attention (SLM, fp16/DP4a; tanpa XMX), sliding window Gemma, MTP verify multi-baris;
-      varian dipilih otomatis per panjang konteks; error diukur juga pada teks panjang.
-- [~] D6 mmproj (gambar Qwen/Gemma, audio Gemma) di Level Zero: jalan dan identik (15 Okt); optimasi kernelnya belum.
-- [~] E (MTP 1–7 draft identik selesai; draft paralel / pohon belum) Drafting paralel MTP di Level Zero (bagian F14): beberapa draft per langkah, verifikasi satu pass, output
-      identik; jumlah draft terbaik per model.
-Kebenaran ("pastikan error rate rendah"): urutan akumulasi baru = tidak bit-identik dengan OpenCL. Acuan = logit f32
-pada teks tetap (~2K token) per model; baseline error kernel sekarang diukur dulu. Syarat setiap perubahan: KL rata-rata
-<= baseline dan < 1e-3, top-1 >= baseline - 0,1 poin, perplexity naik < 0,1 %, greedy sama kecuali near-tie, tes tool
-call lolos, jawaban gambar/audio sama. Tidak memenuhi = tidak dipakai (sakelar ke kernel lama).
+"No shortcuts." Only the zero path (kernels/*.cl through zero/clrt.h). Baseline first (prefill/decode tok/s per model).
+- [~] D1 Register spill (partial, see status below): `ARC_ZE_KPROPS=1` prints private/spill per kernel; all models + mmproj encoders; target 0 spill.
+- [~] D2 Intel compile flags (256 GRF tested per kernel, see status; subgroup 32 not yet): large GRF (256 per thread / auto), subgroup 16 vs 32, option for buffers > 4 GB; test per kernel.
+- [ ] D3 Grouping/tiling: tile & work-group shape for prefill GEMM, rows per subgroup for decode GEMV, block reads, SLM;
+      autotune per matrix shape per model, results saved.
+- [ ] D4 Prefill GEMM without XMX: this GPU (Core Ultra 5 125H, Arc Xe-LPG 112 EU) does NOT have XMX
+      (matrix_multiply_accumulate and 2d_block_io are absent); maximize DP4a (already used) + register blocking + fp16.
+- [~] D5 (35B decode dsplit and Qwen prefill done; Gemma sliding window / short context not yet) Attention for short context (~1-4K), medium (~16-32K), long (~128K-262K): split-K decode for long
+      context, flash-attention-style prefill (SLM, fp16/DP4a; no XMX), Gemma sliding window, multi-row MTP verify;
+      variant picked automatically per context length; error measured on long text too.
+- [~] D6 mmproj (Qwen/Gemma images, Gemma audio) on Level Zero: works and identical (15 Oct); its kernels not optimized yet.
+- [~] E (MTP 1–7 drafts identical done; parallel / tree drafts not yet) Parallel MTP drafting on Level Zero (part of F14): several drafts per step, one-pass verification, output
+      identical; best number of drafts per model.
+Correctness ("make sure the error rate is low"): a new accumulation order = not bit-identical with OpenCL. Reference = f32 logits
+on fixed text (~2K tokens) per model; the current kernels' baseline error is measured first. Requirements for every change: mean KL
+<= baseline and < 1e-3, top-1 >= baseline - 0.1 points, perplexity up < 0.1 %, greedy the same except near-ties, tool-call
+tests pass, image/audio answers the same. Not met = not used (switch to the old kernel).
 
-### Status malam 15 Oktober (diperbarui terus)
+### Status, night of 15 October (updated continuously)
 
-- [x] A1–A5 lolos (snapshot giliran Qwen, preserve-thinking, pembatas tool call Gemma + Qwen, cache sesi,
-      compacting web UI). Lihat docs/arcinferzero-log.md.
-- [x] Baseline zero semua model (identik dgn OpenCL; 35B identik dgn chunk sama).
-- [x] E: MTP 1–7 draft benar (identik), rollback replay (1 salinan state). 4–7 draft belum lebih cepat dari 3:
-      tiap draft = satu lintasan blok MTP + kepala output penuh.
-- [x] D1 GEMV TB=8 (4–7 draft): spill 9 KB → ≤ 2,9 KB, 3,8 → 9,2 tok/s (27B, 5 draft).
-- [x] D1 attention decode: spill hilang dengan 256 GRF; 35B pakai attn_dsplit (1,16 → 0,94 ms/layer di 64K),
-      verifikasi tetap identik bit. Koreksi: Level Zero MEMAKAI flag 256 GRF; kesimpulan sebelumnya salah karena
-      sakelar env saya sendiri kosong (lihat log, bagian KOREKSI).
-- [x] Default draft MTP zero: 35B 3, 4B 3, 9B 2, 27B 3, Gemma 2. Perbaikan: koma JSON setelah key terakhir,
-      `/api/tags` dengan `--no-swap`, attn_prep_g Gemma 256 GRF (E4B +1–2 %).
-- [x] Spill Gemma: attn_prep_g HD512 4,6 KB → 0, add_norm_quant 3,7 KB → 64 B (identik, E4B/12B sedikit lebih cepat).
-- [ ] Sisa spill: gdn_conv 1 KB (256 GRF: 0 spill, tidak lebih cepat), moe_gateup_q 2 KB (256 GRF tidak lebih cepat).
-- [x] D5 prefill attention Qwen: attn_q8 256 GRF (sudah dipakai engine) mengalahkan semua varian attn_ps
-      (64K: 4B/9B 926 vs 1.117 ms, 35B 923 vs 1.138, 27B 1.516 vs 1.669). Tidak ada perubahan.
-- [ ] Draft lebih murah: kepala draft ringkas (`ARC_DRAFT_VOCAB`) ada tapi off (rugi untuk Bahasa Indonesia);
-      ide berikut: daftar token dinamis (token di konteks + yang sering), atau draft paralel (pohon) per lintasan.
-- [ ] Server kadang lambat ±½ sepanjang umurnya (35B: 26 → 12 tok/s, log identik), terutama bila dijalankan
-      tepat setelah server lain mati; jeda 5 dtk membantu. runz --bench-pp kini mencetak waktu per langkah (16 Okt:
-      7 run E4B 32K stabil, lambat tidak muncul; dugaan: satu jeda besar, bukan GPU lambat terus).
-      17 Okt (F17): muncul lagi di runz 35B (sekitar 1 dari 5 run, 14-16 vs 21-23 tok/s, pekerjaan identik, hit
-      expert 100 %). Profil: semua kernel bobot dense (lm_head, qkv, z, ssm_out, q, o, drafter) ~2x lebih lambat,
-      kernel expert (pool 1 GB) normal; run lambat juga load-nya paling lama. Dugaan: penempatan halaman fisik
-      buffer bobot. Dicoba, tidak dipakai: arena 512 MB (35B +2 % dan lebih stabil, tapi prompt 27B -2..5 %),
-      alignment 2 MB, pangkas working set saat load (efek tidak terlihat; gejala tidak muncul tiap run).
+- [x] A1–A5 pass (Qwen turn snapshot, preserve-thinking, Gemma + Qwen tool-call constraint, session cache,
+      web UI compacting). See docs/arcinferzero-log.md.
+- [x] Zero baseline for all models (identical to OpenCL; 35B identical with the same chunk).
+- [x] E: MTP 1–7 drafts correct (identical), replay rollback (1 state copy). 4–7 drafts not yet faster than 3:
+      each draft = one pass through the MTP block + the full output head.
+- [x] D1 GEMV TB=8 (4–7 drafts): spill 9 KB → ≤ 2.9 KB, 3.8 → 9.2 tok/s (27B, 5 drafts).
+- [x] D1 decode attention: spill gone with 256 GRF; 35B uses attn_dsplit (1.16 → 0.94 ms/layer at 64K),
+      verification still bit-identical. Correction: Level Zero DOES USE the 256 GRF flag; the earlier conclusion was wrong because
+      my own env switch was empty (see log, CORRECTION section).
+- [x] Default zero MTP drafts: 35B 3, 4B 3, 9B 2, 27B 3, Gemma 2. Fixes: JSON comma after the last key,
+      `/api/tags` with `--no-swap`, Gemma attn_prep_g 256 GRF (E4B +1–2 %).
+- [x] Gemma spill: attn_prep_g HD512 4.6 KB → 0, add_norm_quant 3.7 KB → 64 B (identical, E4B/12B slightly faster).
+- [ ] Remaining spill: gdn_conv 1 KB (256 GRF: 0 spill, not faster), moe_gateup_q 2 KB (256 GRF not faster).
+- [x] D5 Qwen prefill attention: attn_q8 256 GRF (already used by the engine) beats all attn_ps variants
+      (64K: 4B/9B 926 vs 1,117 ms, 35B 923 vs 1,138, 27B 1,516 vs 1,669). No change.
+- [ ] Cheaper drafts: a compact draft head (`ARC_DRAFT_VOCAB`) exists but is off (a loss for Indonesian);
+      next ideas: a dynamic token list (tokens in the context + frequent ones), or parallel (tree) drafts per pass.
+- [ ] The server is sometimes ±½ slower for its whole lifetime (35B: 26 → 12 tok/s, identical logs), especially when started
+      right after another server exits; a 5 s pause helps. runz --bench-pp now prints per-step times (16 Oct:
+      7 E4B 32K runs stable, the slowdown did not appear; suspected: one big pause, not a GPU that stays slow).
+      17 Oct (F17): showed up again in runz 35B (about 1 in 5 runs, 14-16 vs 21-23 tok/s, identical work, expert
+      hit 100 %). Profile: all dense weight kernels (lm_head, qkv, z, ssm_out, q, o, drafter) ~2x slower,
+      expert kernels (1 GB pool) normal; slow runs also have the longest load. Suspected: physical page placement of the
+      weight buffers. Tried, not used: 512 MB arena (35B +2 % and more stable, but 27B prompt -2..5 %),
+      2 MB alignment, trimming the working set during load (no visible effect; the symptom does not appear every run).
 
-## F17: kerja akhir pekan, Jumat 16 Okt malam → Senin 19 Okt 08:00 (laptop ditinggal)
+## F17: weekend work, Friday 16 Oct night → Monday 19 Oct 08:00 (laptop left unattended)
 
-Fokus: kecepatan 27B di arcinferzero. Aturan tetap: hasil identik per bit dengan sebelumnya (atau, untuk drafter,
-jawaban identik dengan tanpa drafter), tes di folder scratch, server tes di port 8091 dan selalu dimatikan, RAM
-Windows >= 14 GB, GGUF tidak dihapus, jalur drafter Gemma tidak diubah, tidak ada unduhan lain selain DFlash2
-(sudah diizinkan), push ke GitHub hanya kalau diizinkan. Setiap perubahan dicatat di docs/arcinferzero-log.md.
+Focus: 27B speed on arcinferzero. Standing rules: results bit-identical to before (or, for the drafter,
+answers identical to running without the drafter), tests in a scratch folder, test server on port 8091 and always shut down, Windows
+RAM >= 14 GB, GGUFs not deleted, Gemma drafter path unchanged, no downloads other than DFlash2
+(already allowed), push to GitHub only when allowed. Every change is recorded in docs/arcinferzero-log.md.
 
-| # | Pekerjaan | Perkiraan | Target | Syarat lolos |
+| # | Work | Estimate | Target | Pass criteria |
 |---|---|---|---|---|
-| 17.1 | GEMV IQ3_S / IQ3_XXS (dan IQ2_*) lebih cepat: bench GEMV khusus zero per jenis kuantisasi, varian codebook (SLM / register / konstanta), cara membuka indeks + tanda, baris per sub-group; urutan penjumlahan tetap | 2–4 jam | FFN 27B 56–60 → ≥ 68 GB/s; 27B +5–10 % | logit identik (run vs runz) 4B, 9B, 27B, 35B; kecepatan bergantian 3x |
-| 17.2 | Gabung kernel kecil: gate + up FFN satu kernel; kernel kecil DeltaNet (gates, conv, update state, norm) | 2–3 jam | jeda antar-kernel 4 % → ≤ 2 %; 27B +2–4 % | sama dengan 17.1 |
-| 17.3 | DFlash2 untuk 27B: (a) konversi safetensors BF16 → GGUF (bobot ke Q8_0, selector + konvolusi apa adanya); (b) acuan CPU numpy dari kode z-lab/dflash (model.py), dicek dengan hidden state yang di-dump dari runz; (c) drafter di GPU: fc + hidden_norm, 5 layer (konvolusi dua-tap, attention non-kausal sliding 2048 atas fitur konteks, MLP), kepala output 27B untuk 7 posisi, top-16 + selector; (d) simpan hidden state layer 5/19/33/47/61 saat verifikasi; (e) verifikasi blok 8 memakai jalur MTP 7 draft yang sudah ada (rollback DeltaNet replay); (f) runz + server (`--drafter dflash`) | 15–25 jam | 27B ±9 → 12–15 tok/s | jawaban identik dengan tanpa drafter (kode + Indonesia, suhu 0); token draft = acuan numpy; tidak ada crash 20 permintaan berturut-turut |
-| 17.4 | (bila 17.3 selesai) Setel DFlash2: panjang blok efektif, kuantisasi drafter (Q8_0 vs Q4), sampling suhu > 0 (rejection sampling seperti acuan), konteks panjang | 3–6 jam | kecepatan terbaik per jenis jawaban | sama dengan 17.3 |
-| 17.5 | (bila waktu sisa) Draft MTP lebih murah untuk model lain (daftar token dinamis); atau mulai KV berhalaman untuk slot | sisa waktu | — | identik |
-| 17.6 | Regresi penuh semua model (identitas, gambar/audio, MTP, tool call, API, Pi smoke), dokumen, laporan | 3–4 jam | semua lolos | — |
+| 17.1 | Faster IQ3_S / IQ3_XXS (and IQ2_*) GEMV: zero-specific GEMV bench per quantization type, codebook variants (SLM / registers / constants), how indices + signs are unpacked, rows per sub-group; summation order unchanged | 2–4 hours | 27B FFN 56–60 → ≥ 68 GB/s; 27B +5–10 % | identical logits (run vs runz) 4B, 9B, 27B, 35B; speed alternating 3x |
+| 17.2 | Fuse small kernels: FFN gate + up in one kernel; small DeltaNet kernels (gates, conv, state update, norm) | 2–3 hours | gaps between kernels 4 % → ≤ 2 %; 27B +2–4 % | same as 17.1 |
+| 17.3 | DFlash2 for 27B: (a) convert BF16 safetensors → GGUF (weights to Q8_0, selector + convolution as is); (b) CPU numpy reference from the z-lab/dflash code (model.py), checked with hidden states dumped from runz; (c) drafter on the GPU: fc + hidden_norm, 5 layers (two-tap convolution, non-causal sliding-2048 attention over context features, MLP), 27B output head for 7 positions, top-16 + selector; (d) save hidden states of layers 5/19/33/47/61 during verification; (e) block-8 verification using the existing 7-draft MTP path (DeltaNet replay rollback); (f) runz + server (`--drafter dflash`) | 15–25 hours | 27B ±9 → 12–15 tok/s | answers identical to running without the drafter (code + Indonesian, temperature 0); draft tokens = numpy reference; no crash over 20 consecutive requests |
+| 17.4 | (if 17.3 is done) Tune DFlash2: effective block length, drafter quantization (Q8_0 vs Q4), sampling at temperature > 0 (rejection sampling as in the reference), long context | 3–6 hours | best speed per kind of answer | same as 17.3 |
+| 17.5 | (if time remains) Cheaper MTP drafts for other models (dynamic token list); or start paged KV for slots | remaining time | — | identical |
+| 17.6 | Full regression for all models (identity, images/audio, MTP, tool calls, API, Pi smoke), docs, report | 3–4 hours | all pass | — |
 
-Jadwal kasar (diubah sesuai hasil; pekerjaan yang gagal syarat dibatalkan, tidak dipaksakan):
-- Jumat malam: 17.1, lalu 17.2.
-- Sabtu: 17.3 a–c (konversi, acuan numpy, drafter di GPU).
-- Minggu: 17.3 d–f (integrasi, server), 17.4.
-- Minggu malam – Senin 04:00: 17.5 bila ada waktu; Senin 04:00–07:30: 17.6.
-- Senin 07:30 berhenti tes; 07:40 rapikan: semua proses tes dihentikan, server DIBIARKAN MATI (keputusan user),
-  laporan akhir.
+Rough schedule (adjusted to results; work that fails its criteria is dropped, not forced):
+- Friday night: 17.1, then 17.2.
+- Saturday: 17.3 a–c (conversion, numpy reference, drafter on the GPU).
+- Sunday: 17.3 d–f (integration, server), 17.4.
+- Sunday night – Monday 04:00: 17.5 if there is time; Monday 04:00–07:30: 17.6.
+- Monday 07:30 stop testing; 07:40 tidy up: all test processes stopped, server LEFT OFF (user's decision),
+  final report.
 
-**Status (16 Okt malam):**
-- [x] Bagian A: GEMM 16 token berdampingan (+3-7 %), attention P·V (-12..17 %); prefetch decode, split, trik tanda
-  GEMV dicoba, tidak dipakai (docs/lessons §5).
-- [x] Flash Next jalan (engine, PLE, QSA, server): KL chat pendek 0,0014; generate ±4 tok/s; commit 9788df0.
-- [ ] Flash Next: validasi QSA di 3.566 token vs acuan CPU; kecepatan (cache 12 %, satu pool); MTP tidak ada.
-- [ ] DFlash2 untuk 27B: kode drafter ditulis (zero/engine.h dflash_*, --dflash DIR), belum diuji.
+**Status (16 Oct night):**
+- [x] Part A: GEMM with 16 tokens side by side (+3-7 %), attention P·V (-12..17 %); decode prefetch, split, GEMV sign
+  trick tried, not used (docs/lessons §5).
+- [x] Flash Next runs (engine, PLE, QSA, server): short-chat KL 0.0014; generation ±4 tok/s; commit 9788df0.
+- [ ] Flash Next: validate QSA at 3,566 tokens vs the CPU reference; speed (cache 12 %, one pool); no MTP.
+- [ ] DFlash2 for 27B: drafter code written (zero/engine.h dflash_*, --dflash DIR), not tested yet.
 
-**Urutan baru (keputusan user 16 Okt siang): Flash Next dulu.**
-1. Flash Next (qwen4exp) di arcinferzero, memakai ulang jalur 35B (streaming expert SSD + cache GPU, routing MoE,
-   DeltaNet, tokenizer/template/server). Baru: tipe Q2_0 (id 42), hyper-connections (4 aliran residual, low rank 320),
-   attention sparse (indexer top-2048, kompresi x4), MoE 512 expert / 10 aktif + shared expert, tabel n-gram PLE
-   (part 2, 26,8 GiB IQ4_NL) dibaca dari SSD per token, mmproj bila keluarga Qwen-VL. Acuan: llama.cpp upstream
-   (qwen4exp) + acuan CPU f32 sendiri. Expert dibaca langsung dari GGUF (C: sisa 81 GB). Perkiraan 20–30 jam.
-   Syarat lolos: acuan CPU vs GPU (KL kecil, greedy sama), jawaban masuk akal (kode + Indonesia), server + Pi jalan,
-   tidak ada crash 20 permintaan; ukur prompt dan generate (perkiraan 5–8 tok/s, prompt 150–250 tok/s).
-2. DFlash2 untuk 27B (17.3/17.4) langsung setelah Flash Next (keputusan user: Flash Next + DFlash2 dulu).
-3. 17.1 + 17.2 (±6 jam) bila ada sisa waktu.
-4. 17.6 regresi + laporan (Senin 04:00–07:30).
+**New order (user decision 16 Oct midday): Flash Next first.**
+1. Flash Next (qwen4exp) on arcinferzero, reusing the 35B path (SSD expert streaming + GPU cache, MoE routing,
+   DeltaNet, tokenizer/template/server). New: Q2_0 type (id 42), hyper-connections (4 residual streams, low rank 320),
+   sparse attention (top-2048 indexer, x4 compression), MoE 512 experts / 10 active + shared expert, n-gram PLE table
+   (part 2, 26.8 GiB IQ4_NL) read from the SSD per token, mmproj if Qwen-VL family. Reference: upstream llama.cpp
+   (qwen4exp) + our own f32 CPU reference. Experts read directly from the GGUF (C: 81 GB left). Estimate 20–30 hours.
+   Pass criteria: CPU vs GPU reference (small KL, same greedy), sensible answers (code + Indonesian), server + Pi work,
+   no crash over 20 requests; measure prompt and generation (estimate 5–8 tok/s, prompt 150–250 tok/s).
+2. DFlash2 for 27B (17.3/17.4) right after Flash Next (user decision: Flash Next + DFlash2 first).
+3. 17.1 + 17.2 (±6 hours) if time remains.
+4. 17.6 regression + report (Monday 04:00–07:30).
 
-Minimalkan error (permintaan user): setiap tahap dicek terhadap acuan CPU sebelum lanjut; setelah mengubah kode
-bersama (zero/engine.h, kernels, server) model lama diuji ulang (4B, 27B, 35B, E4B: logit identik per bit vs sebelum,
-gambar/audio, MTP); yang gagal dibatalkan. Push ke GitHub diizinkan (user, 16 Okt siang) setiap tahap yang lolos,
-setelah cek path pribadi / rahasia / file besar / CRLF.
+Minimize error (user request): every stage is checked against the CPU reference before moving on; after changing shared
+code (zero/engine.h, kernels, server) the existing models are retested (4B, 27B, 35B, E4B: logits bit-identical vs before,
+images/audio, MTP); whatever fails is dropped. Pushing to GitHub is allowed (user, 16 Oct midday) for every stage that passes,
+after checking for private paths / secrets / large files / CRLF.
 
-Model kecil (4B, 9B, 12B, E4B) hanya di D:\models (flashdisk, kadang putus setelah sleep; daftar model melewatinya bila
-tidak menjawab 2 dtk). Regresi model kecil dibaca dari D:; bila D: putus, dilewati dan dicatat di laporan (user: tidak
-disalin ke C:). Ruang C: 82 GB: cukup bahkan bila Flash Next ternyata butuh file expert terpisah (±47 GB).
+Small models (4B, 9B, 12B, E4B) are only on D:\models (flash drive, sometimes disconnects after sleep; the model list skips it if
+it does not respond within 2 s). Small-model regression is read from D:; if D: is disconnected, it is skipped and noted in the report (user: not
+to be copied to C:). C: space 82 GB: enough even if Flash Next turns out to need a separate expert file (±47 GB).
 
-Ukuran Flash Next (header part 1): 1.223 tensor, 51,0 GiB: expert 46,8 GiB (512 x 48 layer, ±2 MiB per expert),
-non-expert ±4,2 GiB (attn_qkv 0,66, output 0,49, ssm_out 0,41, attn_gate 0,35, token_embd 0,31, hc_* 4 x 0,29,
-attn_q 0,24, shared expert 0,14, router 0,12, ...). Part 2: per_layer_token_embd IQ4_NL [160, 320.001.536] 26,8 GiB.
+Flash Next size (part 1 header): 1,223 tensors, 51.0 GiB: experts 46.8 GiB (512 x 48 layers, ±2 MiB per expert),
+non-expert ±4.2 GiB (attn_qkv 0.66, output 0.49, ssm_out 0.41, attn_gate 0.35, token_embd 0.31, hc_* 4 x 0.29,
+attn_q 0.24, shared expert 0.14, router 0.12, ...). Part 2: per_layer_token_embd IQ4_NL [160, 320,001,536] 26.8 GiB.
 
-Keputusan user (16 Okt pagi): mulai nanti malam saat user bilang (server dipakai user sampai sore); push ke GitHub
-setiap tahap yang lolos (diubah 16 Okt siang; awalnya commit lokal saja); Senin pagi server dibiarkan mati; laptop dijaga tetap menyala lewat
-aplikasi selama kerja.
+User decisions (16 Oct morning): start tonight when the user says so (the server is in use by the user until late afternoon); push to GitHub
+for every stage that passes (changed 16 Oct midday; originally local commits only); Monday morning the server is left off; the laptop is kept awake by an
+app during the work.
