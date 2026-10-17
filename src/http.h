@@ -6,6 +6,7 @@
 #include <ws2tcpip.h>
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <functional>
 #include <map>
 #include <string>
@@ -91,7 +92,7 @@ class HttpResponse {
   static const char* reason(int s) {
     switch (s) {
       case 200: return "OK"; case 204: return "No Content"; case 400: return "Bad Request"; case 404: return "Not Found";
-      case 500: return "Internal Server Error"; case 503: return "Service Unavailable"; default: return "OK";
+      case 413: return "Payload Too Large"; case 500: return "Internal Server Error"; case 503: return "Service Unavailable"; default: return "OK";
     }
   }
   bool raw(const std::string& d) {
@@ -135,10 +136,41 @@ class HttpServer {
 
  private:
   SOCKET ls_ = INVALID_SOCKET;
+  static constexpr size_t kMaxBody = 256u << 20;  // (base64 images and audio; larger requests get 413)
 
+  // A non-negative integer (decimal, or hex for chunk sizes, which may carry ";extensions"), else false.
+  static bool parse_size(std::string v, int base, size_t& out) {
+    if (base == 16) v = v.substr(0, v.find(';'));
+    const size_t a = v.find_first_not_of(" \t"), b = v.find_last_not_of(" \t");
+    if (a == std::string::npos) return false;
+    const char *f = v.data() + a, *l = v.data() + b + 1;
+    const auto r = std::from_chars(f, l, out, base);
+    return r.ec == std::errc() && r.ptr == l;
+  }
+  static void reply_close(SOCKET c, int status, const char* msg) {
+    HttpResponse rs(c);
+    rs.send(status, "application/json", std::string("{\"error\":{\"message\":\"") + msg + "\"}}");
+    closesocket(c);
+  }
+
+  // One connection: requests until it closes. Nothing may escape this thread (it is detached: an exception would
+  // end the whole server), so malformed requests get 400 / 413 and the connection is closed.
   void serve(SOCKET c) {
+    try {
+      serve_requests(c);
+    } catch (...) {
+      closesocket(c);
+    }
+  }
+  void serve_requests(SOCKET c) {
     DWORD tmo = 600000;
     setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tmo, sizeof tmo);
+    // a client that stops reading (half-open connection, stalled proxy) must not hold the engine: sends give up
+    // after 60 s, the response is then dead and the generation stops at the next token
+    DWORD stmo = 60000;
+    setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, (const char*)&stmo, sizeof stmo);
+    BOOL nodelay = TRUE;  // (streamed tokens go out at once)
+    setsockopt(c, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof nodelay);
     std::string buf;
     char tmp[65536];
     while (true) {
@@ -154,7 +186,8 @@ class HttpServer {
       const std::string head = buf.substr(0, he);
       size_t p = head.find("\r\n");
       const std::string line = head.substr(0, p);
-      const size_t s1 = line.find(' '), s2 = line.find(' ', s1 + 1);
+      const size_t s1 = line.find(' '), s2 = s1 == std::string::npos ? s1 : line.find(' ', s1 + 1);
+      if (s2 == std::string::npos) return reply_close(c, 400, "malformed request line");
       rq.method = line.substr(0, s1);
       std::string target = line.substr(s1 + 1, s2 - s1 - 1);
       const size_t q = target.find('?');
@@ -182,7 +215,9 @@ class HttpServer {
             if (n <= 0) { closesocket(c); return; }
             buf.append(tmp, n);
           }
-          const size_t len = std::stoul(buf.substr(0, le), nullptr, 16);
+          size_t len = 0;
+          if (!parse_size(buf.substr(0, le), 16, len)) return reply_close(c, 400, "malformed chunk size");
+          if (len > kMaxBody || rq.body.size() + len > kMaxBody) return reply_close(c, 413, "request body too large");
           while (buf.size() < le + 2 + len + 2) {
             const int n = recv(c, tmp, sizeof tmp, 0);
             if (n <= 0) { closesocket(c); return; }
@@ -193,7 +228,10 @@ class HttpServer {
           if (len == 0) break;
         }
       } else {
-        const size_t len = rq.headers.count("content-length") ? std::stoul(rq.header("content-length")) : 0;
+        size_t len = 0;
+        if (rq.headers.count("content-length") && !parse_size(rq.header("content-length"), 10, len))
+          return reply_close(c, 400, "malformed Content-Length");
+        if (len > kMaxBody) return reply_close(c, 413, "request body too large");
         while (buf.size() < len) {
           const int n = recv(c, tmp, sizeof tmp, 0);
           if (n <= 0) { closesocket(c); return; }

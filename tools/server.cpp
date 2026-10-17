@@ -470,6 +470,7 @@ class Server {
   static constexpr int kSnaps = 3;  // recurrent-state snapshot slots (see prepare_prefix)
   // Brings the engine to the state after `P[0..start)` reusing cached work; returns start.
   size_t prepare_prefix(const std::vector<int>& P) {
+    if (P.empty()) return 0;  // (chat() refuses empty prompts; P.size() - 1 below would wrap)
     size_t L = 0;
     while (L < P.size() && L < cached_.size() && P[L] == cached_[L]) ++L;
     if (L >= P.size()) L = P.size() - 1;  // at least one token must be evaluated to get logits
@@ -1052,6 +1053,9 @@ class Server {
       int gw = 0, gh = 0;  // Qwen images: grid for the M-RoPE positions
     };
     std::vector<ImgSpan> spans;
+    // the engine lock, taken before the media are encoded: the media cache and the encoders (which share the GPU
+    // queue with the engine) must not run alongside another request (one thread per connection)
+    std::unique_lock<std::mutex> lock(mu_, std::defer_lock);
     {
       std::vector<std::string> urls;
       std::vector<std::vector<uint8_t>> clips;
@@ -1076,6 +1080,7 @@ class Server {
       if (!clips.empty() && (!audio_ || aud_tok_ < 0))
         return rs.send(400, "application/json", err("this model was loaded without an audio encoder (mmproj with audio)").dump());
       if (!urls.empty() || !clips.empty()) {
+        lock.lock();
         std::vector<int> P2;
         size_t ki = 0, ka = 0;
         auto fnv = [](const std::vector<uint8_t>& bytes) {
@@ -1125,6 +1130,7 @@ class Server {
         P.swap(P2);
       }
     }
+    if (P.empty()) return rs.send(400, "application/json", err("the prompt is empty (no tokens)").dump());
     if ((int)P.size() + 64 > eng_.ctx) {
       // Same wording and error type as llama-server, so that clients recognize a context overflow (Pi then
       // compacts the conversation and retries). The hybrid DeltaNet state cannot drop old tokens, so there is no
@@ -1142,7 +1148,7 @@ class Server {
     }
     if (max_tokens <= 0 || (int)P.size() + max_tokens > eng_.ctx) max_tokens = eng_.ctx - (int)P.size();
 
-    std::lock_guard<std::mutex> lock(mu_);
+    if (!lock.owns_lock()) lock.lock();
     busy_ = true;
     struct Idle { std::atomic<bool>& b; ~Idle() { b = false; } } idle{busy_};
     const std::string id = "chatcmpl-arc" + std::to_string(++counter_);
@@ -2124,7 +2130,9 @@ static AutoCtx auto_ctx(const std::string& model, EngineOptions eo, bool budget_
     EngineOptions e2 = eo;
     e2.ctx = std::min(16384, trained);
     e2.dry = true;
+#ifdef ARC_ZERO
     e2.stream_reserve = std::max(e2.stream_reserve, reserve);  // (streamed experts: the cache leaves room for the encoders)
+#endif
     e2.w8_budget_gb = budget_gb;
     Engine probe(model, e2);
     res = probe.w8_resident;
