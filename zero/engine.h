@@ -134,7 +134,12 @@ class Engine {
       mem_bufs_ = gpu_bytes - g0;
     }
     if (xc_) size_expert_cache();
-    if (stream_ && opt.dry) gpu_bytes += (size_t)(0.6 * stream_bytes_);  // (--ctx auto: room for a 60 % cache at least)
+    // (--ctx auto: room for an expert cache of 60 % of the experts, but at most 3/4 of what the weights and buffers
+    //  leave: Flash Next's 60 % (31 GB) is more than the GPU share, which left it at the minimum context of 4096)
+    if (stream_ && opt.dry) {
+      const double left = (double)device_mem() - 1.17 * 1073741824.0 - (double)gpu_bytes;
+      gpu_bytes += (size_t)std::min(0.6 * (double)stream_bytes_, std::max(0.0, 0.75 * left));
+    }
     mem_load_ = gpu_bytes;
     // the GGUF pages read while loading leave the working set (standby: Windows reuses them when it needs RAM)
     SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
