@@ -36,7 +36,6 @@ struct ZKernel {
   ze_kernel_handle_t k;
   std::string name;
   uint32_t gx = 0, gy = 0, gz = 0;  // group size last set
-  bool warned = false;
 };
 struct ZProg { ze_module_handle_t m; bool indirect = false; std::string opts; };  // indirect: built with -DXCACHE (see kernel())
 typedef ZMem* cl_mem;
@@ -358,16 +357,24 @@ inline cl_int clEnqueueNDRangeKernel(cl_command_queue, cl_kernel k, cl_uint dim,
     for (cl_uint d = 0; d < dim; ++d) ls[d] = (uint32_t)l[d];
   } else {
     ZE_CHECK(zeKernelSuggestGroupSize(k->k, gs[0], gs[1], gs[2], &ls[0], &ls[1], &ls[2]));
+    // (Level Zero runs whole work-groups only: a group size that does not divide the global size would start
+    //  work-items past it, and these kernels have no bounds checks; take the largest divisor not above the
+    //  suggestion)
+    for (int d = 0; d < 3; ++d)
+      while (ls[d] > 1 && gs[d] % ls[d]) --ls[d];
   }
   if (ls[0] != k->gx || ls[1] != k->gy || ls[2] != k->gz) {
     ZE_CHECK(zeKernelSetGroupSize(k->k, ls[0], ls[1], ls[2]));
     k->gx = ls[0], k->gy = ls[1], k->gz = ls[2];
   }
   ze_group_count_t gc{(gs[0] + ls[0] - 1) / ls[0], (gs[1] + ls[1] - 1) / ls[1], (gs[2] + ls[2] - 1) / ls[2]};
-  if (!k->warned && (gs[0] % ls[0] || gs[1] % ls[1] || gs[2] % ls[2])) {
-    k->warned = true;  // (OpenCL would run a smaller last work-group; here the last group runs whole)
-    fprintf(stderr, "arcinferzero: %s: global size %u x %u not a multiple of %u x %u\n", k->name.c_str(), gs[0], gs[1],
-            ls[0], ls[1]);
+  if (gs[0] % ls[0] || gs[1] % ls[1] || gs[2] % ls[2]) {
+    // OpenCL would run a smaller last work-group; here the last group runs whole and its extra work-items would
+    // read and write past the data. A launch like that is a bug in the caller (round the global size and give the
+    // kernel a bounds check), so it fails loudly instead of corrupting memory.
+    fprintf(stderr, "arcinferzero: %s: global size %u x %u x %u is not a multiple of the work-group %u x %u x %u\n",
+            k->name.c_str(), gs[0], gs[1], gs[2], ls[0], ls[1], ls[2]);
+    return -54;  // (CL_INVALID_WORK_GROUP_SIZE)
   }
   ze_event_handle_t sig = ev ? zrt::ev_get() : nullptr;
   if (ev) *ev = (cl_event)sig;

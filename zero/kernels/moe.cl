@@ -287,6 +287,7 @@ __kernel void moe_down(__global const uint* wd, __global const ushort* sd, __glo
 __kernel void moe_combine(__global float* x, __global const float* sh, __global const float* sgate,
                           __global const float* y, __global const int* inv, int N) {
   const int c = get_global_id(0), t = get_global_id(1);
+  if (c >= N) return;
   float v = 0.0f;
 #pragma unroll
   for (int k = 0; k < NU; ++k) v += y[(size_t)inv[t * NU + k] * N + c];

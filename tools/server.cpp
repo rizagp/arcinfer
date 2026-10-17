@@ -1935,8 +1935,9 @@ static std::string ctx_key(const std::string& model, const EngineOptions& eo) {
          (eo.dflash.empty() ? std::string() : "|dflash") + "|" +  // (DFlash2 drafter: its weights and buffers)
 #endif
          (eo.min_chunk ? "/" + std::to_string(eo.min_chunk) : std::string()) + "|" + (eo.mtp ? "mtp" : "-") + "|" + (eo.attn_int8 ? "i8" : "f32") + "|" + std::to_string(device_global_mem()) +
-         "|m11";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
-                 // for 27B, m6: MoE prompt GEMM staging, m7: MoE buffers shared, m8: MoE MTP 1 draft, Q3_K experts, m9: memory parts in the cache); bump on changes
+         "|m12";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
+                 // for 27B, m6: MoE prompt GEMM staging, m7: MoE buffers shared, m8: MoE MTP 1 draft, Q3_K experts, m9: memory parts in the cache,
+                 // m12: streamed MoE reserves 128K of context before the expert cache); bump on changes
 }
 // "ctx\tresident" lines (older lines without the second field are computed again)
 // The largest context that fits, whether decoded weights stay resident, and how the GPU memory was counted (bytes):

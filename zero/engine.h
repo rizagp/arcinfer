@@ -135,13 +135,15 @@ class Engine {
     }
     if (xc_) size_expert_cache();
     // (--ctx auto: room for an expert cache of 90 % of the experts, as far as what the weights and buffers leave
-    //  allows with 32K tokens of context, or at least 3/4 of it. The context took the memory before (35B: 254K tokens
-    //  and a 60 % cache: generation 33 / 19 instead of 43 / 23 tok/s, with pauses for the SSD); Flash Next, whose
-    //  experts are 3x the GPU share, was left at the minimum context of 4096.)
+    //  allows with 128K tokens of context (32K until 18 Oct), or at least 3/4 of it. The context took the memory
+    //  before (35B: 254K tokens and a 60 % cache: generation 33 / 19 instead of 43 / 23 tok/s, with pauses for the
+    //  SSD); Flash Next, whose experts are 3x the GPU share, was left at the minimum context of 4096. Context sweep
+    //  18 Oct (docs/speed-progress.md): 35B UD-IQ4_XS at 131K keeps 81 % of the experts and answers as fast as at
+    //  64K; Flash Next loses 2-6 % from 32K to 131K.)
     if (stream_ && opt.dry) {
       const double left = (double)device_mem() - 1.17 * 1073741824.0 - (double)gpu_bytes + (double)ctx_bytes(ctx) -
                           (double)snapshot_bytes() - (double)opt.stream_reserve;
-      const double room = std::max(0.75 * left, left - (double)ctx_bytes(32768));
+      const double room = std::max(0.75 * left, left - (double)ctx_bytes(131072));
       gpu_bytes += (size_t)std::max(0.0, std::min(0.9 * (double)stream_bytes_, room));
     }
     mem_load_ = gpu_bytes;
@@ -1216,6 +1218,25 @@ class Engine {
   // int8 attention scale blocks per row: Gemma 4 one per 64 dims (its V rows have a few large dims, which a single
   // row scale lets swamp the others: measured against an f32 reference), Qwen one per row (as accurate there, faster)
   std::string sb_opt(int hd) const { return " -DSB=" + std::to_string(hp.gemma ? hd / 64 : 1); }
+  // Experiment, not a feature: ARC_KV4 = "K32V32", "V32", "K64" ... (block sizes 16-256) simulates a 4-bit K and / or V
+  // cache inside the int8 one (ops.cl kv4_fake), to measure its accuracy. Anything else is refused.
+  static std::string kv4_opts() {
+    const char* e = getenv("ARC_KV4");
+    if (!e || !*e) return "";
+    std::string out;
+    const std::string s = e;
+    for (size_t i = 0; i < s.size();) {
+      const char c = s[i];
+      size_t j = i + 1;
+      while (j < s.size() && isdigit((unsigned char)s[j])) ++j;
+      const int b = j > i + 1 ? atoi(s.substr(i + 1, j - i - 1).c_str()) : 0;
+      if ((c != 'K' && c != 'V') || (b != 16 && b != 32 && b != 64 && b != 128 && b != 256))
+        throw std::runtime_error("ARC_KV4: expected e.g. K32V32 or V32 (block sizes 16, 32, 64, 128, 256), got " + s);
+      out += std::string(" -DKV4") + c + "=" + std::to_string(b);
+      i = j;
+    }
+    return out;
+  }
 
   int gq() const {
     const int r = hp.n_head / hp.n_head_kv;
@@ -1289,7 +1310,7 @@ class Engine {
     }
     k_conv_upd_ = p("conv_state_update");
     k_gnorm_ = hp.hc ? kernel("ops", "-DGATE_SIGMOID", "gated_norm_quant") : p("gated_norm_quant");
-    k_attn_prep_ = kernel("ops", sb_opt(256), "attn_prep");
+    k_attn_prep_ = kernel("ops", sb_opt(256) + kv4_opts(), "attn_prep");
     k_attn_gate_ = p("attn_gate_quant");
     k_gdn_gates_ = p("gdn_gates");
     const std::string big = "-cl-intel-256-GRF-per-thread -DGQ=" + std::to_string(gq());
@@ -1318,9 +1339,13 @@ class Engine {
   }
   // Raw GGUF rows uploaded with each superblock zero-padded to a multiple of 8 bytes (kernels/decode.cl BBP),
   // written in parallel straight into a host-visible buffer (zero-copy on an integrated GPU).
+  // Zero bytes after the last superblock: gemv reads two superblocks per step (rounded up to 64-byte block reads),
+  // so with an odd superblock count its last row reads up to one superblock + 63 bytes past the data (lanes whose
+  // block is past the row contribute 0 x those bytes, which must be finite: zeros). 1024 covers every type.
+  static constexpr size_t kRawSlack = 1024;
   cl_mem upload_padded(uint32_t type, const uint8_t* data, size_t nbytes) {
     const size_t bb = gguf_sb_bytes(type), bp = raw_padded_sb_bytes(type), nsb = nbytes / bb;
-    const size_t total = nsb * bp + 256;
+    const size_t total = nsb * bp + kRawSlack;
     if (opt.dry) {
       gpu_bytes += total;
       return nullptr;
@@ -1342,7 +1367,7 @@ class Engine {
         for (size_t i = s0; i < s1; ++i) gpu_raw_sb(type, data + i * bb, dst + i * bp);
       }
     }
-    memset(dst + nsb * bp, 0, 256);
+    memset(dst + nsb * bp, 0, kRawSlack);
     CL_CHECK(clEnqueueUnmapMemObject(cl_.queue, m, dst, 0, nullptr, nullptr));
     return m;
   }
@@ -2518,6 +2543,10 @@ class Engine {
     static const int rg_env = getenv("ARC_GEMM_RG") ? atoi(getenv("ARC_GEMM_RG")) : 4;
     static const int wgy_max = getenv("ARC_GEMM_WGY") ? atoi(getenv("ARC_GEMM_WGY")) : 8;
     const int tm = gemm_tm();
+    // (the grid covers whole 16-column groups and tm-token tiles: other shapes would leave rows or columns out)
+    if (Mp % tm || N % 16 || K % 256)
+      throw std::runtime_error(std::string("gemm ") + name + ": shape " + std::to_string(Mp) + " x " + std::to_string(N) + " x " +
+                               std::to_string(K) + " is not a multiple of " + std::to_string(tm) + " x 16 x 256");
     const int nsb = K / 256, splits = K > 8192 ? (nsb + 16) / 17 : 1, rgroup = rg_env;
     int wgy = 1;
     while (wgy < wgy_max && (Mp / tm) % (wgy * 2) == 0) wgy *= 2;
@@ -2543,6 +2572,9 @@ class Engine {
   void gemm_ext(const GpuWeight& w, cl_mem aq, cl_mem asc, cl_mem absum, int Mp, cl_mem C, int ldc, int c_off, int acc) {
     cl_kernel k = gemm_kernel(w.gemm_qtype, true);
     int M = Mp, N = w.N, K = w.K;
+    if (Mp % 16 || N % 16 || K % 256)
+      throw std::runtime_error("gemm_ext: shape " + std::to_string(Mp) + " x " + std::to_string(N) + " x " + std::to_string(K) +
+                               " is not a multiple of 16 x 16 x 256");
     const int nsb = K / 256, splits = K > 8192 ? (nsb + 16) / 17 : 1, rgroup = 4;
     int wgy = 1;
     while (wgy < 8 && (Mp / 16) % (wgy * 2) == 0) wgy *= 2;
@@ -3174,7 +3206,7 @@ class Engine {
       set_args(k_gdn_conv_, 0, bigc, L.conv_state, L.conv_w, C, nk, T, eps, conv_out_);
       size_t gws[2] = {(size_t)C / 128 * 16, (size_t)(T + conv_ct_ - 1) / conv_ct_}, lws[2] = {64, 1};
       run("gdn_conv", k_gdn_conv_, 2, gws, lws);
-      size_t g1 = C, l1 = 256;
+      size_t g1 = ((size_t)C + 255) / 256 * 256, l1 = 256;  // (conv_state_update checks c < C)
       if (spec_) {  // (verification pass: what verify_done() needs to replay the accepted tokens)
         CL_CHECK(clEnqueueCopyBuffer(cl_.queue, L.conv_state, L.conv_pre, 0, 0, (size_t)3 * C * 4, 0, nullptr, nullptr));
         CL_CHECK(clEnqueueCopyBuffer(cl_.queue, bigc, L.qkvin, 0, 0, (size_t)T * C * 4, 0, nullptr, nullptr));
@@ -3608,7 +3640,7 @@ class Engine {
       cl_kernel k = kernel("moe", defs, "moe_combine");
       if (hp.hc) fill(hco_, (size_t)T * E * 4);  // (Flash Next: the block output alone, combined into the streams after)
       set_args(k, 0, hp.hc ? hco_ : x_, msh_, sgate_, my_, minv_, E);
-      size_t gws[2] = {(size_t)E, (size_t)T}, lws[2] = {256, 1};
+      size_t gws[2] = {((size_t)E + 255) / 256 * 256, (size_t)T}, lws[2] = {256, 1};  // (moe_combine checks c < N)
       run("moe_combine", k, 2, gws, lws);
     }
     // (debug, ARC_DBG_MOE=layer: that layer's shared-expert output, its gate and the FFN output of the last row)
@@ -3682,9 +3714,9 @@ class Engine {
       const int N = i == 2 ? E : F, K = i == 2 ? F : E;
       const size_t eb = (size_t)N * (K / 256) * raw_padded_sb_bytes(L.ex_type[i]);  // raw bytes per expert
       if (L.ex_sub[i].empty() && !xc_) {
-        const size_t total = NE * eb + 256;  // (upload_padded: the superblocks + 256 bytes of slack)
+        const size_t total = NE * eb + kRawSlack;  // (upload_padded: the superblocks + the slack)
         for (int e0 = 0; e0 < NE; e0 += G) {
-          cl_buffer_region reg{e0 * eb, std::min(total - e0 * eb, G * eb + 256)};
+          cl_buffer_region reg{e0 * eb, std::min(total - e0 * eb, G * eb + kRawSlack)};
           cl_int err;
           L.ex_sub[i].push_back(clCreateSubBuffer(L.ex_q[i], CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &reg, &err));
           CL_CHECK(err);
@@ -4150,6 +4182,8 @@ class Engine {
       {
         cl_kernel k = kernel("ops", "", "dfl_attn");
         int R = dfl_R_, st = start, rows = B, win = dfl_win_, nh = dfl_nh_, nkv = dfl_nkv_;
+        if (win - 1 + rows > 4096 + 64)  // (dfl_attn keeps up to win - 1 context + rows scores in local memory)
+          throw std::runtime_error("dfl_attn: window " + std::to_string(win) + " + " + std::to_string(rows) + " rows exceed its 4160 scores");
         set_args(k, 0, dfl_q_, dfl_k_, dfl_v_, D.rk, D.rv, R, st, rows, win, nh, nkv, dfl_o_);
         size_t gws[2] = {128, (size_t)B * dfl_nh_}, lws[2] = {128, 1};
         run("dfl", k, 2, gws, lws);
@@ -4420,7 +4454,7 @@ class Engine {
           size_t g1 = (size_t)nv * 128, l1 = 64;
           run("gdn_recur", k_gdn_recur_, 1, &g1, &l1);
           CL_CHECK(clEnqueueCopyBuffer(cl_.queue, L.conv_pre, L.conv_state, 0, 0, (size_t)3 * C * 4, 0, nullptr, nullptr));
-          size_t g2 = C, l2 = 256;
+          size_t g2 = ((size_t)C + 255) / 256 * 256, l2 = 256;
           set_args(k_conv_upd_, 0, L.qkvin, L.conv_state, C, rows);
           run("conv_state_update", k_conv_upd_, 1, &g2, &l2);
         }

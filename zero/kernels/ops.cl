@@ -141,6 +141,7 @@ __kernel void gdn_conv(__global const float* qkv, __global const float* cstate, 
 // Keeps the last 3 raw qkv rows as conv history. grid (C).
 __kernel void conv_state_update(__global const float* qkv, __global float* cstate, int C, int M_valid) {
   const int c = get_global_id(0);
+  if (c >= C) return;
   const float old[3] = {cstate[c], cstate[C + c], cstate[2 * C + c]};
   float nw[3];
   for (int i = 0; i < 3; ++i) {
@@ -389,6 +390,25 @@ __kernel void gated_norm_quant(__global const float* o, __global const float* z,
   }
 }
 
+#if defined(KV4K) || defined(KV4V)
+// (experiment, ARC_KV4: a 4-bit K / V cache simulated in the int8 one: each block of B dims (B / 16 lanes of 16)
+//  rounded as llama.cpp's q4_0 does (d = signed absmax / -8, 16 levels) before the int8 rounding, to measure the
+//  accuracy of a 4-bit cache before writing its kernels)
+inline void kv4_fake(float* v, int B) {
+  float m = 0.0f;
+#pragma unroll
+  for (int i = 0; i < 16; ++i)
+    if (fabs(v[i]) > fabs(m) || (fabs(v[i]) == fabs(m) && v[i] > m)) m = v[i];
+  for (int o = 1; o < B / 16; o <<= 1) {
+    const float t = intel_sub_group_shuffle_xor(m, o);
+    if (fabs(t) > fabs(m) || (fabs(t) == fabs(m) && t > m)) m = t;
+  }
+  const float d = m / -8.0f, id = d != 0.0f ? 1.0f / d : 0.0f;
+#pragma unroll
+  for (int i = 0; i < 16; ++i) v[i] = (float)(min(15, (int)(v[i] * id + 8.5f)) - 8) * d;
+}
+#endif
+
 // Full-attention prep: per-head RMSNorm of q and k, NeoX RoPE on the first n_rot dims, q scaled by kq_scale.
 // qkv row: [q|gate interleaved per head (nh*512) | k (nkv*256) | v (nkv*256)], row stride ldq.
 // Writes q to qout [M][nh][256] and k, v (f16) to the cache [nkv][ctx][256] at pos0 + m. Also writes int8 copies of
@@ -459,6 +479,9 @@ __kernel void attn_prep(__global const float* qkv, int ldq, int nh, int nkv, __g
     }
     return;
   }
+#ifdef KV4K
+  if (!isq) kv4_fake(v, KV4K);
+#endif
   // int8 copy of the row (absmax scale per 64-dim block = 4 lanes)
   float amax = 0.0f;
 #pragma unroll
@@ -481,7 +504,12 @@ __kernel void attn_prep(__global const float* qkv, int ldq, int nh, int nkv, __g
   for (int c = 0; c < 4; ++c) kq[(blk * 64 + 4 * lane + c) * 16 + kk] = pk[c];
   float vv[16], vmax = 0.0f;
 #pragma unroll
-  for (int i = 0; i < 16; ++i) { vv[i] = vs[i]; vmax = fmax(vmax, fabs(vv[i])); }
+  for (int i = 0; i < 16; ++i) vv[i] = vs[i];
+#ifdef KV4V
+  kv4_fake(vv, KV4V);
+#endif
+#pragma unroll
+  for (int i = 0; i < 16; ++i) vmax = fmax(vmax, fabs(vv[i]));
 #pragma unroll
   for (int o = 1; o < 16 / SB; o <<= 1) vmax = fmax(vmax, intel_sub_group_shuffle_xor(vmax, o));
   inv = vmax > 0.0f ? 127.0f / vmax : 0.0f;

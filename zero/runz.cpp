@@ -94,10 +94,12 @@ static int run_main(int argc, char** argv) {
             "  --kl-decode           with --kl-ref: through the token-by-token generation path\n"
             "  --perplexity F        perplexity of a text file (llama-perplexity method: second half of each chunk scored)\n"
             "  --ppl-ctx N           chunk length (default 512)   --ppl-chunks N   chunks to score (default all)\n"
-            "  --ppl-dump F          write the chunks' token ids to F (for ref_forward)\n");
+            "  --ppl-dump F          write the chunks' token ids to F (for ref_forward)\n"
+            "  --ppl-kl-save F       save each scored token's top-64 log-probs   --ppl-kl F   KL against such a file\n");
     return help ? 0 : 1;
   }
   std::string model = argv[1], tokens_arg, kl_ref, ppl_file, ppl_dump, text_prompt, dump_ids;
+  std::string ppl_kl_save, ppl_kl;
   int ppl_ctx = 512, ppl_chunks = 0;
   int n_gen = 16, chunk = 0, ctx = 0, bench_pp = 0, feed_step = 0;
   EngineOptions eo;
@@ -138,6 +140,8 @@ static int run_main(int argc, char** argv) {
     else if (a == "--kl-decode") kl_decode = true;  // with --kl-ref of every position: feed the prompt token by token
     else if (a == "--perplexity") ppl_file = argv[++i];
     else if (a == "--ppl-dump") ppl_dump = argv[++i];
+    else if (a == "--ppl-kl-save") ppl_kl_save = argv[++i];
+    else if (a == "--ppl-kl") ppl_kl = argv[++i];
     else if (a == "--ppl-ctx") ppl_ctx = atoi(argv[++i]);
     else if (a == "--ppl-chunks") ppl_chunks = atoi(argv[++i]);
     else if (a == "--budget") eo.w8_budget_gb = atof(argv[++i]);
@@ -155,7 +159,7 @@ static int run_main(int argc, char** argv) {
     return 0;
   }
   const int need = std::max((bench_pp > 0 ? bench_pp : (int)toks.size()) + n_gen + 16, ppl_file.empty() ? 0 : ppl_ctx + 16);
-  if (!ppl_file.empty() && chunk == 0) chunk = ppl_ctx;
+  if (!ppl_file.empty() && chunk == 0) chunk = std::min(ppl_ctx, 8192);  // (longer chunks: fed in pieces of 8192)
   eo.ctx = std::max(ctx, need);
   eo.chunk = chunk;
   warn_gpu_neighbours();
@@ -186,6 +190,15 @@ static int run_main(int argc, char** argv) {
     }
     double nll = 0;
     long count = 0;
+    // (--ppl-kl-save F / --ppl-kl F: per scored token the base run's top 64 probabilities, and KL(base || this)
+    //  over those 64 plus the rest of the mass as one bucket; also how often the top token is the same)
+    constexpr int KT = 64;
+    FILE* kls = ppl_kl_save.empty() ? nullptr : fopen(ppl_kl_save.c_str(), "wb");
+    FILE* klr = ppl_kl.empty() ? nullptr : fopen(ppl_kl.c_str(), "rb");
+    double kl_sum = 0, kl_max = 0;
+    long same_top = 0;
+    std::vector<float> lpv;
+    std::vector<int> idx;
     auto t0 = std::chrono::steady_clock::now();
     for (int ch = 0; ch < nchunks; ++ch) {
       // like llama-perplexity: a model that expects BOS gets it as the first token of every chunk
@@ -193,21 +206,61 @@ static int run_main(int argc, char** argv) {
       if (add_bos && vocab.bos >= 0) chunk_toks[0] = vocab.bos;
       const int* tk = chunk_toks.data();
       eng.reset();
-      eng.forward(tk, ppl_ctx);
-      for (int j = ppl_ctx / 2; j < ppl_ctx - 1; ++j) {
-        const auto& lg = eng.logits_at(j);
-        const double mx = *std::max_element(lg.begin(), lg.end());
-        double z = 0;
-        for (float l : lg) z += std::exp((double)l - mx);
-        nll += -((double)lg[tk[j + 1]] - mx - std::log(z));
-        ++count;
+      // (fed in pieces of the chunk size: logits_at reads rows of the last piece only)
+      const int piece = std::max(1, chunk);
+      for (int o = 0; o < ppl_ctx; o += piece) {
+        const int n = std::min(piece, ppl_ctx - o);
+        eng.forward(tk + o, n);
+        for (int j = std::max(o, ppl_ctx / 2); j < std::min(o + n, ppl_ctx - 1); ++j) {
+          const auto& lg = eng.logits_at(j - o);
+          const double mx = *std::max_element(lg.begin(), lg.end());
+          double z = 0;
+          for (float l : lg) z += std::exp((double)l - mx);
+          nll += -((double)lg[tk[j + 1]] - mx - std::log(z));
+          ++count;
+          if (kls || klr) {
+            const double lz = mx + std::log(z);
+            if (kls) {
+              idx.resize(lg.size());
+              for (size_t i = 0; i < idx.size(); ++i) idx[i] = (int)i;
+              std::partial_sort(idx.begin(), idx.begin() + KT, idx.end(), [&](int a, int b) { return lg[a] > lg[b]; });
+              for (int k = 0; k < KT; ++k) {
+                const float lp = (float)(lg[idx[k]] - lz);
+                fwrite(&idx[k], 4, 1, kls);
+                fwrite(&lp, 4, 1, kls);
+              }
+            } else {
+              int id[KT];
+              float bl[KT];
+              for (int k = 0; k < KT; ++k) {
+                if (fread(&id[k], 4, 1, klr) != 1 || fread(&bl[k], 4, 1, klr) != 1) { fprintf(stderr, "--ppl-kl: file too short\n"); return 1; }
+              }
+              double kl = 0, pb_top = 0, pq_top = 0;
+              for (int k = 0; k < KT; ++k) {
+                const double pb = std::exp((double)bl[k]), lq = lg[id[k]] - lz;
+                kl += pb * (bl[k] - lq);
+                pb_top += pb;
+                pq_top += std::exp(lq);
+              }
+              const double tb = std::max(1e-12, 1 - pb_top), tq = std::max(1e-12, 1 - pq_top);
+              kl += tb * std::log(tb / tq);
+              kl_sum += kl;
+              kl_max = std::max(kl_max, kl);
+              same_top += (std::max_element(lg.begin(), lg.end()) - lg.begin()) == id[0];
+            }
+          }
+        }
       }
-      printf("[%d] %.4f\n", ch + 1, std::exp(nll / count));
+      if (klr) printf("[%d] %.4f  KL %.5f  same top %.2f %%\n", ch + 1, std::exp(nll / count), kl_sum / count, 100.0 * same_top / count);
+      else printf("[%d] %.4f\n", ch + 1, std::exp(nll / count));
       fflush(stdout);
     }
     const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     printf("perplexity: %.4f over %d chunks of %d (%ld scored tokens, %zu tokens in file) in %.1f s\n", std::exp(nll / count),
            nchunks, ppl_ctx, count, all.size(), s);
+    if (klr) printf("KL vs base: mean %.5f, max %.4f, same top token %.2f %%\n", kl_sum / count, kl_max, 100.0 * same_top / count);
+    if (kls) fclose(kls);
+    if (klr) fclose(klr);
     return 0;
   }
   if (bench_pp > 0) {

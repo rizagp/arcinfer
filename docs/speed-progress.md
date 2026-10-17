@@ -29,6 +29,70 @@ DFlash2 drafter and a 32-40K context, which leaves a smaller expert cache: the 3
 (up to 90 % of the experts) because a small cache makes generation pause for SSD reads; before, the 35B took a
 253,952-token context with a 60 % cache and generated 10-15 tok/s.
 
+## 2026-10-18: long contexts with the experts streamed from the SSD
+
+`runz`, no image encoder loaded (the server also holds one: about 1 GB less expert cache). Generation: 128-token
+answers right after loading (short prompt); "hit" is the expert cache hit rate during generation; the SSD column is
+everything read from the expert file, mostly the cache fill at load. Long prompts: synthetic tokens
+(`--bench-pp`, one run), then 64 tokens of plain decoding at that depth. Pauses between runs (the laptop throttles
+when hot).
+
+### Qwen3.6 35B-A3B UD-IQ4_XS (18.2 GB; experts 14.7 GiB in the expert file)
+
+The file: expert `down` IQ4_XS (37 layers) / Q6_K (3), `gate` and `up` IQ3_S (39 of 40 layers), dense parts Q8_0,
+output Q6_K. The expert file (15.8 GB) is written once at the first load.
+
+| Context | Expert cache (DFlash2 + MTP) | Code, DFlash2 + MTP | Indonesian, DFlash2 + MTP | Code, MTP only | Indonesian, MTP only | Plain |
+|---|---|---|---|---|---|---|
+| 32,768 | 12.96 GiB (88 %) | 39.0 * | 19.6 * | – | – | – |
+| 65,536 | 12.61 GiB (86 %) | 48.6 | 21.7 | – | – | – |
+| 98,304 | 12.26 GiB (83 %) | 48.9 | 21.6 | – | – | – |
+| 131,072 | 11.91 GiB (81 %), hit 100 % | 47.5 | 20.7 | 34.6 (cache 87 %) | 22.0 | 21.2 (90 %) |
+| 262,144 | 10.48 GiB (71 %), hit 93-96 % | 36.5 | 19.2 | 36.6 (78 %) | 23.4 | 21.2 (81 %) |
+
+\* the first run after the expert file was written and the kernels compiled.
+
+| Context | Prompt | Generation at that depth (plain) |
+|---|---|---|
+| 131,072 (prompt 125,000) | 321 tok/s (6.5 min) | 13.5 tok/s (median step 72.8 ms) |
+| 262,144 (prompt 250,000) | 193 tok/s (21.6 min) | 10.6 tok/s (median step 92.5 ms) |
+
+Against the OpenCL engine with UD-Q3_K_M (section "Prompt and generation at different context lengths" below):
+prompts +27 % at 131K (253.5 -> 321) and +32 % at 262K (146 -> 193); generation at depth about the same
+(13.8 / 10.1 then).
+
+- The 35B's KV cache is small (10 attention layers, 2 KV heads): from 32K to 262K the expert cache only drops from
+  88 % to 71 % (81 % without drafters), so short answers stay fast up to 131K.
+- At depth, generation is bound by **reading the KV cache**, not by the SSD: a step takes ~48 ms at a short context
+  and 92 ms after 250K tokens; the difference matches reading ~2.6 GB of int8 K/V per token at ~60 GB/s. A 4-bit V
+  (or K and V) cache would cut that directly (see the accuracy section below).
+- DFlash2 at 262K: no gain for code (36.5 vs 36.6 MTP only) and a loss for Indonesian (19.2 vs 23.4): its 8-row
+  verification touches more experts while the cache is smaller. At 131K it still pays for code (47.5 vs 34.6).
+- **Recommended context: 131,072** (cache 81 % with DFlash2 + MTP, hit 100 % in these runs, the same speed as 64K).
+  262,144 works, but DFlash2 should then be off, and long sessions run close to the 60 % cache where generation used
+  to stall (server, 17 Oct).
+
+### Qwen3.8 Flash Next IQ3_S (83.6 GB; experts 52.1 GiB, expert file rebuilt 18 Oct)
+
+| Context | Expert cache | Hit (code / Indonesian) | Code | Indonesian |
+|---|---|---|---|---|
+| 32,768 | 11.55 GiB (22 %) | 77.4 / 82.8 % | 5.99 tok/s | 6.87 |
+| 65,536 | 11.12 GiB (21 %) | 76.2 / 81.9 % | 5.99 | 6.66 |
+| 98,304 | 10.68 GiB (20 %) | 75.0 / 80.9 % | 5.90 | 6.60 |
+| 131,072 | 10.24 GiB (20 %) | 74.2 / 79.9 % | 5.85 | 6.44 |
+| 262,144 | 8.44 GiB (16 %) | 70.8 / 78.0 % | 5.47 | 6.23 |
+
+| Context | Prompt | Generation at that depth (plain) |
+|---|---|---|
+| 131,072 (prompt 125,000) | 78.6 tok/s (26.5 min) | 3.35 tok/s (median step 190 ms) |
+| 262,144 (prompt 250,000) | 37.8 tok/s (110 min) | 3.97 tok/s (median step 240 ms) |
+
+- The cache is a fifth of the experts at any context, so the context costs little: from 32K to 131K short answers
+  lose 2-6 %, at 262K 9-10 %.
+- Long prompts are the limit: 165 tok/s at 8K, 79 at 125K, 38 at 250K. The slowdown grows faster than the length,
+  i.e. attention / QSA dominates long prompts (profile pending, review N-5).
+- **Recommended context: 131,072** (−2 to −6 % against 32K); 262,144 only for occasional very long documents.
+
 ## 2026-10-17: speculative decoding, MoE prompts, Flash Next
 
 | Change | Before | After |
