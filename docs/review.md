@@ -169,7 +169,9 @@ in a 2,048-token chunk each expert sees only ~64 tokens, which is hard on the GE
 | 17 Oct (now) | ~795 tok/s at 4,096-token chunks | plain 21.2; code MTP 39.3, DFlash2 + MTP 49.8; Indonesian 22.7 / 22.7 | — |
 
 Context with MTP: 40,960 tokens on the OpenCL engine (4,096 with images as well); 262,144 with images and MTP on
-arcinferzero, with Windows keeping 14 GB of RAM. The expert file (15.1 GB) is written once in 144 s; the cache's
+arcinferzero, with Windows keeping 14 GB of RAM. Since 17 October the automatic context gives the expert cache
+priority instead (32,768 tokens with images, MTP and DFlash2, cache 77 %): at 253,952 tokens the cache was 60 % and
+generation paused for SSD reads (10-15 tok/s); 262K is still available with `--ctx`. The expert file (15.1 GB) is written once in 144 s; the cache's
 contents are saved and loaded again at start (10.6 GB in ~6 s).
 
 ### Qwen3.5 4B (Unsloth UD-Q4_K_XL, 2.78 GiB)

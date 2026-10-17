@@ -2,7 +2,8 @@
 
 One file that tracks the speed of arcinfer over time on the same laptop (Core Ultra 5 125H, Arc Xe-LPG 112 EU, no
 XMX, DP4a, ~75 GB/s, 32 GB LPDDR5x-6400, Windows 11). The newest measurements come first; each dated section keeps
-what was measured then. Add a new dated section at the top when the speed changes, and update the current table.
+what was measured then; where a later change overturned a statement, a **Later:** note says so. Add a new dated
+section at the top when the speed changes, and update the current table.
 The story behind the numbers: [review.md](review.md); what helped and what did not: [lessons-intel-arc-igpu.md](lessons-intel-arc-igpu.md).
 
 ## Current speed (2026-10-17, arcinferzero)
@@ -22,6 +23,12 @@ Greedy answers of 96 tokens, identical to plain decoding in every column (`runz`
 | Qwen3.6 35B-A3B (UD-Q3_K_M) | pp4096 ~795 tok/s, pp8192 ~757 | ~21 tok/s |
 | Qwen3.8 Flash Next (IQ3_S GSQ, experts streamed from the SSD) | pp8192 ~165 tok/s | 7.3 tok/s |
 
+These are `runz` runs with a short context. Through the server the MoE models also hold the image encoder, the
+DFlash2 drafter and a 32-40K context, which leaves a smaller expert cache: the 35B (cache 77 %) answers code at about
+32 tok/s and Indonesian prose at about 18. Since 17 October the automatic context gives the expert cache priority
+(up to 90 % of the experts) because a small cache makes generation pause for SSD reads; before, the 35B took a
+253,952-token context with a 60 % cache and generated 10-15 tok/s.
+
 ## 2026-10-17: speculative decoding, MoE prompts, Flash Next
 
 | Change | Before | After |
@@ -38,6 +45,8 @@ Greedy answers of 96 tokens, identical to plain decoding in every column (`runz`
 | moe_rg (MoE GEMM on raw expert rows) for Flash Next's down projection | pp8192 145 tok/s | 165 |
 | moe_rg for 35B 384-1152-token chunks | 412 / 440 / 449 / 486 / 529 tok/s (384 / 512 / 768 / 1024 / 1152) | 424 / 459 / 511 / 520 / 548 |
 | serverz reports 4096-token chunks for streamed MoE (was 2048) | 35B pp8192 620 tok/s | 750 |
+| Automatic context: expert cache first for streamed MoE | 35B server: 253,952 tokens, 60 % cache, 10-15 tok/s | 32,768-40,960 tokens, 77 % cache, ~32 / 18 tok/s (code / Indonesian) |
+| Automatic context: Flash Next | 4,096 tokens (the 60 % cache reservation did not fit) | 32,768 |
 
 Details of each change: [arcinferzero-log.md](arcinferzero-log.md) (16-17 October entries).
 
@@ -84,6 +93,9 @@ Mean of the code and Indonesian answers, tok/s. More drafts are not automaticall
 | Qwen3.5 9B | – | 15.8 | 15.6 | 15.9 | – | – | 2 |
 | Qwen3.8 27B | – | – | 8.3 | – | 8.2 | 8.2 | 3 |
 | Qwen3.6 35B | 23.9 | – | 26.1 | – | – | – | 3 (was 1) |
+
+**Later (17 Oct):** with the token-outer multi-token GEMVs more drafts did pay off; the defaults became 7 for the
+27B and 5 for the 35B (code 12.6 -> 15.2 and 34.2 -> 37.7 tok/s), 3 for the 4B and 2 for the 9B.
 
 ### Prompt and generation at different context lengths
 
@@ -155,6 +167,8 @@ The last 4K chunk at 64K depth, ms per layer. The current kernel (256 registers)
 - Correction: during the night I first concluded that Level Zero ignores the 256-register flag. That was wrong; my own environment switch came out empty. Every number on this page was measured again with the correct build.
 - A server started right after another one stops sometimes runs at half speed. `arc-server stop` now waits 5 seconds, and runz logs the time of every step so the cause can be seen if it happens again.
 - Not done yet: cheaper MTP drafts (a dynamic token list or a draft tree), and the two small spills above.
+  **Later:** a fixed draft vocabulary was tried on 17 Oct and dropped (Indonesian tokens lie beyond id 131,072); the
+  host-side cost of drafting was cut instead (one-pass top-K, vectorized softmax: 35B code 44 -> 53 tok/s).
 
 ## 2026-10-10 to 2026-10-14: the OpenCL engine, from the first version
 
@@ -176,7 +190,7 @@ Every measurement was taken on the same machine. Data sources: the arcinfer CHAN
 | Memory | 32 GB LPDDR5x |
 | Bandwidth | ~75 GB/s measured (102 theoretical) |
 | GPU allocation | 18.3 GiB (shared with Windows) |
-| API | OpenCL 3.0 |
+| API | OpenCL 3.0 (Level Zero from 16 October) |
 
 ### The main limit: memory bandwidth
 
@@ -303,7 +317,7 @@ The second check caught a well-hidden bug on the 35B. Two-token verification use
 
 ### Long context
 
-Automatic context uses as much of the remaining GPU memory as possible after the weights, the work buffers and about 1.2 GiB kept free for Windows. Results at the extremes:
+Automatic context uses as much of the remaining GPU memory as possible after the weights, the work buffers and about 1.2 GiB kept free for Windows (**Later:** for MoE models with streamed experts the expert cache now comes first, see the current section). Results at the extremes:
 
 | Model | Prompt length | Processing time | Generation afterwards |
 |---|---|---|---|
@@ -319,6 +333,10 @@ When used as an agent (Pi), these numbers are rarely felt directly. The server k
 Not every idea worked. These approaches were tried and dropped, with the reason:
 
 - **Level Zero instead of OpenCL.** The gap between kernels was only 1.6–2 %, not worth rewriting the runtime.
+  **Later: overturned.** Level Zero was built anyway (arcinferzero) and became the default engine on 16 October:
+  bit-identical results, MoE experts streamed from the SSD with a GPU cache (35B at long contexts, Flash Next at all),
+  explicit control of memory and queues, and many kernels made faster on it since (see the 16 and 17 October
+  sections). The 1.6-2 % figure measured only the launch gaps, not what the runtime made possible.
 - **SIMD8 GEMM.** Reached 13.7 TOPS in a microbenchmark, but was slower in the model.
 - **P·V in f16.** No speedup, and the KL got worse.
 - **32-key attention tile.** 14–20 % slower because of register spills.
@@ -330,6 +348,7 @@ Not every idea worked. These approaches were tried and dropped, with the reason:
 - **Per-chunk DeltaNet.** Only 4–9 % of prefill time, so the extra complexity is not worth it.
 - **attn_ps for the Qwen configurations.** Only 1.0–1.6 T MAC/s, below attn_q8 at about 2.2.
 - **A third MTP draft on the 4B and the MoE.** No speed gain. Defaults: 3 drafts for the 27B, 1 for the MoE, and 2 for the other models.
+  **Later: overturned** by faster multi-token verification: defaults now 7 (27B), 5 (35B), 3 (4B), 2 (9B).
 
 ### Next steps
 
@@ -337,5 +356,8 @@ Two priorities matter most to keep long-context performance up:
 
 - **4-bit KV cache:** halves the data read per token at deep context and doubles the maximum context, provided its accuracy passes the tests.
 - **Decode the 35B experts once per layer:** today about 22 % of the 35B prefill time is spent decoding the same weights again for every prompt chunk.
+  **Later:** partly addressed on 17 Oct: 4096-token chunks (decode share 29 -> 17 %), and moe_rg, which reads the raw
+  expert rows without the decode pass, for 320-1279-token chunks. Decoding once per layer across chunks is still
+  open (it needs per-chunk MoE buffers of ~1 GB).
 
 Methodology note: generation numbers are the best of two runs, because the first run after another process stops tends to be slower, and the iGPU lowers its clock by about 5–8 % under sustained load. During this period some models also changed files (Gemma community quantization to Google QAT; 35B GSQ to Unsloth), and the tables note where the first measurement came from a different file.
