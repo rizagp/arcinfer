@@ -33,7 +33,7 @@ Available models (setup downloads them into `%USERPROFILE%\.cache\huggingface\hu
 | Command | Model | GGUF file |
 |---|---|---|
 | `pi-arc 27b` | Qwen3.8 27B | `ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF` → `Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` |
-| `pi-arc 35b` | Qwen3.6 35B-A3B (MoE) with MTP and images, ~40K context automatically (262K with `--ctx 262144`) | `unsloth/Qwen3.6-35B-A3B-MTP-GGUF` → `Qwen3.6-35B-A3B-UD-Q3_K_M.gguf` + `mmproj-BF16.gguf` (downloaded by hand with `hf download`); if it is not there: the GSQ 2-bit version `ISTA-DASLab/Qwen3.6-35B-A3B-2Bit-GSQ`, converted (see below; without MTP) |
+| `pi-arc 35b` | Qwen3.6 35B-A3B (MoE) with MTP and images, ~131K context automatically (262K with `--ctx 262144`) | `unsloth/Qwen3.6-35B-A3B-MTP-GGUF` → `Qwen3.6-35B-A3B-UD-IQ4_XS.gguf` (or `UD-Q3_K_M.gguf`) + `mmproj-BF16.gguf` (downloaded by hand with `hf download`); if it is not there: the GSQ 2-bit version `ISTA-DASLab/Qwen3.6-35B-A3B-2Bit-GSQ`, converted (see below; without MTP) |
 | `pi-arc g12` | Gemma 4 12B (+ images) | `google/gemma-4-12B-it-qat-q4_0-gguf` → `gemma-4-12b-it-qat-q4_0.gguf` + `mmproj-gemma-4-12b-it-qat-q4_0.gguf`; drafter `mtp-gemma-4-12B-it.gguf` from `unsloth/gemma-4-12B-it-qat-GGUF`, copied into the snapshot folder of Google's model |
 | `pi-arc e4b` | Gemma 4 E4B | `google/gemma-4-E4B-it-qat-q4_0-gguf` → `gemma-4-E4B_q4_0-it.gguf`; drafter `mtp-gemma-4-E4B-it.gguf` from `unsloth/gemma-4-E4B-it-qat-GGUF`, copied into the snapshot folder of Google's model |
 | `pi-arc 9b` | Qwen3.5 9B | `unsloth/Qwen3.5-9B-MTP-GGUF` → `Qwen3.5-9B-UD-Q4_K_XL.gguf` |

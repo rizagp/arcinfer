@@ -93,6 +93,41 @@ prompts +27 % at 131K (253.5 -> 321) and +32 % at 262K (146 -> 193); generation 
   i.e. attention / QSA dominates long prompts (profile pending, review N-5).
 - **Recommended context: 131,072** (−2 to −6 % against 32K); 262,144 only for occasional very long documents.
 
+Since 18 Oct the automatic context gives both MoE models 131,072 tokens (it reserves 128K of context before sizing
+the expert cache; it reserved 32K before).
+
+### 4-bit KV cache: accuracy (simulated)
+
+`ARC_KV4` rounds K and / or V as llama.cpp's q4_0 does (blocks of 32, 16 levels) before they are stored in the int8
+cache, so the attention kernels are unchanged and only the accuracy is measured (no memory or speed gain yet).
+Perplexity over the second half of each chunk of a code + documentation text (zero/engine.h and two docs files),
+and KL of each scored token's distribution against the int8 run (its top 64 tokens + the rest as one bucket). The
+first row of each model is the cost of int8 itself: f16 K/V (`--attn-f32`) against int8.
+
+| Model | Context | Variant | Perplexity | KL vs int8 | Same top token |
+|---|---|---|---|---|---|
+| 27B | 8K | f16 (vs int8) | 2.1917 (int8 2.1928) | 0.0006 | 99.2 % |
+| 27B | 8K | V 4-bit | 2.1970 | 0.0027 | 98.7 % |
+| 27B | 8K | K + V 4-bit | 2.1963 | 0.0064 | 97.6 % |
+| 27B | 32K | V 4-bit | 1.9979 (int8 1.9954) | 0.0024 | 98.6 % |
+| 27B | 32K | K + V 4-bit | 2.0013 | 0.0060 | 97.8 % |
+| 35B | 8K | f16 (vs int8) | 2.6639 (int8 2.6718) | 0.0112 | 97.8 % |
+| 35B | 8K | V 4-bit | 2.6838 | 0.0160 | 96.6 % |
+| 35B | 8K | K + V 4-bit | 2.7001 | 0.0311 | 95.8 % |
+| 35B | 32K | V 4-bit | 2.3554 (int8 2.3494) | 0.0095 | 97.2 % |
+| 35B | 32K | K + V 4-bit | 2.3659 | 0.0145 | 96.5 % |
+| Flash Next | 8K | V 4-bit | 2.2003 (int8 2.2036) | 0.0238 | 95.6 % |
+| Flash Next | 8K | K + V 4-bit | 2.2071 | 0.0313 | 95.0 % |
+| Flash Next | 32K | V 4-bit | 2.0438 (int8 2.0406) | 0.0220 | 95.9 % |
+| Flash Next | 32K | K + V 4-bit | 2.0450 | 0.0291 | 95.3 % |
+
+- The error does not grow from 8K to 32K.
+- K is more sensitive than V (K + V costs 2-2.5x the KL of V alone), as expected.
+- The MoE models react more to any change (a slightly different attention output can pick other experts): for the
+  35B even f16 against int8 gives KL 0.011, and V 4-bit adds about as much again.
+- Flash Next has no f16 baseline: `--attn-f32` had no QSA masks (perplexity 42.6); it is refused for QSA models now.
+- Candidate: a real V-only 4-bit cache for long contexts (35B at 250K: the K/V reads are ~45 ms of a 92 ms step).
+
 ## 2026-10-17: speculative decoding, MoE prompts, Flash Next
 
 | Change | Before | After |

@@ -30,7 +30,7 @@ Target hardware it was built and tuned on: Intel Core Ultra 5 125H (Arc iGPU, 7 
 | GGUF architecture | Models | Notes |
 |---|---|---|
 | `qwen35` | Qwen3.5 (0.8B–27B dense), Qwen3.6, Qwen3.8 27B | hybrid Gated DeltaNet + gated attention; MTP speculative decoding; image input with a Qwen3-VL `mmproj` next to the model (encoded on the GPU; Qwen3.5 4B and 9B) |
-| `qwen35moe` | Qwen3.6-35B-A3B: standard GGUFs (e.g. Unsloth UD-Q3_K_M / UD-Q3_K_S) or ISTA-DASLab GSQ 2-bit | mixture of experts (256 experts, 8 active); standard GGUF experts (IQ / Q3_K / Q4_K / Q5_K / Q6_K / Q8_0 / Q4_0) load as they are; GSQ converted from the safetensors checkpoint with `tools/convert_gsq.py`; Unsloth's MTP repository adds speculative decoding and its `mmproj` image input (arcinferzero: both together; the automatic context keeps most experts cached first: ~40K tokens with images, MTP and DFlash2; up to 262K with `--ctx`, at the cost of SSD reads during generation) |
+| `qwen35moe` | Qwen3.6-35B-A3B: standard GGUFs (e.g. Unsloth UD-IQ4_XS / UD-Q3_K_M) or ISTA-DASLab GSQ 2-bit | mixture of experts (256 experts, 8 active); standard GGUF experts (IQ / Q3_K / Q4_K / Q5_K / Q6_K / Q8_0 / Q4_0) load as they are; GSQ converted from the safetensors checkpoint with `tools/convert_gsq.py`; Unsloth's MTP repository adds speculative decoding and its `mmproj` image input (arcinferzero: both together; the automatic context reserves 128K tokens of context, then sizes the expert cache: 131K tokens with ~80 % of the UD-IQ4_XS experts cached; up to 262K with `--ctx`, with a smaller cache; context sweep in docs/speed-progress.md) |
 | `gemma4` | Gemma 4 12B, Gemma 4 E4B (Google's QAT Q4_0 GGUFs) | sliding-window + global attention, per-layer embeddings (E4B); image and audio input (`mmproj`: 12B gemma4uv / gemma4ua, E4B gemma4v ViT and gemma4a conformer on the GPU); speculative decoding with the Gemma 4 assistant drafters (`mtp-*.gguf`) |
 | `qwen4exp` | Qwen3.8 Flash Next (ISTA-DASLab GSQ-RCO IQ3_S, GGUF in 2 parts) | **arcinferzero only**; 4 hyper-connection streams, Gated DeltaNet + gated attention with QSA sparse attention, 512 experts (10 active) streamed from the SSD, PLE n-gram table read from part 2 per token; no MTP block, no image input; long-context QSA not validated yet |
 
@@ -226,7 +226,7 @@ The same numbers come from `server.exe --list-models` ("memory", "defaults") and
    pi-arc                  # the model the server runs or used last (the first time: choose from a list)
    pi-arc --pick           # choose the model from the list of every downloaded model
    pi-arc 27b              # Qwen3.8 27B;  35b = Qwen3.6 35B-A3B (mixture of experts, much faster);
-                           # 35b-mtp = the file of Unsloth's MTP repository (~13 % faster generation, 40K context)
+                           # 35b-mtp = the file of Unsloth's MTP repository (~13 % faster generation, 131K context)
    pi-arc g12              # Gemma 4 12B (also reads images);  e4b = Gemma 4 E4B;  9b / 4b = Qwen3.5 9B / 4B
    pi-arc -c               # continue the last session in this folder;  pi-arc -r = choose a session
    pi-arc --think off      # no reasoning; also minimal / low (default) / medium / high
@@ -244,13 +244,14 @@ tokenizer and chat templates with the reference output, the model's next-token d
 implementation, and the server API:
 
 ```powershell
-$h = "$env:USERPROFILE\.cache\huggingface\hub"
-$m4 = (Get-ChildItem $h -Recurse -Filter "Qwen3.5-4B-UD-Q4_K_XL.gguf" | Select-Object -First 1).FullName
-$g  = (Get-ChildItem $h -Recurse -Filter "gemma-4-12b-it-qat-q4_0.gguf" | Select-Object -First 1).FullName
-powershell -ExecutionPolicy Bypass -File tests\run_tests.ps1 -Model4B $m4 -ModelGemma $g
+powershell -ExecutionPolicy Bypass -File tests\run_tests.ps1               # arcinferzero, models found automatically
+powershell -ExecutionPolicy Bypass -File tests\run_tests.ps1 -SkipGpu      # only the checks without a GPU / model
+powershell -ExecutionPolicy Bypass -File tests\run_tests.ps1 -ListModels   # which model each check would use
 ```
 
-It ends with `ALL TESTS PASSED` (`-Model27B` and `-Model35B` add the other models). Stop `arc-server` first: the
+It runs the model-free checks first, then per model found (27B, 35B, Flash Next, 4B, Gemma 4 12B) the KL and greedy
+checks and MTP / DFlash2 = plain decoding, then a server smoke test; a missing model is a SKIP, not a failure
+(`-Engine opencl` or `both` for the OpenCL engine). It ends with `ALL TESTS PASSED`. Stop `arc-server` first: the
 test uses port 8091 and needs the GPU memory.
 
 ### Troubleshooting
