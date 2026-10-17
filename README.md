@@ -10,7 +10,8 @@ Two engines share the kernels and the server code:
 - **arcinferzero** (`zero/`, `bin\serverz.exe`, `bin\runz.exe`; the default since 2026-10-16) runs the
   OpenCL-compiled kernels through **Level Zero**. Its output is bit-identical to the OpenCL engine on every model.
   On top it streams mixture-of-experts weights from the SSD (Qwen3.6 35B-A3B: only the experts in use stay in GPU
-  memory, so the full 262K context fits together with images and MTP) and supports up to 7 MTP drafts per step.
+  memory; the full 262K context fits together with images and MTP, though the automatic context keeps most
+  experts cached first, ~40K tokens, for steady generation) and supports up to 7 MTP drafts per step.
 - **arcinfer** (`src/`, `bin\server.exe`, `bin\run.exe`): the original OpenCL engine, still available with
   `arc-server start -OpenCL` / `pi-arc --opencl` (launcher: Engine "arcinfer").
 
@@ -29,7 +30,7 @@ Target hardware it was built and tuned on: Intel Core Ultra 5 125H (Arc iGPU, 7 
 | GGUF architecture | Models | Notes |
 |---|---|---|
 | `qwen35` | Qwen3.5 (0.8B–27B dense), Qwen3.6, Qwen3.8 27B | hybrid Gated DeltaNet + gated attention; MTP speculative decoding; image input with a Qwen3-VL `mmproj` next to the model (encoded on the GPU; Qwen3.5 4B and 9B) |
-| `qwen35moe` | Qwen3.6-35B-A3B: standard GGUFs (e.g. Unsloth UD-Q3_K_M / UD-Q3_K_S) or ISTA-DASLab GSQ 2-bit | mixture of experts (256 experts, 8 active); standard GGUF experts (IQ / Q3_K / Q4_K / Q5_K / Q6_K / Q8_0 / Q4_0) load as they are; GSQ converted from the safetensors checkpoint with `tools/convert_gsq.py`; Unsloth's MTP repository adds speculative decoding and its `mmproj` image input (arcinferzero: both together at 262K context) |
+| `qwen35moe` | Qwen3.6-35B-A3B: standard GGUFs (e.g. Unsloth UD-Q3_K_M / UD-Q3_K_S) or ISTA-DASLab GSQ 2-bit | mixture of experts (256 experts, 8 active); standard GGUF experts (IQ / Q3_K / Q4_K / Q5_K / Q6_K / Q8_0 / Q4_0) load as they are; GSQ converted from the safetensors checkpoint with `tools/convert_gsq.py`; Unsloth's MTP repository adds speculative decoding and its `mmproj` image input (arcinferzero: both together; the automatic context keeps most experts cached first: ~40K tokens with images, MTP and DFlash2; up to 262K with `--ctx`, at the cost of SSD reads during generation) |
 | `gemma4` | Gemma 4 12B, Gemma 4 E4B (Google's QAT Q4_0 GGUFs) | sliding-window + global attention, per-layer embeddings (E4B); image and audio input (`mmproj`: 12B gemma4uv / gemma4ua, E4B gemma4v ViT and gemma4a conformer on the GPU); speculative decoding with the Gemma 4 assistant drafters (`mtp-*.gguf`) |
 | `qwen4exp` | Qwen3.8 Flash Next (ISTA-DASLab GSQ-RCO IQ3_S, GGUF in 2 parts) | **arcinferzero only**; 4 hyper-connection streams, Gated DeltaNet + gated attention with QSA sparse attention, 512 experts (10 active) streamed from the SSD, PLE n-gram table read from part 2 per token; no MTP block, no image input; long-context QSA not validated yet |
 
@@ -381,8 +382,9 @@ every option.
 - **Context:** each model gets the largest context that fits the GPU memory currently set (Intel Graphics
   Software), with ~1 GiB left for Windows and other apps, at most its max context length (the GGUF's
   `context_length`). The GPU memory the driver offers changes with what else runs, so the numbers move; the launcher
-  window shows how each one is counted. Examples at ~18–19 GiB: Qwen3.6 35B-A3B 262,144 with images and MTP
-  (arcinferzero: experts streamed from the SSD; the OpenCL engine fits ~40K with MTP); Qwen3.5 4B / 9B and Gemma 4
+  window shows how each one is counted. Examples at ~18–19 GiB: Qwen3.6 35B-A3B 40,960 with images, MTP and DFlash2
+  (arcinferzero: experts streamed from the SSD, the automatic context leaves them up to 90 % of the cache; 262,144 fits
+  with `--ctx 262144`, but generation then waits for SSD reads); Qwen3.8 Flash Next 40,960; Qwen3.5 4B / 9B and Gemma 4
   12B 262,144; Gemma 4 E4B 131,072; Qwen3.8 27B 40,960 with images and MTP, more without them. `pi-arc --ctx N` sets a context, `pi-arc --ctx auto` goes back to the automatic one (restarting a server
   that runs a fixed context). `--chunk 1024` frees 1.1 GiB on the 27B for more context (118,784 at 18.3 GiB;
   prompts of ~11K tokens ~4 % slower, from ~34K on no difference). Pi's `maxTokens` is the whole window: Pi clamps
