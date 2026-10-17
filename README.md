@@ -232,7 +232,7 @@ The same numbers come from `server.exe --list-models` ("memory", "defaults") and
    pi-arc --think off      # no reasoning; also minimal / low (default) / medium / high
    pi-arc --help           # every option
    arc-server status       # what is running;  arc-server stop = free the GPU memory
-   arc-server clear-cache  # delete saved conversations (session cache: on by default, 16 GB; pi-arc --session-cache 0 = off)
+   arc-server clear-cache  # delete saved conversations (session cache: on by default, 8 GB; pi-arc --session-cache 0 = off)
    ```
 
    Inside Pi, `/model` switches between all of them (the server loads the chosen one).
@@ -327,7 +327,7 @@ Qwen3.8 Flash Next.
   one), the server saves the conversation it holds to disk (KV cache, DeltaNet states; `%LOCALAPPDATA%\arcinfer\sessions`)
   and loads a saved one that matches the request, instead of processing its whole prompt again. New conversations
   resume after the system prompt they share (Qwen: a recurrent-state snapshot there, kept in host memory). Saving
-  and loading take about a second; outputs are identical to never switching. `--session-cache-gb N` (the server's default 0 = off; arc-server / pi-arc start it with 16 GB, `pi-arc --session-cache 0` = off;
+  and loading take about a second; outputs are identical to never switching. `--session-cache-gb N` (the server's default 0 = off; arc-server / pi-arc start it with 8 GB, `pi-arc --session-cache 0` = off;
   the least recently used conversations go first); `arc-server clear-cache` deletes them all. `arc-server stop` /
   `restart` and a model switch save the conversation the server holds first (`POST /sessions/save`), so it is
   loaded afterwards instead of processed again; only a server that is killed loses it.

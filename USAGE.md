@@ -96,7 +96,7 @@ processes then:
 | Situation | What is processed (27B) |
 |---|---|
 | right after Pi is closed | only the new message (the server still holds that conversation) |
-| after another session or project | only the new message: the session cache (on by default, 16 GB) saves the conversation that was left to disk and loads it again in seconds (`pi-arc --session-cache 0` turns it off) |
+| after another session or project | only the new message: the session cache (on by default, 8 GB) saves the conversation that was left to disk and loads it again in seconds (`pi-arc --session-cache 0` turns it off) |
 | after `arc-server stop` / `restart` or a model switch | only the new message: the conversation being held is saved to disk first and then loaded again (lost only if the server process is killed) |
 
 Pressing Esc in Pi stops the server right away (while reading the prompt: within ~1 s; while writing the answer:
@@ -314,7 +314,7 @@ Tips:
   your message is processed. The first session in a new project folder processes its system prompt once (27B:
   ~40 s).
 - Going back to an old session after another session (or the web UI) loads its conversation from disk in seconds:
-  the session cache is on by default (16 GB in `%LOCALAPPDATA%\arcinfer\sessions`, delete with
+  the session cache is on by default (8 GB in `%LOCALAPPDATA%\arcinfer\zero\sessions`, delete with
   `arc-server clear-cache`, turn off with `pi-arc --session-cache 0`). `arc-server stop` / `restart` and a model
   switch first save the conversation the server holds, so afterwards that conversation is loaded too, not processed
   again.

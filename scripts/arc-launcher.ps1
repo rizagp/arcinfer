@@ -148,7 +148,7 @@ Update-Api
 Add-Opt "API address" $apiPanel "for other apps; API key: anything; model: the id in the list"
 Add-Opt "MTP drafts per step" $draftBox
 Add-Opt "Thinking budget (tokens)" $thinkBox
-Add-Opt "Prompt cache (GB on disk)" $sessBox "whole conversations, kept when switching sessions; 0 = off"
+Add-Opt "Session cache (GB on disk)" $sessBox "whole conversations, kept when switching sessions; 0 = off"
 Add-Opt "" $netChk
 $advChk = New-Check "Show advanced options"
 $advChk.Margin = New-Object System.Windows.Forms.Padding(3, 10, 3, 4)
@@ -158,7 +158,7 @@ Add-Opt "Prompt chunk" $chunkBox "smaller = more context, slower prompts" -Advan
 Add-Opt "Image tokens min / max" $imgMinBox -Advanced
 Add-Opt "" $imgMaxBox -Advanced
 Add-Opt "Resident W8 weights (GB)" $budgetBox "0 = chosen with the context" -Advanced
-Add-Opt "Prompt cache folder" $sessDirBox "empty = %LOCALAPPDATA%\arcinfer\sessions" -Advanced
+Add-Opt "Session cache folder" $sessDirBox "empty = %LOCALAPPDATA%\arcinfer\zero\sessions" -Advanced
 Add-Opt "Prefix cache (GB on disk)" $prefixBox "system prompts per project" -Advanced
 Add-Opt "" $noPrefixChk -Advanced
 Add-Opt "" $noSwapChk -Advanced
@@ -228,7 +228,7 @@ function Fill-Defaults {
     port = $Port; ctx = $(if ($m -and $m.ctx) { "$($m.ctx)" } else { "auto" })
     chunk = $(if ($d) { $d.chunk } else { 4096 }); drafts = $(if ($d -and $d.mtp_drafts) { $d.mtp_drafts } else { 2 })
     think = 8192; img_min = $(if ($d) { $d.image_min } else { 0 }); img_max = $(if ($d) { $d.image_max } else { 0 })
-    budget = 0; prompt_cache = 16; prompt_cache_dir = ""; prefix_cache = 8; no_prefix = $false; no_swap = $false
+    budget = 0; prompt_cache = 8; prompt_cache_dir = ""; prefix_cache = 8; no_prefix = $false; no_swap = $false
     network = $false; attn_f32 = $false
   }
   foreach ($k in $fields.Keys) {

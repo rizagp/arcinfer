@@ -6,7 +6,7 @@
 #   arc-server start -Model 27b       the same without asking: a shortcut (27b 35b 35b-s 35b-mtp 9b 4b g12 e4b, with
 #                                     -mtp / -vision / -std for a variant, e.g. 9b-std), a model id, part of a model's
 #                                     name (e.g. swift) or a path to a .gguf file
-#        [-SessionCacheGb N]          save conversations to disk when switching (N GB; default 16, 0 = off)
+#        [-SessionCacheGb N]          save conversations to disk when switching (N GB; default 8, 0 = off)
 #        [-Vision on|off]             image / audio encoders (default on; off: no mmproj, more context)
 #        [-Ctx N|auto] [-Chunk N] [-NoMtp]  context (default: auto, the largest that fits the GPU memory),
 #                                     prompt chunk size, no speculative decoding
@@ -25,7 +25,7 @@ param(
   [string]$Model = "",
   [string]$Ctx = "",
   [int]$Chunk = 0,
-  [double]$SessionCacheGb = 16,
+  [double]$SessionCacheGb = 8,
   [int]$Port = 8090,
   [switch]$NoMtp,
   [ValidateSet("", "on", "off")] [string]$Vision = "",
@@ -72,7 +72,7 @@ $exe = Join-Path $root $(if ($Zero) { "bin\serverz.exe" } else { "bin\server.exe
 $log = Join-Path $stateDir "server.log"
 $stateFile = Join-Path $stateDir "server.json"
 $base = "http://127.0.0.1:$Port"
-$sessDir = Join-Path $stateDir "sessions"  # saved conversations (server --session-cache-gb, default 16 GB)
+$sessDir = Join-Path $stateDir "sessions"  # saved conversations (server --session-cache-gb, default 8 GB)
 
 # The models come from `server.exe --list-models` (Hugging Face cache + %LOCALAPPDATA%\arcinfer\models): name, file,
 # alias (= the model id of the API and Pi), shortcut, the context --ctx auto chose for the current GPU memory. The
@@ -199,7 +199,7 @@ Options for start / restart:
                                  a running server keeps its context, a new one starts with auto. -Ctx auto
                                  also restarts a server that runs a fixed context.
   -Chunk <N>                     prompt chunk size (default 4096; 1024 = less GPU memory, more context)
-  -SessionCacheGb <N>            save conversations to disk when switching sessions (default 16 GB, 0 = off)
+  -SessionCacheGb <N>            save conversations to disk when switching sessions (default 8 GB, 0 = off)
   -NoMtp                         no speculative decoding
   -OpenCL                        arcinfer on OpenCL (bin\server.exe), the engine before arcinferzero became the
                                  default (2026-10-16); without it arcinferzero runs (-Zero is accepted, the same)
@@ -341,7 +341,7 @@ $srvArgs = @("-m", "`"$($m.path)`"", "--port", $Port, "--ctx", $ctxArg, "--alias
 if ($useMtp) { $srvArgs += "--mtp" }
 if ($NoStream) { $srvArgs += "--no-stream" }
 if ($Chunk -gt 0) { $srvArgs += @("--chunk", $Chunk) }
-if ($SessionCacheGb -gt 0) { $srvArgs += @("--session-cache-gb", $SessionCacheGb) }  # saved conversations on disk (default 16 GB, 0 = off)
+if ($SessionCacheGb -gt 0) { $srvArgs += @("--session-cache-gb", $SessionCacheGb) }  # saved conversations on disk (default 8 GB, 0 = off)
 if ($novision -eq "1") { $srvArgs += "--no-mmproj" }
 Say "Starting $(if ($NoStream) { 'arcinferzero (no SSD cache)' } elseif ($Zero) { 'arcinferzero' } else { 'arcinfer' }): $($m.name) as $($m.alias), context $ctxArg, port $Port$(if ($useMtp) { ', speculative decoding' })"
 Say "  engine: $(Engine-Text $Engine $m.arch)"

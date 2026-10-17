@@ -12,7 +12,7 @@
 #                                   xhigh / max
 #   pi-arc -p "explain src/x"       any Pi arguments after the launcher options
 #   pi-arc --ctx auto|N --chunk N   context (default auto: the largest that fits the GPU memory) / chunk size
-#   pi-arc --session-cache 0        do not keep conversations on disk when switching (default 16 GB)
+#   pi-arc --session-cache 0        do not keep conversations on disk when switching (default 8 GB)
 #   pi-arc --help                   all options
 #   arc-server stop                 stop the background server when you are done (frees the GPU memory)
 #
@@ -116,7 +116,7 @@ LAUNCHER OPTIONS
                                  prompts ~4 % slower, long prompts the same speed.
   --session-cache <GB>           keep conversations on disk (%LOCALAPPDATA%\arcinfer\sessions) when you switch
   (also -SessionCache)           Pi sessions: going back to one loads it in seconds instead of processing its
-                                 whole prompt again (default: 16 GB; 0 = off). New sessions always reuse the
+                                 whole prompt again (default: 8 GB; 0 = off). New sessions always reuse the
                                  system prompt (in memory; from disk after a restart or a model switch).
   --help, -h, -?, /?, help       this text
 
@@ -231,7 +231,7 @@ if (-not $model -and -not $pick) {
     if ($lp -and (Test-Path $lp)) { $model = $lp }
   }
 }
-$sessArg = @{}; if ($null -ne $sessGb) { $sessArg.SessionCacheGb = $sessGb }  # (not given: the server's default, 16 GB)
+$sessArg = @{}; if ($null -ne $sessGb) { $sessArg.SessionCacheGb = $sessGb }  # (not given: the server's default, 8 GB)
 if ($preserve) { $sessArg.PreserveThinking = $true }  # (only when given: a plain start keeps the running server)
 & (Join-Path $PSScriptRoot "arc-server.ps1") start -Model $model -Ctx $ctx -Chunk $chunk @sessArg -NoMtp:$noMtp -Vision $vision -Zero:$zero -OpenCL:(-not $zero) -NoStream:$noStream
 if (-not $?) { exit 1 }
