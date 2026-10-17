@@ -385,7 +385,7 @@ every option.
   window shows how each one is counted. Examples at ~18–19 GiB: Qwen3.6 35B-A3B 40,960 with images, MTP and DFlash2
   (arcinferzero: experts streamed from the SSD, the automatic context leaves them up to 90 % of the cache; 262,144 fits
   with `--ctx 262144`, but generation then waits for SSD reads); Qwen3.8 Flash Next 40,960; Qwen3.5 4B / 9B and Gemma 4
-  12B 262,144; Gemma 4 E4B 131,072; Qwen3.8 27B 40,960 with images and MTP, more without them. `pi-arc --ctx N` sets a context, `pi-arc --ctx auto` goes back to the automatic one (restarting a server
+  12B 262,144; Gemma 4 E4B 131,072; Qwen3.8 27B 40,960 with MTP and the DFlash2 drafter, 77,824 without MTP (it has no image encoder). `pi-arc --ctx N` sets a context, `pi-arc --ctx auto` goes back to the automatic one (restarting a server
   that runs a fixed context). `--chunk 1024` frees 1.1 GiB on the 27B for more context (118,784 at 18.3 GiB;
   prompts of ~11K tokens ~4 % slower, from ~34K on no difference). Pi's `maxTokens` is the whole window: Pi clamps
   each request to the room left (window − prompt − 4096).

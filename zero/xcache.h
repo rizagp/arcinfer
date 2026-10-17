@@ -175,10 +175,27 @@ struct XCache {
   uint64_t hits = 0, misses = 0, p_hits = 0, p_reads = 0, pf_reads = 0, rounds = 0;
   double read_ms = 0, wait_ms = 0;
 
+  // Gives the cache's GPU and host memory back (the server switches models in one process: a 35B cache of 8.5 GiB
+  // left behind made the next model run out of memory and lose the device).
   ~XCache() {
     join();
     save_state();
     if (zrt::oom_hook && active() == this) { zrt::oom_hook = nullptr; active() = nullptr; }
+    zrt::sync();
+    for (Pool& P : pools) {
+      const int per = (int)std::max<uint64_t>(1, (1ull << 30) / std::max<uint64_t>(1, P.rec));
+      for (size_t c = 0; c < P.chunks.size(); ++c) {
+        const int k = std::min(per, P.n - (int)c * per);
+        zeMemFree(zrt::ctx, P.chunks[c]);
+        zrt::device_bytes -= (size_t)std::max(0, k) * P.rec + 65536;
+      }
+      P.chunks.clear();
+    }
+    for (cl_mem m : xtab) clReleaseMemObject(m);
+    xtab.clear();
+    for (char*& s : stage)
+      if (s) { zeMemFree(zrt::ctx, s); s = nullptr; }
+    if (xaddr) { zeMemFree(zrt::ctx, xaddr); xaddr = nullptr; }
   }
   static XCache*& active() { static XCache* a = nullptr; return a; }
   // the layer of the last ensure() and the experts it set: kernels of that layer may still be launched
