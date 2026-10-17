@@ -84,13 +84,15 @@ prompts +27 % at 131K (253.5 -> 321) and +32 % at 262K (146 -> 193); generation 
 
 | Context | Prompt | Generation at that depth (plain) |
 |---|---|---|
-| 131,072 (prompt 125,000) | 78.6 tok/s (26.5 min) | 3.35 tok/s (median step 190 ms) |
+| 131,072 (prompt 125,000) | 78.6 tok/s (26.5 min); **123.4 (16.9 min) with qsa_score_rt** | 3.35 tok/s (median step 190 ms; the first step took 7.3 s); 5.38 (median 184 ms) |
 | 262,144 (prompt 250,000) | 37.8 tok/s (110 min) | 3.97 tok/s (median step 240 ms) |
 
 - The cache is a fifth of the experts at any context, so the context costs little: from 32K to 131K short answers
   lose 2-6 %, at 262K 9-10 %.
-- Long prompts are the limit: 165 tok/s at 8K, 79 at 125K, 38 at 250K. The slowdown grows faster than the length,
-  i.e. attention / QSA dominates long prompts (profile pending, review N-5).
+- Long prompts are the limit: 165 tok/s at 8K, 79 at 125K, 38 at 250K (measured before qsa_score_rt). The slowdown
+  grew faster than the length: the QSA block scores read the whole pooled key array once per query row. With 8 rows
+  per work-group (`qsa_score_rt`, same logits) qsa_score fell from 13.8 to 2.4 s on a 32K prompt (pp32768 131-146 ->
+  153-154 tok/s) and the 125K prompt went from 78.6 to 123.4 tok/s; the 250K prompt was not measured again.
 - **Recommended context: 131,072** (−2 to −6 % against 32K); 262,144 only for occasional very long documents.
 
 Since 18 Oct the automatic context gives both MoE models 131,072 tokens (it reserves 128K of context before sizing

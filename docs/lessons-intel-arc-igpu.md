@@ -76,6 +76,7 @@ after the steps below (llama.cpp: 590 s Vulkan, 504 s SYCL).
 | 4096-token chunks for streamed MoE (the experts a chunk misses are read once per chunk) | 35B 8K prompt 620 -> 750 tok/s |
 | The same kernels through Level Zero instead of OpenCL | bit-identical, 35B time to first token 6.45 -> 4.07 s, generation 16.9 -> 18.3 tok/s, model load 4.3 -> 2.3 s (4B) |
 | Flash Next prompt mixer (gated mean) with vector loads instead of one value per lane per load | 45 -> 3.7 ms per 2048-row chunk; 8K prompt 98 -> 127 tok/s (with moe_rg for its down projection: 165) |
+| Flash Next QSA block scores for 8 query rows per work-group (`qsa_score_rt`: each pooled key block read once for 8 rows instead of once per row) | bit-identical; qsa_score 13.8 -> 2.4 s on a 32K prompt, pp32768 131-146 -> 153-154 tok/s, 125K prompt 78.6 -> 123.4 tok/s (16 rows: slower) |
 | Vision encoders on the GPU in f16 weights / f32 activations, attention with one query row per lane, 4-key tiles, native_exp | 1008-token image 1118 -> 588 ms; 4096 tokens 36.1 -> 15.3 s for the whole encoder (llama.cpp Vulkan 71 s); 72-dim heads with interleaved sub-group block reads 6.0 -> 1.6 s |
 
 Prompt speed, tokens/s (10 October, OpenCL engine, same laptop; llama.cpp b11527 official builds, flash attention,
@@ -147,6 +148,7 @@ MoE expert kernels read small scattered blocks: the 35B's gate/up IQ3_XXS runs 5
 | Buffers sized from what each model really uses (the Qwen KV scale buffer was sized per 64 dims, Qwen uses one per row) | 1,632 bytes per token less |
 | **Automatic context** from a dry load that only adds up the GPU allocations (seconds, nothing uploaded), counting image / audio encoders | the budget changes with the driver setting and other apps; computing it per start avoids out-of-memory crashes and paging; Qwen3.5 9B with its vision encoder reserved 217,088 -> 143,360 tokens |
 | Prefix cache (system prompt state on disk per project), session cache (whole conversations to disk), a snapshot at the start of the last assistant turn | a new message in a long Pi session: 5.2 s instead of 16.8 s (9B); a new session reuses the system prompt in ~5 s instead of ~40 s (27B) |
+| Automatic context for streamed MoE: reserve 128K tokens of context, then size the expert cache (was 32K) | 35B UD-IQ4_XS 32,768 -> 131,072 tokens at 81 % of the experts cached, short answers as fast as at 64K; Flash Next 131K at -2..6 % (context sweep 18 Oct, speed-progress.md) |
 
 ## 5. Tried and not kept
 
@@ -304,6 +306,13 @@ predicating the loads gave 905 -> 843 ms, bit-identical. Check bit identity afte
   a peak DP4a microbenchmark favoured SIMD8, which was 28 % slower in the GEMM. Confirm every win end to end.
 - **Estimates from one component can be wrong in either direction.** Level Zero was first dismissed because the gaps
   between kernels were only 1.6–2 %; run end to end it was clearly faster (35B time to first token 6.45 -> 4.07 s).
+- **Measure the noise floor before judging an accuracy change.** For the MoE models even f16 against int8 K/V
+  gives KL 0.011 (35B; 27B: 0.0006): a small change in attention can pick other experts. A 4-bit V cache
+  (KL 0.0095-0.016) is about one more such step, not a 15x regression.
+- **Rarely used paths break silently.** `--attn-f32` had no QSA masks and gave Flash Next a perplexity of 42.6;
+  it was only found by using it as a baseline. Refuse a combination you do not test.
+- **DFlash2 needs the expert cache it competes with.** On the 35B at 262K (cache 71 %) its 8-row verification
+  brought nothing for code (36.5 vs 36.6 tok/s MTP only) and cost Indonesian 19.2 vs 23.4.
 - **Logit differences at ~0.0003 KL are noise** from int8 rounding flips (±15–30 % run to run); judge accuracy over
   many positions and prompts. Changing only the 27B's score rounding moved its KL 0.000355 -> 0.000414.
 

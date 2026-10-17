@@ -377,13 +377,13 @@ time, no model GGUF deleted, no large new disk use without asking (Flash Next ex
 |---|---|---|---|
 | 18.1 | P0-1..4: HTTP parser, media lock, send timeout, empty prompt | ✅ | commit 2112264, tests/test_http.cpp |
 | 18.2 | P1-4..6: sampler (presence penalty in greedy, logit_bias -100 bans, sample_allowed without a vocab-sized index), API metadata; P1-1 run_tests.ps1 for zero | ✅ | commit c697b40, tests/test_sampler.cpp |
-| 18.3 | Level Zero launch safety (review 13/16): suggested group size divides the global size; explicit mismatches fail loudly; guards in conv_state_update / moe_combine; gemv odd-nsb over-read (tail slack 256 -> 1024 B); GEMM shape invariants; dfl_attn bound; ARC_KV4 validated | 🔄 | 27B greedy identical (plain, MTP), 0 launch errors; waiting for the 35B identity check, then commit |
-| 18.4 | 35B UD-IQ4_XS: expert file, context sweep 32K / 64K / 96K / 131K / 262K (cache %, hit rate, SSD, tok/s, hybrid), prompts 250K / 125K, MTP-only and plain at 131K / 262K | 🔄 | sweep35.sh + sweep35b.sh |
-| 18.5 | 35B: optimal context (hit rate >= 80-85 %) and whether DFlash2 should be off at large contexts; propose the auto-context default | ⏳ | from 18.4 |
-| 18.6 | 35B identity: plain vs MTP vs DFlash2 greedy; run_tests.ps1 (zero) with 27B + 35B | ⏳ | |
-| 18.7 | KV 4-bit accuracy on 35B (ARC_KV4 simulation, 8K / 32K); 27B done: V-only KL 0.0024-0.0027, K+V 0.0060-0.0064 | ⏳ | decide whether a real V-only 4-bit cache is worth it (memory for the expert cache at 262K) |
-| 18.8 | Decode attention at deep context (27B / 35B, 64K+): split tuning (ARC_ATTN_DEC_SG / SMAX) | ⏳ | measure first |
+| 18.3 | Level Zero launch safety (review 13/16): suggested group size divides the global size; explicit mismatches fail loudly; guards in conv_state_update / moe_combine; gemv odd-nsb over-read (tail slack 256 -> 1024 B); GEMM shape invariants; dfl_attn bound; ARC_KV4 validated | ✅ | commit 64a2441; 27B / 35B identical (plain, MTP, DFlash2), run_tests.ps1 20 passed |
+| 18.4 | 35B UD-IQ4_XS: expert file, context sweep 32K / 64K / 96K / 131K / 262K (cache %, hit rate, SSD, tok/s, hybrid), prompts 250K / 125K, MTP-only and plain at 131K / 262K; same for Flash Next | ✅ | docs/speed-progress.md 2026-10-18 |
+| 18.5 | Optimal context: 131,072 for 35B and Flash Next; auto context reserves 128K before the expert cache | ✅ | commit 64a2441; DFlash2 at 262K: no gain for code, -18 % Indonesian (auto stays at 131K, so not switched off) |
+| 18.6 | 35B identity: plain vs MTP vs DFlash2 greedy; run_tests.ps1 (zero) with 27B + 35B | ✅ | ALL TESTS PASSED (20 passed, 7 skipped) |
+| 18.7 | KV 4-bit accuracy (ARC_KV4 simulation, 8K / 32K) on 27B, 35B, Flash Next, with the f16-vs-int8 noise floor | ✅ | table in speed-progress; a real V-only 4-bit cache is the next long-context lever (35B at 250K: ~45 of 92 ms per step are K/V reads); not started (1-2 days: every attention kernel) |
+| 18.8 | Decode attention at deep context (27B / 35B, 64K+): split tuning (ARC_ATTN_DEC_SG / SMAX) | ⚠️ | not needed: at 250K the extra ~45 ms per step equals reading 2.6 GB of int8 K/V at ~60 GB/s; only fewer bytes (4-bit KV) help |
 | 18.9 | MOE_TILES balance (review N-3): profile 35B prompt tiles before changing anything | ⏳ | |
 | 18.10 | RoPE pow table (P1-7): only if attn_prep shows up in a profile | ⏳ | attn_prep ~0.5 % of generation |
-| 18.11 | Flash Next QSA row tiling (N-5): rebuild its expert file (53 GB, user OK 17 Oct 22:55), profile qsa_* at 8K / 32K, tiled qsa_score only if it matters | ⏳ | after the 35B sweep |
-| 18.12 | Docs: speed-progress (35B IQ4_XS, sweep), lessons (mach scan, KV 4-bit results), README 35B line | ⏳ | |
+| 18.11 | Flash Next QSA row tiling (N-5) | ✅ | commit ec25201: qsa_score_rt (8 rows), bit-identical; pp32768 +5..17 %, 125K prompt 78.6 -> 123.4 tok/s; --attn-f32 refused for QSA (it had no masks) |
+| 18.12 | Docs: speed-progress (35B IQ4_XS, sweep), lessons (mach scan, KV 4-bit results), README 35B line | ✅ | |
