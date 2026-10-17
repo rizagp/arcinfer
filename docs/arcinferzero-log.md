@@ -1,332 +1,332 @@
-# Log pekerjaan arcinferzero (14 Oktober 17:00 – 15 Oktober pagi)
+# arcinferzero work log (14 October 17:00 – 15 October morning)
 
-Tujuan: engine baru `arcinferzero` (folder `zero/`, arcinfer lama tidak diubah) untuk model MoE. Expert disimpan di
-SSD, dan hanya expert yang sering dipakai yang ada di memori GPU (cache LRU). Target: Qwen3.6 35B dengan konteks
-262K dan MTP sekitar 21 tok/s, hasil identik bit dengan arcinfer, Windows tetap kebagian RAM minimal 14 GB.
+Goal: a new engine `arcinferzero` (folder `zero/`, the old arcinfer is not changed) for MoE models. Experts are stored on
+the SSD, and only frequently used experts are kept in GPU memory (LRU cache). Target: Qwen3.6 35B with a 262K context
+and MTP at about 21 tok/s, results bit-identical to arcinfer, and Windows still gets at least 14 GB of RAM.
 
-## Ringkasan hasil
+## Summary of results
 
-| | arcinfer (lama) | arcinferzero |
+| | arcinfer (old) | arcinferzero |
 |---|---|---|
-| Konteks maksimum 35B (MTP) | 40.960 | 262.144 |
-| Konteks 35B dengan gambar + MTP | 4.096 | 262.144 |
-| Generasi 35B dengan MTP | 22,3 tok/s (konteks 40K) | 22,2 tok/s (konteks 262K) |
-| Generasi 35B tanpa MTP | 16,9–18,3 tok/s | 19,3 tok/s |
-| Time to first token (prompt 2.216 token) | 4,1–6,5 dtk | 3,3–3,5 dtk |
-| Memori server 35B + gambar | ~34 GB (RAM bebas tinggal ~1 GB, load 426 dtk) | ~17,5 GB (Windows kebagian 14 GiB, load ~10 dtk) |
-| Hasil (logit) | acuan | identik bit |
+| Maximum 35B context (MTP) | 40,960 | 262,144 |
+| 35B context with images + MTP | 4,096 | 262,144 |
+| 35B generation with MTP | 22.3 tok/s (40K context) | 22.2 tok/s (262K context) |
+| 35B generation without MTP | 16.9–18.3 tok/s | 19.3 tok/s |
+| Time to first token (2,216-token prompt) | 4.1–6.5 s | 3.3–3.5 s |
+| 35B server + images memory | ~34 GB (only ~1 GB of RAM left free, load 426 s) | ~17.5 GB (Windows gets 14 GiB, load ~10 s) |
+| Results (logits) | reference | bit-identical |
 
-## Urutan pekerjaan
+## Order of work
 
-### 14 Oktober sore
+### 14 October afternoon
 
-1. **Uji Level Zero sebagai pengganti OpenCL** (`zero/clrt.h`). Kernel arcinfer dijalankan lewat Level Zero tanpa
-   diubah. Hasil identik bit dan lebih cepat: 35B tanpa streaming TTFT 6,45 → 4,07 dtk, generasi 16,9 → 18,3 tok/s.
-   27B juga identik, prefill sama (~110 tok/s).
-2. **File expert di SSD** (`zero/expert_store.h`): `%LOCALAPPDATA%\arcinfer\zero\<model>-<id>.experts`. Satu expert
-   = satu record siap-GPU, rata 4 KB, dibaca langsung tanpa cache Windows. 35B: 15,1 GB untuk 41 layer (termasuk
-   MTP). Dibuat sekali (144 dtk), lalu dipakai terus. Dibuat ulang hanya kalau GGUF berubah. Aman dihapus.
-3. **Cache expert di GPU** (`zero/xcache.h`) dan kernel expert versi `-DXCACHE` (alamat tiap expert diambil dari
-   tabel). Uji pertama: identik bit dengan arcinfer, generasi 19,8 tok/s.
-4. **Error #1: RAM habis saat file expert dibuat** (RAM bebas tinggal 3,9 GB, laptop melambat). Penyebab: file 15 GB
-   lewat cache Windows dan halaman GGUF tetap menempel di RAM. Perbaikan: tulis tanpa cache Windows, halaman GGUF
-   dilepas setiap selesai satu layer dan setelah load.
-5. **Error #2: cache terpasang 100 %.** Jatah minimum per kelompok ukuran expert terlalu besar. Diperbaiki.
-6. **Konteks 262K + chunk 4096.** Mula-mula chunk jatuh ke 512 (TTFT 5,7 dtk). Diperbaiki ke 4096, prompt panjang
-   diproses per layer (layer-major) supaya expert dibaca sekali per layer, dan expert layer berikutnya dibaca dari
-   SSD di thread terpisah selagi GPU bekerja (prefetch). TTFT turun ke ~3,4 dtk.
-7. **Cache bentuk baru**: area sementara 976 MiB diganti staging 244 MiB. Prompt memakai ujung belakang daftar LRU,
-   sehingga tidak menyapu cache. Ruang memori yang dihemat masuk ke cache. Hasil: MTP 22,3 tok/s di 262K (target 21
-   tercapai). Batas atas dengan cache penuh: 23,9 tok/s.
-8. **Error #3: GPU kehabisan memori** (cache 84 %, sisa jatah GPU 1,13 GiB). Diperbaiki dengan menyisakan 1,4 GiB
-   untuk driver. Akibatnya cache ~79–82 % (tanpa gambar) atau ~70 % (dengan cadangan encoder gambar).
-9. **Server zero** (`zero/serverz.cpp`): chat, tool call, gambar + MTP bersamaan jalan. Isi cache disimpan (`.lru`)
-   dan dimuat ulang saat start (10,6 GB dalam ~6 dtk), sehingga prompt pertama cepat (3,4 → 0,6–1,1 dtk).
-   Konteks otomatis zero memakai catatan sendiri (sebelumnya terbawa angka 4.096 milik arcinfer).
+1. **Testing Level Zero as a replacement for OpenCL** (`zero/clrt.h`). The arcinfer kernels run through Level Zero
+   unchanged. Bit-identical results and faster: 35B without streaming TTFT 6.45 → 4.07 s, generation 16.9 → 18.3 tok/s.
+   27B also identical, same prefill (~110 tok/s).
+2. **Expert file on the SSD** (`zero/expert_store.h`): `%LOCALAPPDATA%\arcinfer\zero\<model>-<id>.experts`. One expert
+   = one GPU-ready record, 4 KB aligned, read directly without the Windows cache. 35B: 15.1 GB for 41 layers (including
+   MTP). Built once (144 s), then reused. Rebuilt only if the GGUF changes. Safe to delete.
+3. **Expert cache on the GPU** (`zero/xcache.h`) and `-DXCACHE` versions of the expert kernels (each expert's address
+   is taken from a table). First test: bit-identical to arcinfer, generation 19.8 tok/s.
+4. **Error #1: RAM ran out while building the expert file** (only 3.9 GB of RAM left free, laptop slowed down). Cause:
+   the 15 GB file went through the Windows cache and the GGUF pages stayed resident in RAM. Fix: write without the
+   Windows cache, release the GGUF pages after each layer and after load.
+5. **Error #2: cache installed at 100 %.** The minimum share per expert size group was too large. Fixed.
+6. **262K context + 4096 chunk.** At first the chunk fell to 512 (TTFT 5.7 s). Fixed to 4096; long prompts are
+   processed per layer (layer-major) so that experts are read once per layer, and the next layer's experts are read
+   from the SSD in a separate thread while the GPU works (prefetch). TTFT dropped to ~3.4 s.
+7. **New cache layout**: the 976 MiB temporary area was replaced by a 244 MiB staging area. Prompts use the back end of
+   the LRU list, so they do not sweep the cache. The memory saved goes to the cache. Result: MTP 22.3 tok/s at 262K
+   (target of 21 reached). Upper bound with a full cache: 23.9 tok/s.
+8. **Error #3: GPU out of memory** (cache 84 %, 1.13 GiB of the GPU share left). Fixed by leaving 1.4 GiB for the
+   driver. As a result the cache is ~79–82 % (without images) or ~70 % (with the image encoder reserve).
+9. **Zero server** (`zero/serverz.cpp`): chat, tool calls, images + MTP working together. The cache contents are saved
+   (`.lru`) and reloaded at start (10.6 GB in ~6 s), so the first prompt is fast (3.4 → 0.6–1.1 s).
+   Zero's automatic context uses its own record (previously it inherited arcinfer's 4,096).
 
-### 14 Oktober malam: mencari crash "device lost"
+### 14 October night: hunting the "device lost" crash
 
-Server zero kadang crash di tengah (sekitar separuh dari rangkaian uji chat → tool call → beberapa gambar). arcinfer
-biasa dengan urutan yang sama tidak crash. Ditelusuri dengan alat debug baru: sinkron per kernel
-(`ARC_ZE_SYNC_EACH=1`), cek alamat expert (`ARC_XCHECK=1`), budget memori Windows, ukuran scratch kernel.
-Temuan dan perbaikan:
+The zero server sometimes crashed midway (in about half of the chat → tool call → several images test sequences).
+Plain arcinfer with the same sequence did not crash. Traced with new debug tools: sync per kernel
+(`ARC_ZE_SYNC_EACH=1`), expert address check (`ARC_XCHECK=1`), Windows memory budget, kernel scratch size.
+Findings and fixes:
 
-| Temuan | Perbaikan |
+| Finding | Fix |
 |---|---|
-| Kernel membaca sedikit melewati ujung expert terakhir. Record 35B pas kelipatan 4 KB, jadi tidak ada sisa di ujung blok 1 GiB | Setiap blok cache diberi cadangan 64 KB |
-| Entri tabel alamat yang belum diisi bernilai 0 (ID expert di luar rentang kalau router NaN) | Semua entri selalu berisi alamat yang valid |
-| Shim tidak memeriksa batas buffer seperti OpenCL. Server zero dan arcinfer berbagi folder cache system prompt | Batas dicek (transfer ditolak seperti di OpenCL), zero memakai folder `zero\prefix` dan `zero\sessions` sendiri |
-| Jatah GPU dipakai bersama aplikasi lain (Chrome, desktop) | Kalau GPU kehabisan memori, cache dikecilkan 1 GiB lalu dicoba lagi. Diuji dengan simulasi 24 kali, hasil tetap identik |
-| **Penyebab utama:** kernel expert mengakses memori cache lewat alamat di tabel, bukan argumen kernel. Level Zero mewajibkan izin "indirect access", kalau tidak memori itu tidak dijamin siap (hanya ~9,9 dari 15,5 GiB yang resident) | `zeKernelSetIndirectAccess` dipasang di semua kernel. Kecepatan tidak berubah (20,1 tok/s), tetap identik bit |
+| A kernel reads slightly past the end of the last expert. 35B records are exact multiples of 4 KB, so there is no slack at the end of a 1 GiB block | Every cache block gets a 64 KB reserve |
+| Address table entries not yet filled were 0 (expert ID out of range if the router gives NaN) | All entries always hold a valid address |
+| The shim did not check buffer bounds like OpenCL. The zero server and arcinfer shared the system prompt cache folder | Bounds are checked (transfers rejected as in OpenCL), zero uses its own `zero\prefix` and `zero\sessions` folders |
+| The GPU share is shared with other applications (Chrome, desktop) | If the GPU runs out of memory, the cache is shrunk by 1 GiB and retried. Tested with 24 simulated failures, results still identical |
+| **Main cause:** the expert kernels access cache memory through addresses in a table, not kernel arguments. Level Zero requires the "indirect access" permission; without it that memory is not guaranteed to be ready (only ~9.9 of 15.5 GiB was resident) | `zeKernelSetIndirectAccess` set on all kernels. Speed unchanged (20.1 tok/s), still bit-identical |
 
-Setelah perbaikan terakhir: **5 dari 5** rangkaian uji server lolos (sebelumnya sekitar separuh crash). Rangkaian
-lengkap berikutnya juga lolos: chat, tool call `get_weather({"city":"Jakarta"})`, tiga gambar (jawaban gambar sama
-persis dengan arcinfer biasa).
+After the last fix: **5 out of 5** server test sequences passed (previously about half crashed). The next full
+sequence also passed: chat, tool call `get_weather({"city":"Jakarta"})`, three images (image answers exactly the same
+as plain arcinfer).
 
-### 15 Oktober pagi
+### 15 October morning
 
-- Laptop sempat hang. Penyebabnya, skrip tes Pi semalam gagal di tengah jalan sehingga server zero (~14 GB) tidak
-  dimatikan dan tetap memakan RAM sampai pagi. Laptop restart sekitar 07:42. Sekarang tidak ada proses tes yang
-  jalan. Ke depan, skrip tes selalu mematikan server di akhir, termasuk kalau tesnya gagal.
-- (Mouse yang bergerak sendiri bukan dari pekerjaan ini: tidak ada alat kendali layar, mouse, atau browser yang
-  dipakai. Tes Pi selalu dengan `--no-tools --no-mcp`.)
-- Opsi diganti sesuai permintaan: **`--zero`** untuk arcinferzero (`pi-arc 35b --zero`, `arc-server start -zero`).
-  Tanpa `--zero` selalu arcinfer biasa, tidak ada pilihan yang diingat. Launcher punya isian "Engine".
-- Help diperbarui: `pi-arc --help`, `arc-server help`, `bin\serverz.exe --help` (opsi `--expert-cache-gb`,
+- The laptop hung for a while. The cause: the overnight Pi test script failed midway, so the zero server (~14 GB) was
+  not shut down and kept using RAM until morning. The laptop restarted at about 07:42. No test processes are running
+  now. From now on, test scripts always shut down the server at the end, including when the test fails.
+- (The mouse moving by itself did not come from this work: no screen, mouse or browser control tools were used. Pi
+  tests always run with `--no-tools --no-mcp`.)
+- Options changed as requested: **`--zero`** for arcinferzero (`pi-arc 35b --zero`, `arc-server start -zero`).
+  Without `--zero` it is always plain arcinfer; no choice is remembered. The launcher has an "Engine" field.
+- Help updated: `pi-arc --help`, `arc-server help`, `bin\serverz.exe --help` (options `--expert-cache-gb`,
   `--expert-cache-pct`, `--windows-reserve-gb`, `--no-stream`).
-- Dokumen: CHANGELOG, QUEUE.md, CARA_PAKAI.md (bagian arcinferzero).
+- Documents: CHANGELOG, QUEUE.md, USAGE.md (arcinferzero section).
 
-## Belum selesai
+## Not finished yet
 
-- Tes Pi otomatis dengan server zero (skripnya gagal semalam, bukan karena engine-nya). Percobaan langsung dengan
-  `pi-arc 35b --zero` bisa menggantikannya.
-- 27B dengan zero: dicoba langsung lewat Pi (15 Oktober) dan berjalan baik (konteks otomatis 81.920 dengan MTP, sama dengan arcinfer; permintaan pertama lambat karena kompilasi kernel sekali). Yang belum: perbandingan kecepatan yang rapi. 27B bukan MoE, jadi tidak ada streaming dan
-  konteksnya sama dengan arcinfer. Yang diuji hanya identik bit dan kecepatannya.
-- Opsional: menghapus otomatis file expert versi lama kalau GGUF diganti versi baru.
+- Automated Pi test with the zero server (the script failed overnight, not because of the engine). A direct try with
+  `pi-arc 35b --zero` can replace it.
+- 27B with zero: tried directly through Pi (15 October) and works well (automatic context 81,920 with MTP, same as arcinfer; the first request is slow because of the one-time kernel compilation). Still missing: a clean speed comparison. 27B is not MoE, so there is no streaming and
+  its context is the same as arcinfer's. Only bit-identity and speed were tested.
+- Optional: automatically delete old expert files when the GGUF is replaced by a new version.
 
-## Cara memakai
+## How to use
 
 ```
 pi-arc 35b --zero          # arcinferzero
-pi-arc 35b                 # arcinfer biasa
-arc-server stop            # matikan server setelah selesai
+pi-arc 35b                 # plain arcinfer
+arc-server stop            # stop the server when done
 ```
 
-File: `zero/` (engine, shim Level Zero, cache expert, kernel), `bin\runz.exe`, `bin\serverz.exe`.
-Data: `%LOCALAPPDATA%\arcinfer\zero\` (file expert 15 GB, daftar cache `.lru`, konteks otomatis, prefix, sessions).
+Files: `zero/` (engine, Level Zero shim, expert cache, kernels), `bin\runz.exe`, `bin\serverz.exe`.
+Data: `%LOCALAPPDATA%\arcinfer\zero\` (15 GB expert file, `.lru` cache list, automatic context, prefix, sessions).
 
-## Malam 15–16 Oktober: tes dan optimasi di zero
+## Night of 15–16 October: tests and optimization in zero
 
-Server pengguna saat mulai: Qwen3.6 35B (OpenCL, konteks 262K), dihentikan pukul 17:00, dipulihkan pagi.
-Semua tes di `bin\serverz.exe` (port 8091/8090), `--no-prefix-cache`, server tes selalu dihentikan.
+User's server at the start: Qwen3.6 35B (OpenCL, 262K context), stopped at 17:00, restored in the morning.
+All tests on `bin\serverz.exe` (port 8091/8090), `--no-prefix-cache`, test servers always stopped.
 
-### A1. Snapshot awal giliran (Qwen)
+### A1. Turn-start snapshot (Qwen)
 
-Percakapan seperti Pi: system prompt ±1.240 token, dua giliran user dengan tool call (hasil tool ±1.650 token), lalu
-pesan baru. Pesan baru harus lanjut dari awal giliran sebelumnya.
+A Pi-like conversation: system prompt ±1,240 tokens, two user turns with tool calls (tool results ±1,650 tokens), then
+a new message. The new message must continue from the start of the previous turn.
 
-| Model | Pesan baru: cached | Waktu prompt | Server dingin | Hasil vs server dingin |
+| Model | New message: cached | Prompt time | Cold server | Result vs cold server |
 |---|---|---|---|---|
-| 9B | 4.679 / 6.376 | 5,2 dtk | 16,8 dtk | identik (teks + logprob) |
-| 4B | 4.679 / 6.376 | 2,9 dtk | 9,7 dtk | identik |
-| 35B | 4.679 / 6.376 | 3,4 dtk | 11,6 dtk | teks sama, logprob beda |
+| 9B | 4,679 / 6,376 | 5.2 s | 16.8 s | identical (text + logprob) |
+| 4B | 4,679 / 6,376 | 2.9 s | 9.7 s | identical |
+| 35B | 4,679 / 6,376 | 3.4 s | 11.6 s | same text, different logprob |
 
-Tanpa snapshot ini pesan baru mulai dari 1.242 (akhir giliran pertama sebelumnya hilang).
-35B: beda logprob bukan dari snapshot. Hasil MoE memang bergantung pada cara prompt dipotong: potongan ≤ 8 token
-memakai attention decode + gate/up tidak digabung, ≥ 1.152 token GEMM expert, di antaranya kernel per-tile
-(runz `--feed-step 7`: 0,1809 vs 0,1712 untuk token teratas; server dingin chunk 1024 vs 2048 juga beda kecil).
-Server dingin dua kali: identik. Tanpa streaming: beda yang sama. Mana yang lebih dekat ke f32 diukur di baseline.
+Without this snapshot the new message starts from 1,242 (the end of the previous first turn is lost).
+35B: the logprob difference does not come from the snapshot. MoE results do depend on how the prompt is chunked: chunks
+≤ 8 tokens use decode attention + unfused gate/up, ≥ 1,152 tokens the expert GEMM, in between the per-tile kernel
+(runz `--feed-step 7`: 0.1809 vs 0.1712 for the top token; cold server chunk 1024 vs 2048 also differs slightly).
+Cold server twice: identical. Without streaming: the same difference. Which one is closer to f32 is measured in the baseline.
 
-Bug yang ketemu dan diperbaiki: `logprobs` mengirim token potongan karakter UTF-8 mentah (JSON rusak). Sekarang
-teksnya diganti U+FFFD, byte aslinya tetap di `bytes`.
+Bug found and fixed: `logprobs` sent tokens that are partial UTF-8 characters as raw bytes (broken JSON). Now the
+text is replaced with U+FFFD, the original bytes stay in `bytes`.
 
 ### A2. `--preserve-thinking`
 
-35B: pesan baru cached 4.662 / 4.720, prompt 0,6 dtk (tanpa opsi: 1.242 cached, 5,0 dtk). 9B: peringatan "this
-model's chat template has no such option", perilaku tidak berubah.
+35B: new message cached 4,662 / 4,720, prompt 0.6 s (without the option: 1,242 cached, 5.0 s). 9B: warning "this
+model's chat template has no such option", behavior unchanged.
 
-### A3. Pembatas tool call Gemma (E4B, Pi sungguhan)
+### A3. Gemma tool call constraint (E4B, real Pi)
 
-Tugas: baca skrip, jalankan, tambah bagian baru dengan tool edit, jalankan lagi (folder tes, read/bash/edit/write).
+Task: read a script, run it, add a new section with the edit tool, run it again (test folder, read/bash/edit/write).
 
-| Pembatas | Berhasil | Panggilan edit | Gagal | Waktu |
+| Constraint | Succeeded | Edit calls | Failed | Time |
 |---|---|---|---|---|
-| mati | 3/3 | 10 | 7 | 87–226 dtk |
-| hidup | 3/3 | 5 | 0 | 88–112 dtk |
+| off | 3/3 | 10 | 7 | 87–226 s |
+| on | 3/3 | 5 | 0 | 88–112 s |
 
-Kegagalan saat mati semuanya soal isi (`oldText` tidak unik / tidak cocok), bukan format; pembatas tidak
-mengubah satu token pun (0 koreksi), jadi tool call yang sudah benar tidak terganggu. Format di bawah tekanan: lihat A3b.
+The failures with it off were all about content (`oldText` not unique / not matching), not format; the constraint did
+not change a single token (0 corrections), so tool calls that are already correct are not disturbed. Format under pressure: see A3b.
 
-### A3b. Format tool call di bawah tekanan (E4B, suhu 1,3, edit besar dipaksa lewat tool_choice)
+### A3b. Tool call format under pressure (E4B, temperature 1.3, large edit forced via tool_choice)
 
-| Pembatas | Sah | Rusak |
+| Constraint | Valid | Broken |
 |---|---|---|
-| mati | 2/10 | 8 (isi edits salah 3, kunci asing 3, path hilang 1, tanpa call 1) |
-| hidup | 9/10 | 1 (tidak selesai, batas 3.000 token) |
+| off | 2/10 | 8 (wrong edits content 3, unknown keys 3, missing path 1, no call 1) |
+| on | 9/10 | 1 (did not finish, 3,000-token limit) |
 
-Pembatas mengoreksi 1–2 token dari ±1.100 per panggilan (log: "tool call: 2 of 1237 tokens corrected").
+The constraint corrects 1–2 tokens out of ±1,100 per call (log: "tool call: 2 of 1237 tokens corrected").
 
-### A4. Cache sesi (9B, Pi + web UI bergantian)
+### A4. Session cache (9B, Pi + web UI alternating)
 
-Kembali ke percakapan Pi setelah web UI: dimuat dari disk 0,17 dtk, 4.679 token terpakai ulang, jawaban identik
-dengan server dingin (15,9 dtk prompt). Percakapan web UI pendek (597 token) sengaja tidak disimpan (batas 1.024
-token: memprosesnya ulang lebih murah).
+Back to the Pi conversation after the web UI: loaded from disk in 0.17 s, 4,679 tokens reused, answer identical
+to a cold server (15.9 s prompt). The short web UI conversation (597 tokens) is deliberately not saved (1,024-token
+limit: reprocessing it is cheaper).
 
-### A5. Compacting web UI (4B, konteks 4.096)
+### A5. Web UI compacting (4B, 4,096 context)
 
-Otomatis di 72 %: 10 pesan → ringkasan, konteks turun ke 27 %. Ringkasan pertama 4B kehilangan satu kata kode
-(DELTA); instruksi ringkasan diperketat (daftar, setiap item disalin persis, suhu 0) → semua kata kode tersimpan,
-juga setelah compacting kedua (8/8 benar). Stop saat meringkas: percakapan utuh, server membatalkan dalam 0,6 dtk.
-Tombol Compact: jalan. Ringkasan 4B kadang panjang (±90 dtk) → instruksi "satu baris per item".
+Automatic at 72 %: 10 messages → summary, context drops to 27 %. The first 4B summary lost one code word
+(DELTA); the summary instruction was tightened (list, every item copied exactly, temperature 0) → all code words kept,
+also after a second compaction (8/8 correct). Stop while summarizing: conversation intact, the server cancels within 0.6 s.
+Compact button: works. 4B summaries are sometimes long (±90 s) → instruction "one line per item".
 
-### B. Baseline zero sebelum optimasi kernel (runz --bench-pp; server dengan jawaban 400 token)
+### B. Zero baseline before kernel optimization (runz --bench-pp; server with 400-token answers)
 
-Prefill / decode dalam token per detik pada konteks pendek (2K), sedang (16K), panjang (131K):
+Prefill / decode in tokens per second at short (2K), medium (16K) and long (131K) contexts:
 
-| Model | Identik dgn OpenCL | Prefill 2K / 16K / 131K | Decode 2K / 16K / 131K | Server tanpa / dengan MTP |
+| Model | Identical to OpenCL | Prefill 2K / 16K / 131K | Decode 2K / 16K / 131K | Server without / with MTP |
 |---|---|---|---|---|
-| Qwen3.5 4B | ya | 862 / 697 / 281 | 20,2 / 18,7 / 9,5 | 20,6 / 29,2 |
-| Qwen3.5 9B | ya | 399 / 388 / 222 | 12,1 / 11,5 / 8,8 | 12,2 / 17,7 |
-| Gemma 4 E4B | ya | 733 / 571 / 209 | 21,0 / 19,6 / 9,5 | 21,6 / 39,6 (drafter) |
-| Gemma 4 12B | ya | 271 / 218 / 86 | 9,5 / 9,2 / 7,4 | 9,8 / 21,1 (drafter) |
-| Qwen3.6 35B | tidak (lihat bawah) | 660 / 679 / 254 | 20,1 / 18,8 / 13,8 | (menyusul) |
+| Qwen3.5 4B | yes | 862 / 697 / 281 | 20.2 / 18.7 / 9.5 | 20.6 / 29.2 |
+| Qwen3.5 9B | yes | 399 / 388 / 222 | 12.1 / 11.5 / 8.8 | 12.2 / 17.7 |
+| Gemma 4 E4B | yes | 733 / 571 / 209 | 21.0 / 19.6 / 9.5 | 21.6 / 39.6 (drafter) |
+| Gemma 4 12B | yes | 271 / 218 / 86 | 9.5 / 9.2 / 7.4 | 9.8 / 21.1 (drafter) |
+| Qwen3.6 35B | no (see below) | 660 / 679 / 254 | 20.1 / 18.8 / 13.8 | (to follow) |
 
-Di konteks panjang decode turun ke ±½ dan prefill ke ⅓–¼: attention. Perkiraan dari 4B: di 131K attention decode
-memakai ±30 GB/s dari 77 GB/s, prefill attention ±28 % puncak DP4a. GEMM sudah ±70 % puncak (catatan review).
-35B tidak identik run vs runz: diduga pemotongan chunk (runz streaming 4096, run MoE 2048; hasil MoE bergantung pada
-potongan, lihat A1), dicek dengan `--chunk 2048`.
+At long context decode drops to ±½ and prefill to ⅓–¼: attention. Estimate from the 4B: at 131K decode attention
+uses ±30 GB/s of 77 GB/s, prefill attention ±28 % of the DP4a peak. GEMM is already at ±70 % of peak (review notes).
+35B not identical run vs runz: suspected chunking (runz streaming 4096, run MoE 2048; MoE results depend on the
+chunks, see A1), checked with `--chunk 2048`.
 
-Lanjutan baseline:
+Baseline continued:
 
-| Model | Identik dgn OpenCL | Prefill 2K / 16K / panjang | Decode 2K / 16K / panjang | Server tanpa / dengan MTP |
+| Model | Identical to OpenCL | Prefill 2K / 16K / long | Decode 2K / 16K / long | Server without / with MTP |
 |---|---|---|---|---|
-| Qwen3.6 35B | ya, dengan chunk sama | 660 / 679 / 254 (131K), 146 (262K) | 20,1 / 18,8 / 13,8 (131K), 10,1 (262K) | 21,0 / 26,8 |
-| Qwen3.8 27B | ya | 110 / 103 / 80 (65K) | 5,1 / 4,7 / 4,0 (65K) | 5,0 / 9,1 |
+| Qwen3.6 35B | yes, with the same chunk | 660 / 679 / 254 (131K), 146 (262K) | 20.1 / 18.8 / 13.8 (131K), 10.1 (262K) | 21.0 / 26.8 |
+| Qwen3.8 27B | yes | 110 / 103 / 80 (65K) | 5.1 / 4.7 / 4.0 (65K) | 5.0 / 9.1 |
 
-35B: run (chunk MoE 2048) vs runz (streaming: chunk 4096) beda; `--chunk 2048` di keduanya: identik bit.
+35B: run (MoE chunk 2048) vs runz (streaming: chunk 4096) differ; `--chunk 2048` on both: bit-identical.
 
-### E. MTP sampai 7 draft (27B, server, suhu 0, dua jawaban 400 token)
+### E. MTP up to 7 drafts (27B, server, temperature 0, two 400-token answers)
 
-Rollback DeltaNet diganti: pass verifikasi menulis state ke `S_next` dan menyimpan inputnya; draft ditolak →
-rekurensi diputar ulang dari `S` untuk token yang diterima saja (satu salinan state, bukan 3 atau 7; tanpa salin
-150 MB per langkah). Semua jumlah draft 1–7: jawaban identik dengan tanpa MTP.
+DeltaNet rollback replaced: the verification pass writes the state to `S_next` and keeps its inputs; when a draft is
+rejected → the recurrence is replayed from `S` for the accepted tokens only (one state copy, not 3 or 7; no 150 MB
+copy per step). All draft counts 1–7: answers identical to without MTP.
 
-| Draft | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| Drafts | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
 |---|---|---|---|---|---|---|---|
-| tok/s (kode) | 7,45 | 8,31 | 9,36 | 3,06 | 3,83 | 4,17 | 3,89 |
-| draft diterima | 192/208 | 257/280 | 283/333 | 298/376 | 306/405 | 314/417 | 314/456 |
+| tok/s (code) | 7.45 | 8.31 | 9.36 | 3.06 | 3.83 | 4.17 | 3.89 |
+| drafts accepted | 192/208 | 257/280 | 283/333 | 298/376 | 306/405 | 314/417 | 314/456 |
 
-Tanpa MTP 5,07. Mulai 4 draft (5 baris verifikasi) engine memakai GEMV multi-token TB=8: aktivasi 8 token di
-register (±128 GRF di GPU ini) → spill. Diperbaiki: lihat D1.
+Without MTP 5.07. From 4 drafts (5 verification rows) the engine uses the multi-token GEMV TB=8: activations of 8 tokens
+in registers (±128 GRF on this GPU) → spill. Fixed: see D1.
 
-### D1. Register spill (ARC_ZE_KPROPS=1, 27B dengan 5 draft MTP)
+### D1. Register spill (ARC_ZE_KPROPS=1, 27B with 5 MTP drafts)
 
-| Kernel | Spill per thread | Catatan |
+| Kernel | Spill per thread | Notes |
 |---|---|---|
-| `attn_split` (decode attention, baris verifikasi) | 11.232 B | akibat bug sakelar saya (lihat KOREKSI): 0 dengan flag 256 |
-| `attn_decode` (decode attention, 1 token) | 7.456 B | idem: 0 dengan flag 256 |
-| `gemv_mt` TB=8 | s/d 9.216 B → s/d 2.912 B | diperbaiki: aktivasi dimuat per token |
-| `gemv_mt_v` TB=8 | s/d 5.024 B → s/d 1.248 B | idem |
-| `gdn_conv` | 1.024 B | belum |
-| `attn_prep` | 192 B | belum |
+| `attn_split` (decode attention, verification rows) | 11,232 B | caused by my switch bug (see CORRECTION): 0 with flag 256 |
+| `attn_decode` (decode attention, 1 token) | 7,456 B | same: 0 with flag 256 |
+| `gemv_mt` TB=8 | up to 9,216 B → up to 2,912 B | fixed: activations loaded per token |
+| `gemv_mt_v` TB=8 | up to 5,024 B → up to 1,248 B | same |
+| `gdn_conv` | 1,024 B | not yet |
+| `attn_prep` | 192 B | not yet |
 
-TB=8 (4–7 draft): 128 GRF lebih cepat dari 256 GRF (27B, 5 draft: 9,2 vs 7,6 tok/s; sebelum perbaikan 3,8).
-Baris per sub-group 1/2/4: sama (9,2–9,45). Dengan perbaikan ini 5–7 draft = 3 draft (±9,2 tok/s): langkah
-verifikasi berkurang 117 → 94 → 86 per 400 token, tapi tiap draft menambah satu lintasan blok MTP termasuk kepala
-output 248K kosakata (±1 GB baca per draft di 27B).
+TB=8 (4–7 drafts): 128 GRF is faster than 256 GRF (27B, 5 drafts: 9.2 vs 7.6 tok/s; before the fix 3.8).
+Rows per sub-group 1/2/4: the same (9.2–9.45). With this fix 5–7 drafts = 3 drafts (±9.2 tok/s): verification
+steps drop 117 → 94 → 86 per 400 tokens, but each draft adds one pass through the MTP block including the
+248K-vocabulary output head (±1 GB read per draft on the 27B).
 
-Masalah sistem yang ketemu: server yang dijalankan tepat setelah server lain mati kadang berjalan setengah
-kecepatan sepanjang umurnya (35B + MTP: 11,9 vs 26,5 tok/s, log identik). Jeda 5 detik: normal. `arc-server stop`
-sekarang menunggu proses selesai + 5 detik; harness tes juga.
+System problem found: a server started right after another server exits sometimes runs at half
+speed for its whole lifetime (35B + MTP: 11.9 vs 26.5 tok/s, identical logs). A 5-second pause: normal. `arc-server stop`
+now waits for the process to exit + 5 seconds; so does the test harness.
 
-### KOREKSI (01:30): "Level Zero tidak memakai mode 256 register" SALAH, penyebabnya bug saya
+### CORRECTION (01:30): "Level Zero does not use 256-register mode" is WRONG, the cause was my bug
 
-Sakelar uji `ARC_ATTN_DEC_GRF` yang saya tambahkan sore itu (static `std::string` dari operator ternary) terisi kosong
-saat runtime, sehingga sejak build 20:24 kernel attention decode zero dibangun TANPA `-cl-intel-256-GRF-per-thread`.
-Bukti: `ARC_ZE_KPROPS` sekarang mencetak opsi build tiap program; `attn_decode` tercatat tanpa flag. Probe baru
-(`zero/grf_probe.cpp`): kernel 192-GRF dengan flag 256 tidak spill dan sama cepat di OpenCL, Level Zero immediate dan
-command list biasa (23 ms; tanpa flag 212–1.429 ms). Level Zero menghormati mode itu. Sakelar ditulis ulang eksplisit.
-Yang terdampak: pengukuran decode attention zero setelah 20:24 (spill attn_decode/attn_split 27B di tabel D1,
-"zero 13,1 vs OpenCL 15,0 tok/s di 64K", sapuan register-128, perbandingan dsplit). Baseline (binari 17:02) tidak.
-Hasil KL tetap sah (spill tidak mengubah hitungan).
+The test switch `ARC_ATTN_DEC_GRF` that I added that afternoon (a static `std::string` from a ternary operator) was empty
+at runtime, so since the 20:24 build zero's decode attention kernels were built WITHOUT `-cl-intel-256-GRF-per-thread`.
+Evidence: `ARC_ZE_KPROPS` now prints each program's build options; `attn_decode` was recorded without the flag. A new
+probe (`zero/grf_probe.cpp`): a 192-GRF kernel with flag 256 does not spill and is equally fast in OpenCL, Level Zero
+immediate and regular command lists (23 ms; without the flag 212–1,429 ms). Level Zero honors that mode. The switch was rewritten explicitly.
+Affected: zero decode attention measurements after 20:24 (27B attn_decode/attn_split spill in table D1,
+"zero 13.1 vs OpenCL 15.0 tok/s at 64K", the register-128 sweep, the dsplit comparison). The baseline (17:02 binary) is not.
+KL results remain valid (spill does not change the arithmetic).
 
-Pengukuran ulang dengan register benar: 4B decode 32K jalur lama 17,1–17,3 vs dsplit 17,1 (setara); 35B 32K 18,4 vs
-18,5. Decode attention memang sudah dekat batas bandwidth. Bench 256 register di 64K: dsplit menang 23 % hanya di
-bentuk 35B (8 head per kv head: 1,16 → 0,94 ms per layer), 4B/9B +7 %, 27B +4 %. Keputusan: dsplit (4 head per
-sub-group, dimensi dibagi 4, 1 baris per peluncuran, potongan 256, skala P per baris) hanya untuk 35B; yang lain
-tetap jalur lama (membaca K/V 4 baris verifikasi sekali). `ARC_QWEN_DSPLIT=0/1` mematikan / memaksa.
+Re-measured with correct registers: 4B decode 32K old path 17.1–17.3 vs dsplit 17.1 (equal); 35B 32K 18.4 vs
+18.5. Decode attention is indeed already close to the bandwidth limit. 256-register bench at 64K: dsplit wins 23 % only for
+the 35B shape (8 heads per kv head: 1.16 → 0.94 ms per layer), 4B/9B +7 %, 27B +4 %. Decision: dsplit (4 heads per
+sub-group, dimension split in 4, 1 row per launch, 256 chunks, P scale per row) only for 35B; the others
+keep the old path (reads K/V for the 4 verification rows once). `ARC_QWEN_DSPLIT=0/1` disables / forces it.
 
-Error decode (KL rata-rata terhadap f32 CPU, runz --kl-decode; teks ±250 token; top-1 = token teratas sama):
+Decode error (mean KL against CPU f32, runz --kl-decode; texts of ±250 tokens; top-1 = same top token):
 
-| Model | Jalur lama | Jalur baru (dsplit) |
+| Model | Old path | New path (dsplit) |
 |---|---|---|
-| 4B (2 teks) | 0,00064 / 0,00067; top-1 245+249 | 0,00062 / 0,00064; top-1 245+249 |
-| 9B | 0,00069; top-1 246 | 0,00060; top-1 247 |
-| 35B (2 teks) | 0,00774 / 0,00444; top-1 245+240 | 0,00811 / 0,00436; top-1 242+243 |
-| 27B (3 teks) | 0,00030 / 0,00030 / 0,00034; top-1 702/709 | 0,00040 / 0,00034 / 0,00032; top-1 700/709 |
+| 4B (2 texts) | 0.00064 / 0.00067; top-1 245+249 | 0.00062 / 0.00064; top-1 245+249 |
+| 9B | 0.00069; top-1 246 | 0.00060; top-1 247 |
+| 35B (2 texts) | 0.00774 / 0.00444; top-1 245+240 | 0.00811 / 0.00436; top-1 242+243 |
+| 27B (3 texts) | 0.00030 / 0.00030 / 0.00034; top-1 702/709 | 0.00040 / 0.00034 / 0.00032; top-1 700/709 |
 
-Derau pengukuran di tingkat ini: mengganti hanya pembulatan skor 27B (jumlah int eksak lawan float per 64 dimensi)
-menggeser KL 0,000355 → 0,000414 dan top-1 700 → 699. Selisih lama/baru ada di dalam derau itu (arahnya juga
-berganti antar teks dan model), jadi jalur baru dipakai untuk semua Qwen; `ARC_QWEN_DSPLIT=0` mengembalikan yang lama.
+Measurement noise at this level: changing only the 27B score rounding (exact int sum vs float per 64 dimensions)
+shifts KL 0.000355 → 0.000414 and top-1 700 → 699. The old/new difference is within that noise (its direction also
+alternates between texts and models), so the new path is used for all Qwen models; `ARC_QWEN_DSPLIT=0` restores the old one.
 
-MTP dengan jalur decode baru (server, suhu 0, jawaban identik dengan tanpa MTP di semua kasus):
-4B 3 draft 27,5 / 19,3 tok/s; 9B 3 draft 18,5 / 15,1; 35B 1 draft 26,3 / 22,9, 3 draft 30,7 / 23,4; 27B 3 draft
-7,9 / 6,3 dan 5 draft 9,4 / 7,0 (angka 9B/27B ini terganggu acuan f32 yang dihitung bersamaan di CPU).
+MTP with the new decode path (server, temperature 0, answers identical to without MTP in all cases):
+4B 3 drafts 27.5 / 19.3 tok/s; 9B 3 drafts 18.5 / 15.1; 35B 1 draft 26.3 / 22.9, 3 drafts 30.7 / 23.4; 27B 3 drafts
+7.9 / 6.3 and 5 drafts 9.4 / 7.0 (these 9B/27B numbers were disturbed by the f32 reference computed at the same time on the CPU).
 
-### D5 prefill attention Qwen, register default (attn_bench ATT_GRF128, chunk 4K terakhir di kedalaman 64K)
+### D5 Qwen prefill attention, default registers (attn_bench ATT_GRF128, last 4K chunk at 64K depth)
 
-4B/9B: attn_q8 1.276 ms (spill 4.192 B) → attn_ps PNS 1, PHG 2, PTT 1, TPW 32: 1.166 ms (+9 %), bit-identik
-(ATT_CMP). Varian PNS 2/4 lebih lambat di register default.
+4B/9B: attn_q8 1,276 ms (spill 4,192 B) → attn_ps PNS 1, PHG 2, PTT 1, TPW 32: 1,166 ms (+9 %), bit-identical
+(ATT_CMP). The PNS 2/4 variants are slower with default registers.
 
-MTP diukur ulang dengan build benar (server, suhu 0, rata-rata jawaban kode + Indonesia, semua identik):
-4B 2 / 3 / 4 draft: 22,9 / 24,8 / 25,2 tok/s; 9B 2 / 3 / 4: 15,8 / 15,6 / 15,9; 35B 1 / 3: 23,9 / 26,1;
-27B 3 / 5 / 7: 8,3 / 8,2 / 8,2. Default zero: 4B 2 → 3, 35B 1 → 3 (9B 2, 27B 3, Gemma tetap).
+MTP re-measured with the correct build (server, temperature 0, average of code + Indonesian answers, all identical):
+4B 2 / 3 / 4 drafts: 22.9 / 24.8 / 25.2 tok/s; 9B 2 / 3 / 4: 15.8 / 15.6 / 15.9; 35B 1 / 3: 23.9 / 26.1;
+27B 3 / 5 / 7: 8.3 / 8.2 / 8.2. Zero defaults: 4B 2 → 3, 35B 1 → 3 (9B 2, 27B 3, Gemma unchanged).
 
-### Zero jadi engine bawaan (16 Okt, ~02:30)
+### Zero becomes the default engine (16 Oct, ~02:30)
 
-`arc-server`, `pi-arc` dan launcher memakai serverz secara bawaan; `-OpenCL` / `--opencl` untuk engine lama. Dasar:
-semua tes malam ini lolos (identik dengan OpenCL, gambar/audio, MTP, Pi, tool call, format API).
+`arc-server`, `pi-arc` and the launcher use serverz by default; `-OpenCL` / `--opencl` for the old engine. Basis:
+all of tonight's tests passed (identical to OpenCL, images/audio, MTP, Pi, tool calls, API format).
 
-### D5 prefill attention Qwen dengan 256 GRF (build benar; chunk 4K terakhir di kedalaman 64K)
+### D5 Qwen prefill attention with 256 GRF (correct build; last 4K chunk at 64K depth)
 
-| Bentuk | attn_q8 (256 GRF, = engine) | attn_ps terbaik | 
+| Shape | attn_q8 (256 GRF, = engine) | best attn_ps | 
 |---|---|---|
-| 4B/9B (16/4) | 926 ms (spill 576 B) | 1.117 ms (PS 1,4,1 TPW 32) |
-| 35B (16/2) | 923 ms (spill 576 B) | 1.138 ms (PS 1,4,1 TPW 16) |
-| 27B (24/4) | 1.516 ms (spill 0) | 1.669 ms (PS 1,3,1 TPW 8) |
+| 4B/9B (16/4) | 926 ms (spill 576 B) | 1,117 ms (PS 1,4,1 TPW 32) |
+| 35B (16/2) | 923 ms (spill 576 B) | 1,138 ms (PS 1,4,1 TPW 16) |
+| 27B (24/4) | 1,516 ms (spill 0) | 1,669 ms (PS 1,3,1 TPW 8) |
 
-Dengan 256 GRF attn_q8 menang di semua bentuk (attn_ps hanya menang melawan attn_q8 128 GRF, 1.276 ms). Engine
-sudah membangun attn_q8 dengan 256 GRF, jadi tidak ada perubahan; `ARC_QWEN_PS` tetap mati secara bawaan.
+With 256 GRF attn_q8 wins in all shapes (attn_ps only wins against 128-GRF attn_q8, 1,276 ms). The engine
+already builds attn_q8 with 256 GRF, so there is no change; `ARC_QWEN_PS` stays off by default.
 
-### Spill add_norm_quant (Gemma) 3.712 B → 0 (16 Okt, 03:00–04:50)
+### add_norm_quant spill (Gemma) 3,712 B → 0 (16 Oct, 03:00–04:50)
 
-Pass kedua membaca ulang nilai yang baru ditulis work-item itu sendiri, bukan menahan seluruh baris di register.
-Logit E4B dan 12B identik bit dengan OpenCL (dump 11K token). runz --bench-pp (vs baseline sore 15 Okt, yang juga
-belum memakai attn_prep_g 256 GRF): E4B 2K 733 → 814 tok/s, 16K 571 → 620, 131K 209 → 197 (satu kali jalan);
-12B 2K 271 → 286, 16K 218 → 224, 131K 86,1 → 86,5; generate sama atau sedikit naik.
-A/B lama/baru bergantian, E4B: 2K identik (pp ~820, tg 21,4 keduanya); 64K pp sama (~330), 32K pp sama (~470).
-Generate setelah prompt panjang sangat berderau: 32K lama 10,8 lalu 17,9 tok/s, baru 18,3 / 18,4; 64K lama
-10,1 / 9,9, baru 8,9 / 8,9. Ini derau "kadang ½ kecepatan" yang sama (kernel ini tidak bergantung panjang konteks dan
-di 2K tidak ada selisih), bukan regresi.
+The second pass rereads the values that the work-item itself just wrote, instead of holding the whole row in registers.
+E4B and 12B logits bit-identical to OpenCL (11K-token dump). runz --bench-pp (vs the 15 Oct afternoon baseline, which also
+did not yet use the 256-GRF attn_prep_g): E4B 2K 733 → 814 tok/s, 16K 571 → 620, 131K 209 → 197 (a single run);
+12B 2K 271 → 286, 16K 218 → 224, 131K 86.1 → 86.5; generate the same or slightly up.
+Alternating old/new A/B, E4B: 2K identical (pp ~820, tg 21.4 for both); 64K pp the same (~330), 32K pp the same (~470).
+Generate after a long prompt is very noisy: 32K old 10.8 then 17.9 tok/s, new 18.3 / 18.4; 64K old
+10.1 / 9.9, new 8.9 / 8.9. This is the same "sometimes ½ speed" noise (this kernel does not depend on context length and
+at 2K there is no difference), not a regression.
 
-### gdn_conv (Qwen) spill 1 KB (16 Okt, 04:50–05:10)
+### gdn_conv (Qwen) 1 KB spill (16 Oct, 04:50–05:10)
 
-256 GRF menghapus spill-nya, tapi 9B runz --bench-pp bergantian 3 putaran: 2K 435/430/417 (tanpa) vs 432/419/414
-(256), 16K 390/366/365 vs 389/362/390: sama dalam derau. Membaca bobot per channel (vload4) malah 1.792 B. Bawaan
-tetap; `ARC_CONV_GRF=256` untuk eksperimen.
+256 GRF removes its spill, but 9B runz --bench-pp alternating 3 rounds: 2K 435/430/417 (without) vs 432/419/414
+(256), 16K 390/366/365 vs 389/362/390: the same within noise. Reading the weights per channel (vload4) actually gives 1,792 B. Default
+unchanged; `ARC_CONV_GRF=256` for experiments.
 
-### Koreksi add_norm_quant + spill attn_prep_g HD512 (16 Okt, 05:10–05:25)
+### add_norm_quant correction + attn_prep_g HD512 spill (16 Oct, 05:10–05:25)
 
-Versi "baca ulang dari x" (03:00) dibatalkan walau identik: komentar kernel mencatat bahwa membaca x yang baru ditulis
-bisa memberi nilai lama dari L1 (bisa muncul sesekali saja). Gantinya: nilai tetap di register, tapi `ANQ_MAX`
-(superblock per sub-group) diberikan engine = ceil(n_embd / 256 / 16): E4B dan 12B 1 → spill 3.712 → 64 B.
-attn_prep_g: bobot norm, pasangan RoPE dan tabel RoPE diproses per 8 elemen, dan K mentah (V untuk layer tanpa
-proyeksi V) dibaca ulang dari qkv (hanya input, tidak ditulis kernel ini): HD 512 spill 4.608 → 0 (256 GRF).
-E4B / 12B logit identik bit dengan OpenCL. runz --bench-pp: E4B 2K 827 tok/s (tg 21,5), 16K 625 (tg 20,1);
-12B 2K 289 (9,55), 16K 228 (9,24).
+The "reread from x" version (03:00) was reverted even though identical: a kernel comment notes that reading x just written
+can return a stale value from L1 (which may show up only occasionally). Instead: values stay in registers, but `ANQ_MAX`
+(superblocks per sub-group) is passed by the engine = ceil(n_embd / 256 / 16): E4B and 12B 1 → spill 3,712 → 64 B.
+attn_prep_g: norm weights, RoPE pairs and the RoPE table are processed 8 elements at a time, and raw K (V for layers without a
+V projection) is reread from qkv (input only, not written by this kernel): HD 512 spill 4,608 → 0 (256 GRF).
+E4B / 12B logits bit-identical to OpenCL. runz --bench-pp: E4B 2K 827 tok/s (tg 21.5), 16K 625 (tg 20.1);
+12B 2K 289 (9.55), 16K 228 (9.24).
 
-### Generate kadang ½ kecepatan: pencatat per langkah (16 Okt, 05:30–05:45)
+### Generate sometimes at ½ speed: per-step recorder (16 Oct, 05:30–05:45)
 
-`runz --bench-pp` sekarang mencetak waktu per langkah generate (min / median / max, 8 langkah pertama) dan menerima
-`--prof-gen`. E4B 32K, 7 kali (1 atau 3 run prompt, 128 token): 18,5–18,96 tok/s, median 52,4 ms, langkah pertama
-91–231 ms; lambat tidak muncul. Run lambat sebelumnya (64 token, 10,8 vs 17,9 tok/s = ±2,4 dtk ekstra) lebih cocok
-dengan satu jeda besar (mis. WDDM memindahkan memori) daripada GPU lambat sepanjang run; perlu dilihat lagi dengan
-pencatat ini bila muncul.
+`runz --bench-pp` now prints the time per generate step (min / median / max, first 8 steps) and accepts
+`--prof-gen`. E4B 32K, 7 times (1 or 3 prompt runs, 128 tokens): 18.5–18.96 tok/s, median 52.4 ms, first step
+91–231 ms; the slowdown did not appear. The earlier slow run (64 tokens, 10.8 vs 17.9 tok/s = ±2.4 s extra) fits better
+with one large pause (e.g. WDDM moving memory) than with a GPU that is slow for the whole run; to be looked at again with
+this recorder if it shows up.
 
-### Ukuran halaman memori GPU (16 Okt, siang; `zero/page_probe.cpp`)
+### GPU memory page size (16 Oct, midday; `zero/page_probe.cpp`)
 
-Dipicu dokumen "Intel GPU Level Zero Custom Kernel Blueprint" (halaman 4 KB, memori virtual read-only, KV berhalaman
-lewat zePhysicalMemCreate). Hasil di driver ini:
-- zeVirtualMemQueryPageSize: 64 KiB untuk alokasi kecil, 2 MiB untuk alokasi >= 2 MiB.
-- zeMemAllocDevice: baca berurutan 67–77 GB/s; baca acak 256 B di area <= 1 GiB ±78 GB/s, di 1,5–2 GiB 22–24 GB/s
-  (±3,5x lebih lambat; dugaan: cakupan TLB GPU ±1 GiB dengan halaman 2 MiB).
-- zeVirtualMemReserve + zePhysicalMemCreate berhasil, tapi zeVirtualMemMap ditolak (0x7800000a, UNSUPPORTED_SIZE)
-  untuk potongan 2, 64 dan 256 MiB: memori virtual Level Zero tidak bisa dipakai di Windows ini. KV berhalaman (slot
-  tahap 1/2, draft pohon) harus lewat tabel blok di kernel, bukan pemetaan halaman fisik.
-- arcinfer membaca bobot berurutan dan expert 35B per blok utuh (ratusan KB), jadi batas ±1 GiB untuk baca acak kecil
-  hampir tidak berpengaruh; tidak ada perubahan.
+Prompted by the document "Intel GPU Level Zero Custom Kernel Blueprint" (4 KB pages, read-only virtual memory, paged KV
+via zePhysicalMemCreate). Results on this driver:
+- zeVirtualMemQueryPageSize: 64 KiB for small allocations, 2 MiB for allocations >= 2 MiB.
+- zeMemAllocDevice: sequential reads 67–77 GB/s; random 256 B reads in an area <= 1 GiB ±78 GB/s, at 1.5–2 GiB 22–24 GB/s
+  (±3.5x slower; guess: GPU TLB coverage of ±1 GiB with 2 MiB pages).
+- zeVirtualMemReserve + zePhysicalMemCreate succeed, but zeVirtualMemMap is rejected (0x7800000a, UNSUPPORTED_SIZE)
+  for chunks of 2, 64 and 256 MiB: Level Zero virtual memory cannot be used on this Windows. Paged KV (stage 1/2
+  slots, tree drafts) has to go through a block table in the kernel, not physical page mapping.
+- arcinfer reads weights sequentially and 35B experts in whole blocks (hundreds of KB), so the ±1 GiB limit for small random reads
+  has almost no effect; no change.
 
-Sapuan baca acak (`page_probe 3072 sweep`; GB/s, satu alokasi zeMemAllocDevice; satu alokasi 4 GiB ditolak driver):
+Random read sweep (`page_probe 3072 sweep`; GB/s, a single zeMemAllocDevice allocation; a single 4 GiB allocation is rejected by the driver):
 
 | Area | 256 B | 4 KiB | 64 KiB |
 |---|---|---|---|
@@ -335,100 +335,100 @@ Sapuan baca acak (`page_probe 3072 sweep`; GB/s, satu alokasi zeMemAllocDevice; 
 | 16 MiB | 104 | 104 | 228 |
 | 32 MiB | 89 | 89 | 99 |
 | 64 MiB – 1 GiB | 77–83 | 78–83 | 77–89 |
-| 1,5 GiB | 23,7 | 75,7 | 76,0 |
-| 2 GiB | 21,7 | 75,3 | 76,6 |
-| 3 GiB | 20,7 | 74,9 | 76,2 |
+| 1.5 GiB | 23.7 | 75.7 | 76.0 |
+| 2 GiB | 21.7 | 75.3 | 76.6 |
+| 3 GiB | 20.7 | 74.9 | 76.2 |
 
-Cache GPU ±4 MiB (±900 GB/s); dari ±32 MiB kecepatan RAM (±78 GB/s); di atas ±1 GiB hanya baca acak 256 B yang jatuh
-(±21 GB/s), potongan >= 4 KiB tetap ±75. Bobot, expert dan blok KV arcinfer (16 key x 256 dim = 4 KiB per head)
-semuanya >= 4 KiB bersambung: tidak terpengaruh. Untuk KV berhalaman nanti: halaman >= 4 KiB.
+GPU cache ±4 MiB (±900 GB/s); from ±32 MiB RAM speed (±78 GB/s); above ±1 GiB only random 256 B reads drop
+(±21 GB/s), chunks >= 4 KiB stay at ±75. arcinfer's weights, experts and KV blocks (16 keys x 256 dim = 4 KiB per head)
+are all >= 4 KiB contiguous: not affected. For paged KV later: pages >= 4 KiB.
 
-### 27B: di mana waktunya (16 Okt, siang; runz --prof-gen, profil per kernel kini memakai timestamp Level Zero)
+### 27B: where the time goes (16 Oct, midday; runz --prof-gen, the per-kernel profile now uses Level Zero timestamps)
 
-Sebelumnya `--prof-gen` di zero selalu 0 ms (clrt.h tidak punya timer); sekarang event dari pool timestamp kernel.
-27B, generate (profil aktif: 4,29 tok/s, tanpa profil 4,8): waktu GPU 223 ms / langkah 233 ms -> jeda antar-kernel ±4 %
-(±940 kernel per token). Spill: attn_prep 192 B (0,5 % waktu), gdn_conv 1 KB (0,6 %): tidak berarti.
-GB/s efektif per peran (11,3 GB/token): attn_qkv 76, output 73,5, attn_gate 73; ffn_down 60, ffn_up 57, ffn_gate 56,
-ssm_out 51. Per jenis kuantisasi (profil per layer, angka absolut lebih rendah karena beban profil): IQ4_XS / Q4_K
-≈ 62, IQ3_S / IQ3_XXS ≈ 51–55, IQ2_* ≈ 47–52, IQ1_M ≈ 33: dekode codebook (IQ3/IQ2) belum tertutup waktu baca memori.
-FFN 27B didominasi IQ3_S / IQ3_XXS (±5 GB). Perkiraan: dekode IQ3 setara IQ4_XS +5–10 %, gabung kernel kecil +2–4 %.
+Previously `--prof-gen` in zero was always 0 ms (clrt.h had no timer); now events come from a kernel timestamp pool.
+27B, generate (profiling on: 4.29 tok/s, without profiling 4.8): GPU time 223 ms / step 233 ms -> gaps between kernels ±4 %
+(±940 kernels per token). Spill: attn_prep 192 B (0.5 % of the time), gdn_conv 1 KB (0.6 %): insignificant.
+Effective GB/s per role (11.3 GB/token): attn_qkv 76, output 73.5, attn_gate 73; ffn_down 60, ffn_up 57, ffn_gate 56,
+ssm_out 51. Per quantization type (per-layer profile, absolute numbers lower because of the profiling overhead): IQ4_XS / Q4_K
+≈ 62, IQ3_S / IQ3_XXS ≈ 51–55, IQ2_* ≈ 47–52, IQ1_M ≈ 33: codebook decoding (IQ3/IQ2) is not yet hidden behind memory read time.
+The 27B FFN is dominated by IQ3_S / IQ3_XXS (±5 GB). Estimate: IQ3 decoding on par with IQ4_XS +5–10 %, merging small kernels +2–4 %.
 
-## Qwen3.8 Flash Next (qwen4exp), mulai 16 Okt siang
+## Qwen3.8 Flash Next (qwen4exp), from 16 Oct midday
 
-Spesifikasi: docs/flash-next-spec.md (dari llama.cpp src/models/qwen4exp.cpp). Selesai dan teruji (16 Okt 11:40–12:10):
-- Loader: tipe Q2_0 (42) dan dekode CPU IQ4_NL / Q2_0; cocok persis dengan dekoder Python independen (5 baris,
-  termasuk baris tambalan tabel n-gram). gguf_dump membaca 1.224 tensor / 77,9 GiB (2 part).
-- Acuan CPU (tools/ref_forward, qwen4exp): hyper-connections, DeltaNet dengan gate sigmoid, attention padat (sama
-  dengan QSA selama semua blok terpilih), MoE 512/10 + shared expert, PLE n-gram. "Apa ibu kota Indonesia? Jawab
-  singkat." -> "Jakarta" (p 0,89), greedy "Jakarta<|im_end|>"; 20 token 26 dtk di CPU.
-- K = 640 (`ffn_down`): baris IQ4_NL / Q2_0 ditambal blok nol ke 768 (pad_small_block_rows, tes PAD=1).
-- GPU (zero/kernels/decode.cl): IQ4_NL (seperti Q4_0 lewat tabel kvalues) dan Q2_0 (superblock 72 byte, unpack
-  2-bit SWAR) di decode32 / vblock; per-32 skala -> GEMM bentuk Q8_0 asli (engine + test_gemm). Bobot Flash Next:
-  gemv, gemv_v, JIT-W8 + GEMM semua OK (err 6e-8..1e-7 vs acuan CPU), tanpa spill.
-- Kernel hyper-connections (ops.cl: hc_norm_quant, hc_lo_quant (silu(lo/4), K 320 ditambal ke 512),
-  hc_gate_mean_quant, hc_combine): tests/test_hc.cpp vs CPU, err 2e-8..6e-8, int8 tidak meleset > 1 langkah.
-Berikutnya: engine qwen4exp di zero/engine.h (bobot BF16 hc_* / router sebagai Q8_0 dengan K tambalan, alur layer,
-MoE 512 expert dengan streaming langsung dari GGUF + tambalan baris down, PLE di host), lalu QSA untuk konteks panjang.
+Specification: docs/flash-next-spec.md (from llama.cpp src/models/qwen4exp.cpp). Done and tested (16 Oct 11:40–12:10):
+- Loader: type Q2_0 (42) and CPU decoding of IQ4_NL / Q2_0; matches an independent Python decoder exactly (5 rows,
+  including a patched n-gram table row). gguf_dump reads 1,224 tensors / 77.9 GiB (2 parts).
+- CPU reference (tools/ref_forward, qwen4exp): hyper-connections, DeltaNet with a sigmoid gate, dense attention (same
+  as QSA as long as all blocks are selected), MoE 512/10 + shared expert, n-gram PLE. "Apa ibu kota Indonesia? Jawab
+  singkat." -> "Jakarta" (p 0.89), greedy "Jakarta<|im_end|>"; 20 tokens in 26 s on the CPU.
+- K = 640 (`ffn_down`): IQ4_NL / Q2_0 rows padded with zero blocks to 768 (pad_small_block_rows, test PAD=1).
+- GPU (zero/kernels/decode.cl): IQ4_NL (like Q4_0 via the kvalues table) and Q2_0 (72-byte superblock, 2-bit SWAR
+  unpack) in decode32 / vblock; per-32 scales -> native Q8_0-shaped GEMM (engine + test_gemm). Flash Next weights:
+  gemv, gemv_v, JIT-W8 + GEMM all OK (err 6e-8..1e-7 vs the CPU reference), no spill.
+- Hyper-connection kernels (ops.cl: hc_norm_quant, hc_lo_quant (silu(lo/4), K 320 padded to 512),
+  hc_gate_mean_quant, hc_combine): tests/test_hc.cpp vs CPU, err 2e-8..6e-8, int8 never off by > 1 step.
+Next: the qwen4exp engine in zero/engine.h (BF16 hc_* / router weights as Q8_0 with padded K, layer flow,
+512-expert MoE streaming directly from the GGUF + down row padding, PLE on the host), then QSA for long context.
 
-### Flash Next jalan di GPU (16 Okt sore-malam)
+### Flash Next runs on the GPU (16 Oct afternoon-night)
 
-- Engine qwen4exp di zero/engine.h: residual 4 aliran (x_ [M][4x2560]), mixer hc sebelum tiap blok (norm per aliran,
-  down + inject ditumpuk satu matriks Q8_0 336 baris, silu(lo/4), up dengan K 320 ditambal 512, rata-rata bergerbang),
-  keluaran blok ke hco_ lalu hc_combine; DeltaNet gate sigmoid (-DGATE_SIGMOID); MoE 512/10, F 640 disimpan per baris
-  768 (HLD/FV di moe_gateup_q / moe_quant); shared expert ditambal ke 768 baris; PLE di host (hash n-gram, 16 baris
-  IQ4_NL dari part 2) + ple_gate / ple_conv_add / ple_hist_update di GPU; riwayat conv PLE dan 2 token terakhir
-  disimpan di state rekuren layer 1 (ikut snapshot / sesi / batal).
-- QSA: indexer (k + q ditumpuk), kunci blok di-pool (rata-rata 4 kunci, norm, RoPE di posisi awal blok) per
-  layer attention, ekor blok di state; skor + radix select top 512 blok per baris -> mask; attn_q8 / attn_decode
-  dengan -DQSA (tile yang tak terpilih dilewati). Di bawah ~2K token tetap padat (identik). Uji top-k 64: skor GPU vs
-  CPU korelasi 0,9998, pilihan blok layer 3 sama persis.
-- Akurasi: prompt chat pendek KL 0,0014. Teks 337 token KL 0,15 = sama dengan acuan CPU yang aktivasinya dikuantisasi
-  int8 (0,13); model ini peka int8 di semua matriks (hc 0,098, attn 0,087, ssm 0,052, router 0,034, shexp 0,017 bila
-  sendiri-sendiri). Bug acuan CPU ditemukan lewat dump per blok: dequant_row Q8_0 dengan K 640 hanya 512 nilai.
-- Server: jawaban benar (Tokyo, fungsi is_prime). Generate ±4 tok/s, cache expert 7,9 GiB (12 %; satu pool karena
-  5 ukuran record: pool terpisah butuh 1 layer penuh masing-masing -> GPU kehabisan memori). File expert 56 GB.
-- 27B / 35B logit identik per bit setelah semua perubahan.
+- qwen4exp engine in zero/engine.h: 4-stream residual (x_ [M][4x2560]), hc mixer before each block (per-stream norm,
+  down + inject stacked into one 336-row Q8_0 matrix, silu(lo/4), up with K 320 padded to 512, gated mean),
+  block output to hco_ then hc_combine; DeltaNet sigmoid gate (-DGATE_SIGMOID); MoE 512/10, F 640 stored per row as
+  768 (HLD/FV in moe_gateup_q / moe_quant); shared expert padded to 768 rows; PLE on the host (n-gram hash, 16
+  IQ4_NL rows from part 2) + ple_gate / ple_conv_add / ple_hist_update on the GPU; PLE conv history and the last 2 tokens
+  stored in the layer 1 recurrent state (included in snapshots / sessions / cancel).
+- QSA: indexer (k + q stacked), block keys pooled (mean of 4 keys, norm, RoPE at the block's start position) per
+  attention layer, block tail in the state; scores + radix select of the top 512 blocks per row -> mask; attn_q8 / attn_decode
+  with -DQSA (unselected tiles are skipped). Below ~2K tokens it stays dense (identical). Top-k 64 test: GPU vs
+  CPU scores correlation 0.9998, layer 3 block selection exactly the same.
+- Accuracy: short chat prompt KL 0.0014. 337-token text KL 0.15 = same as the CPU reference with int8-quantized
+  activations (0.13); this model is sensitive to int8 in every matrix (hc 0.098, attn 0.087, ssm 0.052, router 0.034, shexp 0.017 when
+  each is alone). CPU reference bug found via per-block dumps: Q8_0 dequant_row with K 640 produced only 512 values.
+- Server: correct answers (Tokyo, an is_prime function). Generate ±4 tok/s, expert cache 7.9 GiB (12 %; one pool because of
+  5 record sizes: separate pools each need 1 full layer -> GPU out of memory). Expert file 56 GB.
+- 27B / 35B logits bit-identical after all the changes.
 
-### DFlash2 untuk 27B (16 Okt malam)
+### DFlash2 for 27B (16 Oct night)
 
-- Arsitektur dari z-lab/dflash model.py (dibaca lewat ringkasan, tensor dari header safetensors): konteks = hidden
-  state 27B setelah layer 5/19/33/47/61, fc (25600 -> 5120) + hidden_norm, lalu K/V tiap layer drafter (ring 4096,
-  jendela 2048). Draft: blok 8 baris [token, mask x7], 5 layer pre-norm, konvolusi dinamis 2-tap bergrup 16 di
-  sekitar attention dan MLP (prepare: kernel separuh 0 dari input; finish: separuh 1 pada keluaran), attention
-  non-kausal ke konteks + blok, head 27B, selector top-16 jalur rakus (logit + <pred[prev] * proj(h), succ[cand]>).
-- fc dihitung bertahap per layer target (GEMM slice 5120x5120, akumulasi) supaya fitur 5 layer tidak disimpan.
-- Hasil (greedy, identik dengan tanpa drafter): kode 4,85 -> 11,5 tok/s (89 % draft diterima, 6,9 token/pass);
-  teks Indonesia DFlash2 saja 2,9 tok/s (11 % diterima) -> mode gabungan dengan MTP: 5,6 (MTP saja 5,8-6,3).
-- Drafter memakan ±13 % waktu (dfl 7,9 %, head 4,7 %); sisanya verifikasi 8 baris 27B (±480 ms per pass).
+- Architecture from z-lab/dflash model.py (read through a summary, tensors from the safetensors header): context = 27B hidden
+  states after layers 5/19/33/47/61, fc (25600 -> 5120) + hidden_norm, then K/V for each drafter layer (ring 4096,
+  window 2048). Draft: block of 8 rows [token, mask x7], 5 pre-norm layers, 2-tap dynamic convolution grouped by 16
+  around attention and MLP (prepare: kernel half 0 from the input; finish: half 1 on the output), non-causal
+  attention to context + block, 27B head, top-16 greedy-path selector (logit + <pred[prev] * proj(h), succ[cand]>).
+- fc is computed incrementally per target layer (5120x5120 GEMM slice, accumulated) so the features of the 5 layers are not stored.
+- Results (greedy, identical to without the drafter): code 4.85 -> 11.5 tok/s (89 % of drafts accepted, 6.9 tokens/pass);
+  Indonesian text with DFlash2 alone 2.9 tok/s (11 % accepted) -> combined mode with MTP: 5.6 (MTP alone 5.8-6.3).
+- The drafter takes ±13 % of the time (dfl 7.9 %, head 4.7 %); the rest is the 27B 8-row verification (±480 ms per pass).
 
-### Flash Next lebih cepat (16 Okt malam)
+### Flash Next faster (16 Oct night)
 
-- Generate 4,28 -> 6,85 tok/s: pool cache expert dikelompokkan per ukuran record (12 -> 16 %), salinan W8 bobot
-  dense dilepas untuk cache (16 -> 22 %, hit 80 -> 86 %), kernel MoE TM 1 dirombak (agent, studi ISA), mixer hc
-  satu token digabung (hc_down1 dengan K dibagi 8 potong + hc_up1, f32): 25,1 -> 17,4 ms per token.
-- SSD laptop ini: baca acak 2 MB maksimal 3,6-3,8 GB/s di semua QD (zero/ssd_bench.cpp); engine sudah di batas itu.
-- Tebakan routing layer berikutnya untuk prefetch (ARC_XGUESS=1): 37 % tebakan terpakai, 48 % miss tertangkap,
-  baca SSD +55 %, tidak lebih cepat -> mati. Simulasi (zero/cache_sim.py): LRU global 82 % > LRU per layer 80 %,
-  Belady 90 % pada cache 16 %.
-- QSA divalidasi pada 3.566 token: KL vs acuan CPU ber-QSA 0,020 (attention padat 0,043). Acuan CPU sempat NaN:
-  silu dengan /fp:fast (x / inf) di mixer -> diperbaiki di tools/ref_forward.
-- 35B: kernel moe_down -20 % (bit-identik); bench/moe_bench: gate/up IQ3_XXS 51 GB/s sendirian, ±35 di model.
+- Generate 4.28 -> 6.85 tok/s: expert cache pools grouped by record size (12 -> 16 %), W8 copies of the dense weights
+  released for the cache (16 -> 22 %, hit 80 -> 86 %), MoE TM 1 kernel reworked (agent, ISA study), single-token hc
+  mixer fused (hc_down1 with K split into 8 pieces + hc_up1, f32): 25.1 -> 17.4 ms per token.
+- This laptop's SSD: 2 MB random reads at most 3.6-3.8 GB/s at every QD (zero/ssd_bench.cpp); the engine is already at that limit.
+- Guessing the next layer's routing for prefetch (ARC_XGUESS=1): 37 % of guesses used, 48 % of misses caught,
+  SSD reads +55 %, not faster -> off. Simulation (zero/cache_sim.py): global LRU 82 % > per-layer LRU 80 %,
+  Belady 90 % at a 16 % cache.
+- QSA validated on 3,566 tokens: KL vs the CPU reference with QSA 0.020 (dense attention 0.043). The CPU reference briefly gave NaN:
+  silu with /fp:fast (x / inf) in the mixer -> fixed in tools/ref_forward.
+- 35B: moe_down kernel -20 % (bit-identical); bench/moe_bench: IQ3_XXS gate/up 51 GB/s alone, ±35 in the model.
 
-### Optimasi PP / TG / speculative decoding (16-17 Okt malam, F17)
+### PP / TG / speculative decoding optimization (16-17 Oct night, F17)
 
-- GEMV multi-token (verifikasi spekulatif) token-outer: 8 baris 27B FFN 23 -> 39-43 GB/s. Default draft MTP baru:
-  27B 7, 35B 5 (kode 27B 12,6 -> 15,2 tok/s, 35B 34,2 -> 37,7; prosa Indonesia sama). Aturan baris per sub-group
-  untuk 2-5 token: prosa Indonesia 27B + MTP 6,95 -> 7,2.
-- DFlash2: bobot drafter Q4_0 (separuh byte, 0,84 GiB lebih hemat di 27B, draft diterima sama), selector top-16
-  satu lintasan (bukan nth_element atas 248K token, ±2 ms per posisi di CPU), softmax kepercayaan draft dengan exp
-  float tervektor. Kode: 27B 16,9 -> 18,3 tok/s, 35B 44 -> 53. Mode gabungan menunda probe DFlash2 di model dense
-  (8 -> sampai 32 langkah): prosa Indonesia 27B 6,2 -> 6,5.
-- Flash Next: expert yang sudah di cache dikerjakan GPU sambil yang belum dibaca dari SSD (6,6 -> 7,3 tok/s); mixer
-  hc prompt (gated mean) dengan load vektor: 45 -> 3,7 ms per chunk; proyeksi down prompt lewat moe_rg: prompt 8K
-  98 -> 165 tok/s, KL ke acuan CPU 0,0221 -> 0,0191.
-- moe_rg (baru): GEMM int8 MoE langsung dari baris expert mentah (didekode di register), hasil = decode + GEMM bit
-  demi bit; 35B prompt 384-1152 token +3..14 % dan logit tak lagi bergantung ukuran chunk.
-- serverz melaporkan chunk 4096 untuk MoE streaming (35B 8K: 620 -> 750 tok/s dibanding chunk 2048).
-- Dicoba, tidak dipakai (docs/lessons, bagian 5): overlap dua engine, daftar token draft, arena alokasi, pangkas
-  working set saat load, baca SSD dipecah, tile 32 slot moe_rg, grid ditukar. Variasi run 10-30 % (kadang semua
-  bobot dense 2x lebih lambat) tercatat di QUEUE F16.
+- Token-outer multi-token GEMV (speculative verification): 8-row 27B FFN 23 -> 39-43 GB/s. New default MTP drafts:
+  27B 7, 35B 5 (27B code 12.6 -> 15.2 tok/s, 35B 34.2 -> 37.7; Indonesian prose the same). Rows-per-sub-group rule
+  for 2-5 tokens: 27B Indonesian prose + MTP 6.95 -> 7.2.
+- DFlash2: Q4_0 drafter weights (half the bytes, 0.84 GiB saved on the 27B, same draft acceptance), single-pass top-16
+  selector (instead of nth_element over 248K tokens, ±2 ms per position on the CPU), draft confidence softmax with vectorized
+  float exp. Code: 27B 16.9 -> 18.3 tok/s, 35B 44 -> 53. Combined mode delays the DFlash2 probe on dense models
+  (8 -> up to 32 steps): 27B Indonesian prose 6.2 -> 6.5.
+- Flash Next: experts already in the cache are processed by the GPU while the missing ones are read from the SSD (6.6 -> 7.3 tok/s); prompt hc
+  mixer (gated mean) with vector loads: 45 -> 3.7 ms per chunk; prompt down projection through moe_rg: 8K prompt
+  98 -> 165 tok/s, KL to the CPU reference 0.0221 -> 0.0191.
+- moe_rg (new): int8 MoE GEMM directly from raw expert rows (decoded in registers), result = decode + GEMM bit
+  for bit; 35B prompts of 384-1152 tokens +3..14 % and logits no longer depend on the chunk size.
+- serverz reports chunk 4096 for streaming MoE (35B 8K: 620 -> 750 tok/s compared to chunk 2048).
+- Tried, not used (docs/lessons, section 5): overlapping two engines, a draft token list, an allocation arena, trimming the
+  working set during load, split SSD reads, 32-slot moe_rg tiles, a swapped grid. Run-to-run variation of 10-30 % (sometimes all
+  dense weights 2x slower) is recorded in QUEUE F16.

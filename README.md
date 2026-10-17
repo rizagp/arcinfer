@@ -18,11 +18,11 @@ Target hardware it was built and tuned on: Intel Core Ultra 5 125H (Arc iGPU, 7 
 32 GB LPDDR5x-6400, Windows 11.
 
 - **What made LLM inference fast on this iGPU, and what did not:** [docs/lessons-intel-arc-igpu.md](docs/lessons-intel-arc-igpu.md)
-- Results and the story of the build: [docs/review.html](docs/review.html) (EN / ID)
-- Current speed per model (Level Zero, 2026-10-16): [docs/performa-zero-2026-10-16.html](docs/performa-zero-2026-10-16.html)
-- arcinferzero development log: [docs/arcinferzero-log.md](docs/arcinferzero-log.md) (Indonesian)
+- Results and the story of the build, with the speed from the first version to now: [docs/review.md](docs/review.md)
+- Speed per model (Level Zero, 2026-10-16): [docs/performance-zero-2026-10-16.md](docs/performance-zero-2026-10-16.md); speed log: [docs/speed-log.md](docs/speed-log.md)
+- arcinferzero development log: [docs/arcinferzero-log.md](docs/arcinferzero-log.md)
 - What changed recently: [CHANGELOG.md](CHANGELOG.md)
-- Panduan pemakaian berbahasa Indonesia: [CARA_PAKAI.md](CARA_PAKAI.md)
+- Usage guide (step by step): [USAGE.md](USAGE.md)
 
 ## Supported models
 
@@ -534,13 +534,13 @@ tools/      server.cpp, run.cpp, test_gemm.cpp (kernel validation), ref_forward.
             Qwen3.5-MoE, Gemma 4), convert_gsq.py (ISTA GSQ checkpoint -> GGUF), tok_test.cpp, chat_render.cpp,
             gguf_dump.cpp, clinfo.cpp
 bench/      micro-benchmarks (gemv_bench, attn_dec_bench, attn_bench, gemm_bench, bw_bench, ...), run_bench.ps1
-            (comparison with llama.cpp), prompt_bench.py, review_data.py (fills docs/review.html)
+            (comparison with llama.cpp), prompt_bench.py, review_data.py (review data)
 scripts/    arc-server.ps1 (server in the background), arc-launcher.ps1 (launcher window, arc-launcher.cmd),
             pi-arc.ps1 (Pi launcher), install-pi.ps1 (commands and Pi's model list), pi-models.ps1 (writes that list)
 tests/      run_tests.ps1 and its reference data
 webui/      index.html
-docs/       review.html (results), performa-zero-2026-10-16.html (current speeds), arcinferzero-log.md,
-            review_notes.md (working notes)
+docs/       review.md (results), performance-zero-2026-10-16.md, speed-log.md, lessons-intel-arc-igpu.md,
+            arcinferzero-log.md, review_notes.md (working notes)
 setup.cmd   setup.ps1: checks, builds, downloads models, connects Pi;  build.ps1: builds one or more tools
 ```
 

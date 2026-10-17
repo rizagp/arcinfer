@@ -8,10 +8,10 @@ iGPU; the design goal from the start was fast prompt processing (time to first t
 Since 2026-10-16 the default engine is **arcinferzero** (`zero/`): the same OpenCL C kernels run through Level Zero,
 bit-identical to the OpenCL engine, with mixture-of-experts weights streamed from the SSD (Qwen3.6 35B-A3B: 262K
 context with images and MTP), MTP up to 7 drafts and a few faster kernels. Speeds:
-[docs/performa-zero-2026-10-16.html](docs/performa-zero-2026-10-16.html); log: [docs/arcinferzero-log.md](docs/arcinferzero-log.md).
+[docs/performance-zero-2026-10-16.md](docs/performance-zero-2026-10-16.md); log: [docs/arcinferzero-log.md](docs/arcinferzero-log.md).
 
-Detailed history: [CHANGELOG.md](CHANGELOG.md). Results and the story of the build: [docs/review.html](docs/review.html)
-(EN / ID), working notes in [docs/review_notes.md](docs/review_notes.md). Indonesian guide: [CARA_PAKAI.md](CARA_PAKAI.md).
+Detailed history: [CHANGELOG.md](CHANGELOG.md). Results and the story of the build: [docs/review.md](docs/review.md),
+working notes in [docs/review_notes.md](docs/review_notes.md). Usage guide: [USAGE.md](USAGE.md).
 
 ---
 

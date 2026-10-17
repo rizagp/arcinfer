@@ -2,7 +2,7 @@
 
 > These notes cover the OpenCL engine up to 15 October 2026. Since 16 October the default engine is arcinferzero
 > (Level Zero, bit-identical output); see [arcinferzero-log.md](arcinferzero-log.md) and
-> [performa-zero-2026-10-16.html](performa-zero-2026-10-16.html).
+> [performance-zero-2026-10-16.md](performance-zero-2026-10-16.md).
 
 ## Setup
 - Laptop: Acer, Intel Core Ultra 5 125H (Meteor Lake), Arc iGPU 7 Xe-cores / 112 EUs @ 2.2 GHz, no XMX.
