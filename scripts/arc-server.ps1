@@ -64,7 +64,7 @@ $Engine = if ($NoStream) { "zero-nostream" } elseif ($Zero) { "zero" } else { "a
 # ($arch: the model's architecture; only mixture-of-experts models keep their experts on the SSD)
 function Engine-Text([string]$e, [string]$arch = "") {
   switch ($e) {
-    "zero" { if ($arch -like "*moe*") { "arcinferzero (Level Zero; experts on the SSD with a GPU cache)" } else { "arcinferzero (Level Zero)" } }
+    "zero" { if ($arch -like "*moe*" -or $arch -eq "qwen4exp") { "arcinferzero (Level Zero; experts on the SSD with a GPU cache)" } else { "arcinferzero (Level Zero)" } }
     "zero-nostream" { "arcinferzero without the SSD cache (Level Zero; every weight on the GPU)" }
     default { "arcinfer (OpenCL; every weight on the GPU)" }
   }
