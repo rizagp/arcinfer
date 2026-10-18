@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-10-18: SSD expert prefetch on the copy engine, 35B chunks of 8192, drafter per model, long contexts
+
+- **Deep expert prefetch** (arcinferzero, prompts of >= 2048 tokens): while the GPU runs a layer, a thread reads every
+  missing expert of the next layer from the SSD and the GPU's copy engine copies them into their cache slots; the
+  kernels wait on an event. Flash Next prompts 4096 tokens 107 -> 166 tok/s, 9000 116.9 -> 144.5, 32K 131.7 -> 162.6;
+  35B 32K at ctx 131K 488.6 -> 557. Logits bit-identical; 56 regression runs (small caches, simulated GPU
+  out-of-memory, 40 prompts in a row) identical. `ARC_XCOPY=0` turns it off.
+- **Qwen3.6 35B prompts in 8192-token chunks** (streamed MoE): 32K prompt 533 -> 604 tok/s, 128K 306 -> 324,
+  generation about the same (ctx 262K; expert cache 81 -> 77 %).
+- **Drafter per model** in Pi's `/model` and `pi-arc`: `<id>-nodf` drafts with the MTP block only, `<id>-df` with
+  DFlash2 only (the MTP block is not loaded: 27B context 69,632 -> 94,208). 35B: Python code fastest with `-df`
+  (49.9 tok/s), Indonesian with `-nodf` (21.9). `--draft auto|mtp|dflash` for the server and `runz`.
+- `--v4`: a 4-bit copy of V for generation, opt-in (35B at 250K depth 10.6 -> 11.5 tok/s, KV +25 %); the
+  automatic context gives the 35B and Flash Next 131,072 tokens; Flash Next's QSA scores 8 rows per work-group
+  (125K prompt 78.6 -> 123.4 tok/s).
+- Fixes: a server switching models now keeps one Level Zero context (the new model used the old context's copy
+  list, events and staging buffer); the expert prefetch thread's read errors no longer end the process; GPU
+  out-of-memory during a prefetch is handled; numeric `ARC_*` knobs that divide are kept >= 1; `/fp:precise` for the
+  accuracy tools.
+- `scripts/hf-download.py` keeps trying until a download is complete (a router that drops out is waited out), with
+  no speed limit by default and several files per command.
+- Docs: [docs/before-after.md](docs/before-after.md) (every change with its numbers before and after, accuracy and
+  consistency), a new README overview.
+
 ## 2026-10-16 (night): DFlash2 block drafter for Qwen3.8 27B
 
 - `--dflash DIR` (runz, serverz) loads a z-lab DFlash2 drafter (z-lab/Qwen3.8-27B-DFlash2): 5 layers fed by the

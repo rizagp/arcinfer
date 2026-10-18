@@ -1,29 +1,68 @@
 # arcinfer
 
-A from-scratch LLM inference engine for **Intel integrated GPUs (Xe-LPG / Meteor Lake "Arc Graphics")** that runs on
-**Level Zero** (Intel's low-level GPU API; the original OpenCL engine is kept as an option), written in C++, focused on
-**fast prompt processing (time to first token)** for long prompts such as scanning a codebase. It loads GGUF files directly and serves an **OpenAI-, Anthropic- and Ollama-compatible
-API with a web UI**, and it plugs into the [Pi](https://pi.dev) coding agent with one command.
+**Fast local LLMs on an Intel laptop iGPU.** A from-scratch inference engine for **Intel integrated GPUs
+(Xe-LPG / Meteor Lake "Arc Graphics")**, written in C++ on **Level Zero**. It loads GGUF files directly, serves an
+**OpenAI-, Anthropic- and Ollama-compatible API with a web UI**, and plugs into the [Pi](https://pi.dev) coding
+agent with one command. Built and tuned on a Core Ultra 5 125H with 32 GB of RAM: no discrete GPU, no XMX matrix
+engines.
 
-Two engines share the kernels and the server code:
+### Why it is worth a look
+
+- **Prompts 2.1-4.9x faster than llama.cpp** (Vulkan / SYCL) on the same GGUF files and laptop, by building every
+  matrix product on the iGPU's int8 DP4a units: a 34K-token code prompt on Qwen3.8 27B takes 5.5 minutes instead
+  of 40 (Vulkan).
+- **Mixture-of-experts models larger than the GPU memory**, experts streamed from the SSD into a GPU cache while
+  the GPU computes: Qwen3.6 35B-A3B with a 131K-262K context, Qwen3.8 Flash Next (52 GB of experts) on a 32 GB laptop.
+- **Speculative decoding that never changes the answer**: the model's MTP block and a DFlash2 block drafter guess
+  up to 7 tokens per step; Python code on the 35B runs at ~50 tok/s, the text identical to plain decoding.
+- **Accuracy measured, not assumed**: every model is checked against an independent f32 CPU implementation, and
+  perplexity is at or below llama.cpp's on the same files.
+- **Deterministic**: the same prompt gives the same logits bit for bit, run after run, whatever the expert cache
+  size or engine, and the drafters give exactly the text of plain decoding. Every speed change is held to that.
+- **Built for agents and long documents**: prompt and session caches (a new message only processes itself), system
+  prompts kept on disk per project, images and audio input, schema-constrained tool calls, model switching from
+  inside Pi.
+
+### Results at a glance (2026-10-18)
+
+| Model | Prompt | Generation | KL vs f32 reference |
+|---|---|---|---|
+| Qwen3.6 35B-A3B UD-IQ4_XS (MoE, experts on the SSD) | 604 tok/s (32K prompt), 324 (128K) | 20.6 tok/s; code 49.9 with DFlash2; 12.6 at 128K depth | 0.004-0.008 |
+| Qwen3.8 27B IQ3_S (dense) | ~135 tok/s | 4.9 tok/s; code 18.1 with DFlash2 + MTP | 0.0003-0.0004 |
+| Qwen3.8 Flash Next IQ3_S (512 experts on the SSD) | 166 tok/s (4K), 163 (32K), 123 (125K) | 6-7 tok/s | 0.020 |
+| Qwen3.5 4B | 911 tok/s (2K) | 17.6 tok/s | 0.0021 |
+| Gemma 4 12B (Google QAT) | 240 tok/s (2K) | 7.5 tok/s | 0.021 (greedy text equal to llama.cpp) |
+
+| vs llama.cpp (same file, same laptop) | arcinfer | llama.cpp Vulkan | llama.cpp SYCL |
+|---|---|---|---|
+| Qwen3.5 4B, 2K prompt | **911 tok/s** | 242 | 337 |
+| Qwen3.8 27B, 2K prompt | **113 tok/s** | 23 | 25 |
+| Qwen3.8 27B, 34K code prompt to first token | **327 s** | 2,418 s | 1,624 s |
+| Qwen3.8 27B, generation after that prompt | **3.7 tok/s** | 2.1 | 1.1 |
+| Perplexity, Qwen3.5 4B / 9B / 27B (lower is better) | **6.056 / 5.417 / 4.274** | 6.141 / 5.499 / 4.311 | 6.138 / 5.497 / 4.310 |
+
+KL is the divergence of the next-token distributions from the f32 reference (0 = identical); run-to-run int8
+rounding noise is ~0.0003. How each number was measured, every change with its before and after, and the
+consistency checks (56 of 56 regression runs bit-identical): **[docs/before-after.md](docs/before-after.md)**.
+
+### Two engines, one server
 
 - **arcinferzero** (`zero/`, `bin\serverz.exe`, `bin\runz.exe`; the default since 2026-10-16) runs the
-  OpenCL-compiled kernels through **Level Zero**. Its output is bit-identical to the OpenCL engine on every model.
-  On top it streams mixture-of-experts weights from the SSD (Qwen3.6 35B-A3B: only the experts in use stay in GPU
-  memory; the full 262K context fits together with images and MTP, though the automatic context keeps most
-  experts cached first, ~40K tokens, for steady generation) and supports up to 7 MTP drafts per step.
+  OpenCL-compiled kernels through **Level Zero**, with output bit-identical to the OpenCL engine on every model. On
+  top it streams mixture-of-experts weights from the SSD (only the experts in use stay in GPU memory; the next
+  layer's missing experts are read while the GPU computes the current one), and drafts with the MTP block, a
+  DFlash2 drafter or both. The automatic context gives the 35B and Flash Next 131,072 tokens.
 - **arcinfer** (`src/`, `bin\server.exe`, `bin\run.exe`): the original OpenCL engine, still available with
   `arc-server start -OpenCL` / `pi-arc --opencl` (launcher: Engine "arcinfer").
 
-Target hardware it was built and tuned on: Intel Core Ultra 5 125H (Arc iGPU, 7 Xe-cores / 112 EUs, no XMX),
-32 GB LPDDR5x-6400, Windows 11.
+### Read more
 
-- **What made LLM inference fast on this iGPU, and what did not:** [docs/lessons-intel-arc-igpu.md](docs/lessons-intel-arc-igpu.md)
-- Results and the story of the build, with the speed from the first version to now: [docs/review.md](docs/review.md)
-- Speed progress from the first version to now (tracked by date): [docs/speed-progress.md](docs/speed-progress.md)
+- Every change with its numbers before and after, accuracy and consistency: [docs/before-after.md](docs/before-after.md)
+- What made LLM inference fast on this iGPU, and what did not: [docs/lessons-intel-arc-igpu.md](docs/lessons-intel-arc-igpu.md)
+- Results and the story of the build: [docs/review.md](docs/review.md)
+- Speed by date, long contexts, the 4-bit V cache: [docs/speed-progress.md](docs/speed-progress.md)
 - arcinferzero development log: [docs/arcinferzero-log.md](docs/arcinferzero-log.md)
-- What changed recently: [CHANGELOG.md](CHANGELOG.md)
-- Usage guide (step by step): [USAGE.md](USAGE.md)
+- What changed recently: [CHANGELOG.md](CHANGELOG.md); usage guide (step by step): [USAGE.md](USAGE.md)
 
 ## Supported models
 
@@ -547,7 +586,8 @@ scripts/    arc-server.ps1 (server in the background), arc-launcher.ps1 (launche
             pi-arc.ps1 (Pi launcher), install-pi.ps1 (commands and Pi's model list), pi-models.ps1 (writes that list)
 tests/      run_tests.ps1 and its reference data
 webui/      index.html
-docs/       review.md (results), speed-progress.md (speed by date), lessons-intel-arc-igpu.md,
+docs/       before-after.md (every change, before / after, accuracy), review.md (results), speed-progress.md
+            (speed by date), lessons-intel-arc-igpu.md,
             arcinferzero-log.md, review_notes.md (working notes)
 setup.cmd   setup.ps1: checks, builds, downloads models, connects Pi;  build.ps1: builds one or more tools
 ```
@@ -564,6 +604,10 @@ setup.cmd   setup.ps1: checks, builds, downloads models, connects Pi;  build.ps1
   35B-A3B paths (KL vs the f32 reference, greedy equal to llama.cpp, drafter output identical).
 - Mean KL of the next-token distributions vs the f32 reference: Qwen3.5-4B 0.0021, Qwen3.6-35B-A3B 0.0008,
   Gemma 4 12B 0.029 (Gemma 4 is about 7x more sensitive to int8 rounding: int8 activations alone give ~0.009).
+- Consistency: logits are compared bit for bit before and after every speed change (`runz --dump-logits`); the
+  SSD expert streaming was run with small caches, simulated GPU out-of-memory (`ARC_FAKE_OOM`) and 40 prompts in a
+  row, 56 of 56 runs identical; speculative decoding must give the text of plain decoding. The record:
+  [docs/before-after.md](docs/before-after.md).
 - `tools/tok_test` compares tokenization with reference token ids.
 - `tools/tool_stream_test` checks the streamed tool calls: for every prefix of a response the arguments sent so far
   are a prefix of the final ones, and the final ones equal the whole-response parse.
