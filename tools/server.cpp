@@ -1318,6 +1318,8 @@ class Server {
     size_t acc = 0;           // how many of them matched so far
     std::vector<float> vrows; // logits of the verification rows
     int n_drafts = 0, n_accepted = 0;
+    // (per drafter for the log: [0] the MTP block / Gemma drafter, [1] DFlash2; steps, drafts, accepted)
+    int dr_steps[2] = {0, 0}, dr_drafts[2] = {0, 0}, dr_acc[2] = {0, 0}, dr_cur = 0;
     size_t call_from = std::string::npos;  // where the open tool call's text starts (after <|tool_call>)
     int n_tool_tok = 0, n_tool_fixed = 0;   // tokens drawn inside tool calls; of them, a refused first choice
     for (int i = 0; i < max_tokens; ++i) {
@@ -1385,6 +1387,7 @@ class Server {
           draft_ok = true;
           ++acc;
           ++n_accepted;
+          ++dr_acc[dr_cur];
           cached_.push_back(t);
         }
         if (!draft_ok || acc == drafts.size()) {  // verification resolved
@@ -1432,6 +1435,11 @@ class Server {
         logits.assign(vrows.begin(), vrows.begin() + V);
         acc = 0;
         n_drafts += (int)drafts.size();
+#ifdef ARC_ZERO
+        dr_cur = eng_.last_draft_dflash() ? 1 : 0;
+#endif
+        ++dr_steps[dr_cur];
+        dr_drafts[dr_cur] += (int)drafts.size();
       } else {
         logits = eng_.forward(&t, 1);
         cached_.push_back(t);
@@ -1496,7 +1504,10 @@ class Server {
     fprintf(stderr, "[%s] prompt %zu tok (cached %zu) %.1f s (%.1f t/s) | gen %zu tok %.1f s (%.2f t/s) | %s", id.c_str(),
             P.size(), start, prompt_ms / 1000, (P.size() - start) / std::max(prompt_ms, 1e-3) * 1000, gen.size(), gen_ms / 1000,
             gen.size() / std::max(gen_ms, 1e-3) * 1000, finish.c_str());
-    if (n_drafts) fprintf(stderr, " | MTP %d/%d drafts accepted", n_accepted, n_drafts);
+    if (n_drafts && !dr_steps[1]) fprintf(stderr, " | MTP %d/%d drafts accepted", n_accepted, n_drafts);
+    if (dr_steps[1])  // (DFlash2 drafted at least once: both drafters, each with its steps and accepted drafts)
+      fprintf(stderr, " | DFlash2 %d steps, %d/%d drafts accepted | MTP %d steps, %d/%d", dr_steps[1], dr_acc[1],
+              dr_drafts[1], dr_steps[0], dr_acc[0], dr_drafts[0]);
     if (n_tool_fixed) fprintf(stderr, " | tool call: %d of %d tokens corrected", n_tool_fixed, n_tool_tok);
     fprintf(stderr, "\n");
 #ifdef ARC_ZERO

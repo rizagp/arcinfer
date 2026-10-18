@@ -4229,6 +4229,7 @@ class Engine {
   }
  public:
   int drafter_dflash_steps() const { return (int)dfl_steps_; }
+  bool last_draft_dflash() const { return dfl_used_; }  // the drafts of the last mtp_draft came from DFlash2
  private:
   // sum of exp(l[i] - mx) over n logits (mx their maximum): the drafts' confidence. float exp in blocks of 4096 (the
   // compiler vectorizes it), the blocks summed in double; was one double exp per vocabulary entry, 2-3 ms per draft
