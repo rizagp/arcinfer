@@ -30,3 +30,6 @@ __pycache__/
 *.tmp
 *_dbg_gpu.bin
 *.bak
+
+# Local review notes (not part of the repository)
+deepseek-*.md
