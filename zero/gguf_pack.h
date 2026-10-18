@@ -124,7 +124,9 @@ inline Result make_package(const std::string& source, int n_layer_hint = 0) {
   r.gguf = dir + "\\" + name + ".gguf";
   r.experts = dir + "\\" + name + ".experts";
 
-  // ---- 1. the experts, through the expert store (written next to the package)
+  // Order: the package GGUF goes to a .tmp, then the expert file is moved or written, then the .tmp takes the
+  // package's name. A step that fails leaves no half package: the .tmp is removed, and a package GGUF only appears
+  // once its expert file is complete (the engine refuses a package without one).
   const std::string arch = src.get_str("general.architecture");
   // (the engine's layer count: the MTP / nextn blocks are not counted, the extra entry below holds them; with
   //  block_count the 35B's expert file listed one layer more than the engine expects and was refused)
@@ -132,20 +134,14 @@ inline Result make_package(const std::string& source, int n_layer_hint = 0) {
                                        : (int)src.get_int(arch + ".block_count", 0) - (int)src.get_int(arch + ".nextn_predict_layers", 0);
   const int n_exp = (int)src.get_int(arch + ".expert_count", 0);
   if (n_exp <= 0) throw std::runtime_error("not a MoE model (no " + arch + ".expert_count)");
+  if (n_layer <= 0 || n_layer > 4096) throw std::runtime_error("unexpected layer count " + std::to_string(n_layer) + " (" + arch + ".block_count)");
   // (the same layer list as the engine's: blocks 0..n_layer, the last one the MTP / nextn block when there is one)
   std::vector<std::string> pre(n_layer + 1);
   for (int il = 0; il <= n_layer; ++il) {
     const std::string p = "blk." + std::to_string(il) + ".";
     if (src.find(p + "ffn_gate_exps.weight")) pre[il] = p;
   }
-  {
-    ExpertStore st;
-    st.open_or_build(src, source, pre, n_exp, r.experts);
-    if (!st.built) fprintf(stderr, "arcinferzero: the expert file was already there: %s\n", r.experts.c_str());
-    r.expert_bytes = st.file_bytes;
-  }
-
-  // ---- 2. the package GGUF: all metadata + every non-expert tensor; the experts as virtual tensors
+  // ---- 1. the package GGUF: all metadata + every non-expert tensor; the experts as virtual tensors
   std::vector<const GgufTensor*> keep;
   std::vector<std::string> vnames;
   std::vector<int64_t> vtypes, vdims;
@@ -161,7 +157,8 @@ inline Result make_package(const std::string& source, int n_layer_hint = 0) {
   }
   const uint64_t align = (uint64_t)src.get_int("general.alignment", 32);
   const std::string tmp = r.gguf + ".tmp";
-  {
+  auto drop_tmp = [&] { std::error_code e; fs::remove(tmp, e); };
+  try {
     Writer w(tmp);
     std::vector<std::string> keys;
     for (const std::string& k : src.kv_order)
@@ -196,10 +193,27 @@ inline Result make_package(const std::string& source, int n_layer_hint = 0) {
     }
     r.rest_bytes = w.pos();
     w.close();
+  } catch (...) {
+    drop_tmp();
+    throw;
+  }
+  // ---- 2. the experts, through the expert store, next to the package (the engine's expert file for the source
+  //  moves here when it exists, see ExpertStore::open_or_build)
+  try {
+    ExpertStore st;
+    st.open_or_build(src, source, pre, n_exp, r.experts);
+    if (!st.built) fprintf(stderr, "arcinferzero: the expert file was already there: %s\n", r.experts.c_str());
+    r.expert_bytes = st.file_bytes;
+  } catch (...) {
+    drop_tmp();
+    throw;
   }
   std::error_code ec;
   fs::rename(tmp, r.gguf, ec);
-  if (ec) throw std::runtime_error("cannot rename " + tmp + ": " + ec.message());
+  if (ec) {
+    drop_tmp();
+    throw std::runtime_error("cannot rename " + tmp + ": " + ec.message());
+  }
   r.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   return r;
 }

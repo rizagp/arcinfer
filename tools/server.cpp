@@ -1832,19 +1832,21 @@ static std::vector<ModelInfo> scan_models() {
     out.push_back(m);
   }
 #ifdef ARC_ZERO
-  // which copy of a model keeps its id and shortcut: the Hugging Face cache first (a package next to the GGUF it was
-  // made from waits until that GGUF is deleted), then packages, then the extra folders (a backup GGUF on another
-  // drive must not take the id from a package: its expert file moved into the package, so it would be written again)
+  // which copy of a model keeps its id and shortcut: a package first (--pack moved the GGUF's expert file into it, so
+  // loading the GGUF it was made from would write that file again), then the Hugging Face cache, then the extra
+  // folders (a backup on another drive); the others get -2, -3, ...
   {
     std::error_code e2;
     const std::string hub = lower_ascii(fs::weakly_canonical(hf_hub_dir(), e2).string());
-    auto rank = [&](const ModelInfo& m) {
-      if (m.name.rfind("arcinferzero/", 0) == 0) return 1;
+    std::vector<std::pair<int, ModelInfo>> ranked;  // (each path looked at once)
+    for (ModelInfo& m : out) {
       std::error_code e3;
       const std::string p = lower_ascii(fs::weakly_canonical(m.path, e3).string());
-      return !hub.empty() && p.rfind(hub, 0) == 0 ? 0 : 2;
-    };
-    std::stable_sort(out.begin(), out.end(), [&](const ModelInfo& a, const ModelInfo& b) { return rank(a) < rank(b); });
+      const int r = m.name.rfind("arcinferzero/", 0) == 0 ? 0 : !hub.empty() && p.rfind(hub, 0) == 0 ? 1 : 2;
+      ranked.push_back({r, std::move(m)});
+    }
+    std::stable_sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (size_t i = 0; i < out.size(); ++i) out[i] = std::move(ranked[i].second);
   }
 #endif
   // every downloaded file selectable on its own: a repeated id gets -2, -3, ..., a repeated shortcut is dropped
@@ -2419,7 +2421,8 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
   if (so.preserve_thinking && !srv.can_preserve_)
     fprintf(stderr, "--preserve-thinking: this model's chat template has no such option (Qwen3.6 has it; Qwen3.8 always keeps the reasoning)\n");
   // (saved states only load into the same layout: no MTP block (-std), DFlash2 without the MTP block (-df) and the
-  // 4-bit V copy (--v4) each keep their own folders next to the plain one)
+  // 4-bit V copy (--v4) each keep their own folders next to the plain one; auto and -nodf share one: DFlash2 saves
+  // no state of its own, its context rings start empty after a load — give it a suffix once that changes)
   std::string layout;
   if (!eo.mtp) layout += "-std";
 #ifdef ARC_ZERO
@@ -2481,7 +2484,9 @@ int main(int argc, char** argv) {
         fprintf(stderr, "arcinferzero: making a package of %s (reads the whole model once)\n", src.c_str());
         const zpack::Result r = zpack::make_package(src);
         fprintf(stderr, "arcinferzero: package ready in %.0f s\n  %s (%.2f GB)\n  %s (%.2f GB)\n"
-                        "The original GGUF is no longer needed to run this model with arcinferzero.\n",
+                        "The original GGUF is no longer needed to run this model with arcinferzero: the model list now\n"
+                        "picks the package. The engine's own expert file for the GGUF moved into the package, so loading\n"
+                        "the GGUF itself (by its path) would write that file again; keep the GGUF only as a backup.\n",
                 r.seconds, r.gguf.c_str(), r.rest_bytes / 1e9, r.experts.c_str(), r.expert_bytes / 1e9);
         return 0;
       } catch (const std::exception& e) {
@@ -2524,6 +2529,11 @@ int main(int argc, char** argv) {
     else if (a == "--prefix-cache-gb") so.prefix_gb = std::stod(next());
     else if (a == "--help" || a == "-h") help = true;
   }
+#ifdef ARC_ZERO
+  // (ARC_V4=1 turns the engine's 4-bit V copy on as --v4 does: the server must know it too, for its context key and
+  //  the folders of saved states)
+  if (getenv("ARC_V4") && atoi(getenv("ARC_V4")) > 0) so.eo.v4 = true;
+#endif
   if (model.empty() || help) {
     fprintf(stderr,
             "usage: arcinfer-server -m model.gguf [options]   OpenAI-compatible server (API at /v1, web UI at /)\n"
