@@ -403,9 +403,15 @@ inline void kv4_fake(float* v, int B) {
     const float t = intel_sub_group_shuffle_xor(m, o);
     if (fabs(t) > fabs(m) || (fabs(t) == fabs(m) && t > m)) m = t;
   }
+#ifdef KV4SYM  // (16 symmetric levels (n - 7.5) * amax / 7.5, n = 0..15: an unsigned scale, the form a P x V kernel can use)
+  const float d = fabs(m) / 7.5f, id = d > 0.0f ? 1.0f / d : 0.0f;
+#pragma unroll
+  for (int i = 0; i < 16; ++i) v[i] = ((float)clamp((int)floor(v[i] * id + 8.0f), 0, 15) - 7.5f) * d;
+#else
   const float d = m / -8.0f, id = d != 0.0f ? 1.0f / d : 0.0f;
 #pragma unroll
   for (int i = 0; i < 16; ++i) v[i] = (float)(min(15, (int)(v[i] * id + 8.5f)) - 8) * d;
+#endif
 }
 #endif
 
@@ -505,6 +511,32 @@ __kernel void attn_prep(__global const float* qkv, int ldq, int nh, int nkv, __g
   float vv[16], vmax = 0.0f;
 #pragma unroll
   for (int i = 0; i < 16; ++i) vv[i] = vs[i];
+#ifdef V4
+  // 4-bit V (-DV4): per key and 64-dim block (4 lanes) a scale d = amax / 7.5 and 16 levels (n - 7.5) * d, n = 0..15
+  // stored as nibbles: dim e of block blk is 2 words, word w = keys 8w..8w+7, byte j = key 8w+j (low nibble) and key
+  // 8w+j+4 (high nibble), so the low nibbles of a word are keys 8w..8w+3 as DP4a bytes and the high ones the next 4.
+  // Other keys of the same word belong to other positions, written by other sub-groups at the same time: the nibble
+  // is cleared and set with atomics (positions are written again after a rollback).
+  {
+#pragma unroll
+    for (int i = 0; i < 16; ++i) vmax = fmax(vmax, fabs(vv[i]));
+    vmax = fmax(vmax, intel_sub_group_shuffle_xor(vmax, 1));
+    vmax = fmax(vmax, intel_sub_group_shuffle_xor(vmax, 2));
+    const float d = vmax / 7.5f, id = d > 0.0f ? 1.0f / d : 0.0f;
+    const int sh = (kk & 3) * 8 + ((kk >> 2) & 1) * 4;
+    __global volatile uint* vw = (__global volatile uint*)vq;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+      const uint n = (uint)clamp((int)floor(vv[i] * id + 8.0f), 0, 15);
+      const size_t wi = (blk * 256 + 16 * lane + i) * 2 + (kk >> 3);
+      atomic_and(vw + wi, ~(0xFu << sh));
+      atomic_or(vw + wi, n << sh);
+    }
+    if (lane % 4 == 0) vsc[(blk * 4 + lane / 4) * 16 + kk] = d;
+    if (lane % (16 / SB) == 0) ksc[(blk * SB + lane / (16 / SB)) * 16 + kk] = amax / 127.0f;
+    return;
+  }
+#endif
 #ifdef KV4V
   kv4_fake(vv, KV4V);
 #endif
@@ -769,6 +801,34 @@ inline uint4 pack_p(int q) {
     _Pragma("unroll") for (int ii = 0; ii < 4; ++ii) PV_DIM(vt, 4 * c + ii)             \
   }
 #endif
+#ifdef V4
+// 4-bit V (attn_prep -DV4): a tile's V is [HD dims][2 words] of nibbles (vt: uint2 per dim) with a scale per key and
+// 64-dim block ([block][VSB][key]; vob = this tile's first scale + lane). Per block P is quantized against
+// P * scale as for int8 V (PV_PACK), then o += scale-folded P . (n - 7.5): (2 P.n - 15 sum(P)) / 2, in integers.
+#define VSB (HD / 64)
+#define V4M 0x0F0F0F0Fu
+#define PV4_DIM(vt, i)                                                                  \
+  {                                                                                     \
+    const uint2 w = vt[16 * (i) + lane];                                                \
+    const uint4 v = (uint4)(w.x & V4M, (w.x >> 4) & V4M, w.y & V4M, (w.y >> 4) & V4M);  \
+    int a[HS];                                                                          \
+    _Pragma("unroll") for (int r = 0; r < HS; ++r) a[r] = PDOT(pw[r].x, v.x);           \
+    _Pragma("unroll") for (int r = 0; r < HS; ++r) a[r] = PDOT_ACC(pw[r].y, v.y, a[r]); \
+    _Pragma("unroll") for (int r = 0; r < HS; ++r) a[r] = PDOT_ACC(pw[r].z, v.z, a[r]); \
+    _Pragma("unroll") for (int r = 0; r < HS; ++r) a[r] = PDOT_ACC(pw[r].w, v.w, a[r]); \
+    _Pragma("unroll") for (int r = 0; r < HS; ++r)                                      \
+      o[r][i] = fma((float)(2 * a[r] - 15 * psum[r]), 0.5f * ps[r], o[r][i]);           \
+  }
+#define PV4_TILE(vt, vob, valid)                                                        \
+  _Pragma("unroll") for (int c = 0; c < VSB; ++c) {                                     \
+    PV_PACK(c, valid, vob)                                                              \
+    int psum[HS];                                                                       \
+    _Pragma("unroll") for (int r = 0; r < HS; ++r)                                      \
+      psum[r] = PDOT_ACC(pw[r].w, 0x01010101u, PDOT_ACC(pw[r].z, 0x01010101u,           \
+                PDOT_ACC(pw[r].y, 0x01010101u, PDOT(pw[r].x, 0x01010101u))));           \
+    _Pragma("unroll") for (int ii = 0; ii < 4; ++ii) PV4_DIM(vt, 4 * c + ii)            \
+  }
+#endif
 
 __attribute__((intel_reqd_sub_group_size(SG)))
 #ifdef QSA  // Flash Next sparse attention: a query sees the keys of its selected blocks and of its tail block
@@ -821,17 +881,47 @@ __kernel void attn_q8(__global const char* qi, __global const float* qsc, __glob
   const int last_hi = (nc_hi >= 0 && first <= nc_hi && last >= nc_lo) ? max(last, nc_hi) : last;
   const int b_first = win > 0 ? max(0, first - win + 1) / 16 : 0, b_last = last_hi / 16;
 #define NL (2 * BLK_U / (16 * NSP * TPW))
+#ifdef V4  // (a 4-bit V block is BLK_U / 2 uints: K loads NLK uints per work-item, V NLV, the tile keeps its layout)
+#define NLK (BLK_U / (16 * NSP * TPW))
+#define NLV ((BLK_U / 2 + 16 * NSP * TPW - 1) / (16 * NSP * TPW))
+#define V4_TILE_LOAD(bi)                                                                 \
+  {                                                                                      \
+    _Pragma("unroll") for (int j = 0; j < NLK; ++j) rk[j] = kq[(bi) * BLK_U + lid + j * lsz]; \
+    _Pragma("unroll") for (int j = 0; j < NLV; ++j) {                                    \
+      const int e = lid + j * lsz;                                                       \
+      rk[NLK + j] = e < BLK_U / 2 ? vqu[(bi) * (BLK_U / 2) + e] : 0u;                    \
+    }                                                                                    \
+  }
+#define V4_TILE_STORE(tb)                                                                \
+  {                                                                                      \
+    _Pragma("unroll") for (int j = 0; j < NLK; ++j) tb[lid + j * lsz] = rk[j];           \
+    _Pragma("unroll") for (int j = 0; j < NLV; ++j) {                                    \
+      const int e = lid + j * lsz;                                                       \
+      if (e < BLK_U / 2) tb[BLK_U + e] = rk[NLK + j];                                    \
+    }                                                                                    \
+  }
+#endif
   __global const uint* vqu = (__global const uint*)vq;
+#ifdef V4
+  uint rk[NLK + NLV];
+  V4_TILE_LOAD(blk0 + b_first % nbc)
+#else
   uint rk[NL];
   {
     const size_t nb = (blk0 + b_first % nbc) * BLK_U;
 #pragma unroll
     for (int j = 0; j < NL; ++j) rk[j] = j < NL / 2 ? kq[nb + lid + j * lsz] : vqu[nb + lid + (j - NL / 2) * lsz];
   }
+#endif
   for (int b = b_first; b <= b_last; ++b) {
     const int t0 = b * 16;
     __local uint* tb = tile[b % TILE_BUFS];
     if (TILE_BUFS == 1 && b > b_first) barrier(CLK_LOCAL_MEM_FENCE);  // everyone is done with the previous tile
+#ifdef V4
+    V4_TILE_STORE(tb)
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (b < b_last) V4_TILE_LOAD(blk0 + (b + 1) % nbc)
+#else
 #pragma unroll
     for (int j = 0; j < NL; ++j) tb[lid + j * lsz] = rk[j];
     barrier(CLK_LOCAL_MEM_FENCE);
@@ -841,9 +931,15 @@ __kernel void attn_q8(__global const char* qi, __global const float* qsc, __glob
 #pragma unroll
       for (int j = 0; j < NL; ++j) rk[j] = j < NL / 2 ? kq[nb + lid + j * lsz] : vqu[nb + lid + (j - NL / 2) * lsz];
     }
+#endif
     if (!active || t0 > hi || t0 + 15 < lo) continue;
     __local const uint* Kt = tb;
+#ifdef V4
+    __local const uint2* Vt = (__local const uint2*)(tb + BLK_U);
+    const size_t vob = ((size_t)g * nbc + (size_t)(b % nbc)) * VSB * 16 + lane;
+#else
     __local const uint4* Vt = (__local const uint4*)(tb + BLK_U);
+#endif
     const size_t sob = ((size_t)g * nbc + (size_t)(b % nbc)) * SB * 16 + lane;  // this tile's scales
     const int key = t0 + lane;
 #ifdef QSA
@@ -874,7 +970,11 @@ __kernel void attn_q8(__global const char* qi, __global const float* qsc, __glob
     for (int r = 0; r < HS; ++r) { pk[r] = valid ? sacc[r] * 0.01f + 0.5f : 0.0f; pb[r] = 1.0f; lp[r] += pk[r]; }
 #endif
 #ifndef ABL_NOPV
+#ifdef V4
+    PV4_TILE(Vt, vob, valid)
+#else
     PV_TILE(Vt, sob, valid)
+#endif
 #else
 #pragma unroll
     for (int r = 0; r < HS; ++r) o[r][0] += pk[r] * as_float(Vt[lane].x) * 1e-30f;
@@ -1148,16 +1248,26 @@ __kernel void attn_split(__global const char* qi, __global const float* qsc, __g
   const int lo_all = max(s0, win > 0 ? pos0 - win + 1 : 0), hi_all = min(s1, pos0 + M_valid - 1);
   const int b_first = max(lo_all, 0) / 16, b_last = hi_all / 16;
   __global const uint* vqu = (__global const uint*)vq;
+#ifdef V4
+  uint rk[NLK + NLV];
+  if (b_first <= b_last) V4_TILE_LOAD(blk0 + b_first % nbc)
+#else
   uint rk[NL];
   if (b_first <= b_last) {
     const size_t nb = (blk0 + b_first % nbc) * BLK_U;
 #pragma unroll
     for (int j = 0; j < NL; ++j) rk[j] = j < NL / 2 ? kq[nb + lid + j * lsz] : vqu[nb + lid + (j - NL / 2) * lsz];
   }
+#endif
   for (int b = b_first; b <= b_last; ++b) {
     const int t0 = b * 16;
     __local uint* tb = tile[b % TILE_BUFS];
     if (TILE_BUFS == 1 && b > b_first) barrier(CLK_LOCAL_MEM_FENCE);  // everyone is done with the previous tile
+#ifdef V4
+    V4_TILE_STORE(tb)
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (b < b_last) V4_TILE_LOAD(blk0 + (b + 1) % nbc)
+#else
 #pragma unroll
     for (int j = 0; j < NL; ++j) tb[lid + j * lsz] = rk[j];
     barrier(CLK_LOCAL_MEM_FENCE);
@@ -1167,9 +1277,15 @@ __kernel void attn_split(__global const char* qi, __global const float* qsc, __g
 #pragma unroll
       for (int j = 0; j < NL; ++j) rk[j] = j < NL / 2 ? kq[nb + lid + j * lsz] : vqu[nb + lid + (j - NL / 2) * lsz];
     }
+#endif
     if (!active || t0 > hi || t0 + 15 < lo) continue;
     __local const uint* Kt = tb;
+#ifdef V4
+    __local const uint2* Vt = (__local const uint2*)(tb + BLK_U);
+    const size_t vob = ((size_t)g * nbc + (size_t)(b % nbc)) * VSB * 16 + lane;
+#else
     __local const uint4* Vt = (__local const uint4*)(tb + BLK_U);
+#endif
     const size_t sob = ((size_t)g * nbc + (size_t)(b % nbc)) * SB * 16 + lane;  // this tile's scales
     const int key = t0 + lane;
     const bool valid = key <= hi && key >= lo;
@@ -1179,7 +1295,11 @@ __kernel void attn_split(__global const char* qi, __global const float* qsc, __g
       const float sv = valid ? sacc[r] : -INFINITY;
       SOFTMAX_TILE(r, sv, valid)
     }
+#ifdef V4
+    PV4_TILE(Vt, vob, valid)
+#else
     PV_TILE(Vt, sob, valid)
+#endif
   }
   if (active) {
 #pragma unroll
@@ -1245,8 +1365,13 @@ __kernel void attn_decode(__global const char* qi, __global const float* qsc, __
       const float sv = valid ? sacc[r] : -INFINITY;
       SOFTMAX_TILE(r, sv, valid)
     }
+#ifdef V4
+    __global const uint2* vt = (__global const uint2*)vq + b * HD;
+    PV4_TILE(vt, b * VSB * 16 + lane, valid)
+#else
     __global const uint4* vt = vq + b * HD;
     PV_TILE(vt, sob, valid)
+#endif
   }
 #pragma unroll
   for (int r = 0; r < HS; ++r) {
@@ -1365,17 +1490,28 @@ __kernel void attn_dsplit(__global const char* qi, __global const float* qsc, __
     }
     // P * V for this sub-group's dims (P re-quantized per 64-dim block with SB > 1, as PV_PACK); keys outside every
     // row's range have pk = 0
+#ifdef V4  // (4-bit V: P re-quantized per 64-dim block against that block's scales, see PV4_TILE)
+    __global const uint2* vt = (__global const uint2*)vq + b * HD;
+#define DS_VSC(c) vsc[b * VSB * 16 + lane + (c) * 16]
+#define DS_REPACK 1
+#else
     __global const uint4* vt = vq + b * HD;
+#define DS_VSC(c) vsc[sob + (SB == 1 ? 0 : (c) * 16)]
+#define DS_REPACK (SB > 1)
+#endif
     uint4 pw[RH];
     float pq[RH];
+#ifdef V4
+    int psum[RH];
+#endif
 #pragma unroll
     for (int cc = 0; cc < CPS; ++cc) {
       const int c = dj * CPS + cc;
-      if (SB > 1 || cc == 0) {
+      if (DS_REPACK || cc == 0) {
 #ifdef ROWVMT
         // (-DROWVMT, Qwen: the bound of each row covers only the keys that row sees, so a row of a verification pass
         //  gets exactly the values of decoding its token alone: speculative decoding stays bit-identical)
-        const float vraw = vsc[sob + (SB == 1 ? 0 : c * 16)];
+        const float vraw = DS_VSC(c);
 #pragma unroll
         for (int x = 0; x < RH; ++x) {
           const int m = x / HG, pos = pos0 + m, lo = max(s0, win > 0 ? pos - win + 1 : 0), hi = min(s1, pos);
@@ -1386,7 +1522,7 @@ __kernel void attn_dsplit(__global const char* qi, __global const float* qsc, __
         }
 #else
         const bool used = key >= lo_all && key <= hi_all;  // the bound covers only keys some row sees
-        const float vs = used ? vsc[sob + (SB == 1 ? 0 : c * 16)] : 0.0f, vmt = sub_group_reduce_max(vs);
+        const float vs = used ? DS_VSC(c) : 0.0f, vmt = sub_group_reduce_max(vs);
 #pragma unroll
         for (int x = 0; x < RH; ++x) {
           const float pm = pb[x] * vmt;
@@ -1394,21 +1530,38 @@ __kernel void attn_dsplit(__global const char* qi, __global const float* qsc, __
           pq[x] = pm * (1.0f / PQMAX);
         }
 #endif
+#ifdef V4
+#pragma unroll
+        for (int x = 0; x < RH; ++x)
+          psum[x] = PDOT(pw[x].x, 0x01010101u) + PDOT(pw[x].y, 0x01010101u) + PDOT(pw[x].z, 0x01010101u) +
+                    PDOT(pw[x].w, 0x01010101u);
+#endif
       }
 #pragma unroll
       for (int ii = 0; ii < 4; ++ii) {
+#ifdef V4
+        const uint2 w2 = vt[64 * c + 16 * ii + lane];
+        const uint4 v = (uint4)(w2.x & V4M, (w2.x >> 4) & V4M, w2.y & V4M, (w2.y >> 4) & V4M);
+#else
         const uint4 v = vt[64 * c + 16 * ii + lane];
+#endif
 #pragma unroll
         for (int x = 0; x < RH; ++x) {
           int a = PDOT(pw[x].x, v.x);
           a += PDOT(pw[x].y, v.y);
           a += PDOT(pw[x].z, v.z);
           a += PDOT(pw[x].w, v.w);
+#ifdef V4
+          o[x][4 * cc + ii] = fma((float)(2 * a - 15 * psum[x]), 0.5f * pq[x], o[x][4 * cc + ii]);
+#else
           o[x][4 * cc + ii] = fma((float)a, pq[x], o[x][4 * cc + ii]);
+#endif
         }
       }
     }
   }
+#undef DS_VSC
+#undef DS_REPACK
 #pragma unroll
   for (int x = 0; x < RH; ++x) {
     const int m = x / HG, r = x % HG;

@@ -1932,7 +1932,7 @@ static std::string ctx_key(const std::string& model, const EngineOptions& eo) {
   return p + "|" + std::to_string(fs::file_size(model, ec)) + "|" + std::to_string(eo.chunk) +
 #ifdef ARC_ZERO
          "|z" + std::to_string((int)(eo.windows_reserve_gb * 10)) + (eo.stream_experts ? "s" : "n") +
-         (eo.dflash.empty() ? std::string() : "|dflash") + "|" +  // (DFlash2 drafter: its weights and buffers)
+         (eo.dflash.empty() ? std::string() : "|dflash") + (eo.v4 ? "|v4" : "") + "|" +  // (DFlash2 drafter: its weights and buffers; 4-bit V)
 #endif
          (eo.min_chunk ? "/" + std::to_string(eo.min_chunk) : std::string()) + "|" + (eo.mtp ? "mtp" : "-") + "|" + (eo.attn_int8 ? "i8" : "f32") + "|" + std::to_string(device_global_mem()) +
          "|m12";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
@@ -2419,6 +2419,9 @@ int main(int argc, char** argv) {
     else if (a == "--webui") so.webui = next();
     else if (a == "--budget") { so.eo.w8_budget_gb = std::stod(next()); so.budget_given = true; }
     else if (a == "--attn-f32") so.eo.attn_int8 = false;
+#ifdef ARC_ZERO
+    else if (a == "--v4") so.eo.v4 = true;  // (4-bit V cache, Qwen, experimental)
+#endif
     else if (a == "--mtp") so.eo.mtp = true;
 #ifdef ARC_ZERO
     else if (a == "--dflash") { so.eo.dflash = next(); so.eo.mtp = true; }

@@ -66,6 +66,7 @@ struct EngineOptions {
   double w8_budget_gb = 9.0;  // keep decoded W8 weights resident if raw + W8 fit in this budget
   bool act32_all = true;      // per-32 activation scales for every GEMM (false: only for the sensitive inputs)
   bool attn_int8 = true;      // int8 (DP4a) attention scores; false = f32 scores
+  bool v4 = false;            // 4-bit V cache (Qwen; K stays int8): a scale per key and 64 dims, 16 levels (opt-in)
   bool mtp = false;           // load the MTP (nextn) block for speculative decoding (mtp_draft / verify)
   int mtp_drafts = 0;         // drafts per step (1..7; later ones chained on the MTP block's own output); 0 = auto:
                               // 3 for wide dense Qwen models (27B: code 7.8 -> 9.5 tok/s, text +2.5 %), else 2
@@ -111,6 +112,9 @@ class Engine {
     if (!cl_.init(true)) throw std::runtime_error("OpenCL init failed");
     ctx = (o.ctx + 15) / 16 * 16;
     load_hparams();
+    if (getenv("ARC_V4") && atoi(getenv("ARC_V4")) > 0) opt.v4 = true;
+    if (opt.v4 && (hp.gemma || !opt.attn_int8))
+      throw std::runtime_error("the 4-bit V cache (--v4) is for Qwen models with int8 attention");
     // (MoE, Qwen3.6 35B: 1 and 2 drafts equally fast, 20.2 vs 20.3 tok/s; 1 keeps one DeltaNet state copy less)
     // (measured on arcinferzero, server answers at temperature 0, 2026-10-16: 35B 1 -> 3 drafts 23.9 -> 26.1 tok/s,
     //  4B 2 -> 3 22.9 -> 24.8; 9B 2 and 3 alike (15.8 / 15.6); 27B 3 = 5 = 7; Gemma's drafter unchanged at 2)
@@ -353,7 +357,7 @@ class Engine {
     snprintf(hex, sizeof hex, "%016llx",
              (unsigned long long)ClRt::fnv1a(gemm_src_ + "\x01" + ops_src_ + "\x01" + dec_src_ + "\x01" + moe_src_ + "\x01" + f_.path +
                                              "|" + std::to_string(opt.mtp) + "|" + opt.dflash + "|" + std::to_string(opt.mtp_drafts) +
-                                             "|" + std::to_string(max_chunk) + "|" + cl_.device_id));
+                                             "|" + std::to_string(max_chunk) + (opt.v4 ? "|v4" : "") + "|" + cl_.device_id));
     const std::string marker = dir.empty() ? std::string() : dir + "\\warm-" + hex;
     if (!marker.empty() && std::filesystem::exists(marker)) {
       forward(&tok, 1);  // (the kernels are in the cache: building them is quick)
@@ -497,7 +501,9 @@ class Engine {
     } else {
       int nl = mtp_block_ ? 1 : 0;
       for (const Layer& L : layers_) nl += !hp.recurrent(L.il);
-      n += (size_t)nl * hp.n_head_kv * c * (2 * (size_t)hp.head_dim + 8);
+      // (per position and kv head: K int8 + V int8 (4-bit: half) + their scales (4-bit V: one per 64 dims))
+      const size_t per = opt.v4 ? (size_t)hp.head_dim + hp.head_dim / 2 + 4 + 4 * (hp.head_dim / 64) : 2 * (size_t)hp.head_dim + 8;
+      n += (size_t)nl * hp.n_head_kv * c * per;
       n += (size_t)hp.n_qsa * qsa_blocks(c) * hp.qsa_dim * 4;  // QSA pooled keys
     }
     return n;
@@ -609,7 +615,7 @@ class Engine {
     if (!get(f, hdr.data(), hdr.size() * 4)) return false;
     const int spos = hdr[7], swh = hdr[8], slo = hdr[9];
     if (hdr[0] != kStateMagic || hdr[1] != 2 || hdr[2] != hp.n_layer || hdr[3] != hp.n_embd || hdr[4] != hp.n_vocab ||
-        hdr[5] != (hp.gemma ? 1 : 0) || hdr[6] != (has_mtp ? 1 : 0) || hdr[10] != (int)kl.size() || spos < 0 ||
+        hdr[5] != ((hp.gemma ? 1 : 0) | (opt.v4 ? 2 : 0)) || hdr[6] != (has_mtp ? 1 : 0) || hdr[10] != (int)kl.size() || spos < 0 ||
         spos > ctx || swh > ctx || slo < 0)
       return false;
     std::vector<int32_t> geo(kl.size() * 5);
@@ -832,7 +838,10 @@ class Engine {
       for (int g = 0; g < k.nkv; ++g)
         for (int t = 0; t < 4; ++t) {
           cl_mem b = t == 0 ? k.L->kq : t == 1 ? k.L->vq : t == 2 ? k.L->ksc : k.L->vsc;
-          const size_t unit = t < 2 ? (size_t)16 * k.hd : (size_t)k.sb * 16 * 4, base = (size_t)g * nbc;
+          size_t unit = t < 2 ? (size_t)16 * k.hd : (size_t)k.sb * 16 * 4;
+          if (opt.v4 && !hp.gemma && t == 1) unit /= 2;                        // (4-bit V)
+          if (opt.v4 && !hp.gemma && t == 3) unit = (size_t)(k.hd / 64) * 16 * 4;
+          const size_t base = (size_t)g * nbc;
           if (first > 0) v.push_back({b, (base + s0) * unit, (size_t)first * unit});
           if (n > first) v.push_back({b, base * unit, (size_t)(n - first) * unit});
         }
@@ -862,7 +871,7 @@ class Engine {
     const auto kl = kv_layers();
     // positions [0, pos) (beyond pos a Gemma cache may still hold a longer, rewound conversation: not needed)
     const int hi = pos, slo = hp.gemma ? swa_save_lo(keep_from) : 0;
-    hdr = {kStateMagic, 2, hp.n_layer, hp.n_embd, hp.n_vocab, hp.gemma ? 1 : 0, has_mtp ? 1 : 0, pos, pos, slo,
+    hdr = {kStateMagic, 2, hp.n_layer, hp.n_embd, hp.n_vocab, (hp.gemma ? 1 : 0) | (opt.v4 ? 2 : 0), has_mtp ? 1 : 0, pos, pos, slo,
            (int)kl.size()};
     std::vector<std::pair<int, int>> br;  // blocks [b0, b1) saved per KV layer
     for (const KvGeom& k : kl) {
@@ -1220,7 +1229,9 @@ class Engine {
   }
   // int8 attention scale blocks per row: Gemma 4 one per 64 dims (its V rows have a few large dims, which a single
   // row scale lets swamp the others: measured against an f32 reference), Qwen one per row (as accurate there, faster)
-  std::string sb_opt(int hd) const { return " -DSB=" + std::to_string(hp.gemma ? hd / 64 : 1); }
+  std::string sb_opt(int hd) const {
+    return " -DSB=" + std::to_string(hp.gemma ? hd / 64 : 1) + (opt.v4 && !hp.gemma ? " -DV4" : "");
+  }
   // Experiment, not a feature: ARC_KV4 = "K32V32", "V32", "K64" ... (block sizes 16-256) simulates a 4-bit K and / or V
   // cache inside the int8 one (ops.cl kv4_fake), to measure its accuracy. Anything else is refused.
   static std::string kv4_opts() {
@@ -1237,6 +1248,10 @@ class Engine {
         throw std::runtime_error("ARC_KV4: expected e.g. K32V32 or V32 (block sizes 16, 32, 64, 128, 256), got " + s);
       out += std::string(" -DKV4") + c + "=" + std::to_string(b);
       i = j;
+      if (i < s.size() && s[i] == 'S') {  // ("V64S": 16 symmetric levels with an unsigned scale instead of q4_0's)
+        out += " -DKV4SYM";
+        ++i;
+      }
     }
     return out;
   }
@@ -1912,12 +1927,14 @@ class Engine {
         L.kc = buf(opt.attn_int8 ? 64 : kvb);
         L.vc = buf(opt.attn_int8 ? 64 : kvb);
         L.kq = buf(kvi / 2);
-        L.vq = buf(kvi / 2);
+        L.vq = buf(opt.v4 ? kvi / 4 : kvi / 2);  // (4-bit V: half the bytes)
         L.ksc = buf(scb);
-        L.vsc = buf(scb);
+        L.vsc = buf(opt.v4 ? scb * (hp.head_dim / 64) : scb);  // (4-bit V: a scale per 64 dims)
         for (cl_mem m : {L.kc, L.vc}) fill(m, opt.attn_int8 ? 64 : kvb);
-        for (cl_mem m : {L.kq, L.vq}) fill(m, kvi / 2);
-        for (cl_mem m : {L.ksc, L.vsc}) fill(m, scb);
+        fill(L.kq, kvi / 2);
+        fill(L.vq, opt.v4 ? kvi / 4 : kvi / 2);
+        fill(L.ksc, scb);
+        fill(L.vsc, opt.v4 ? scb * (hp.head_dim / 64) : scb);
       }
     }
     if (hp.hc && L.il < (int)hp.qsa_ratio.size() && hp.qsa_ratio[L.il] > 0) {
@@ -3367,7 +3384,7 @@ class Engine {
       // flash-decoding, token by token (single tokens and speculative verification): split the keys over many
       // sub-groups, then merge
       attn_decode_rows("attention", L, ctx, nkv, nh / nkv, hd, pos, T, 0);
-    } else if (opt.attn_int8 && qwen_ps(hd, nh / nkv).pns && pos + T > qwen_ps(hd, nh / nkv).from) {
+    } else if (opt.attn_int8 && !opt.v4 && qwen_ps(hd, nh / nkv).pns && pos + T > qwen_ps(hd, nh / nkv).from) {  // (attn_ps: int8 V only)
       // long prompts: head dims split over sub-groups (attn_ps; one scale per row: bit-identical to attn_q8)
       const PsCfg c = qwen_ps(hd, nh / nkv);
       const int hpg = nh / nkv, lsz = 16 * (hpg / c.phg) * (c.tpw / c.ptt) * c.pns;
