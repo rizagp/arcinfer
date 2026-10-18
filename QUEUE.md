@@ -385,6 +385,6 @@ time, no model GGUF deleted, no large new disk use without asking (Flash Next ex
 | 18.8 | Decode attention at deep context (27B / 35B, 64K+): split tuning (ARC_ATTN_DEC_SG / SMAX) | ⚠️ | not needed: at 250K the extra ~45 ms per step equals reading 2.6 GB of int8 K/V at ~60 GB/s; only fewer bytes (4-bit KV) help |
 | 18.9 | MOE_TILES balance (review N-3) | ⚠️ | not needed: a 4096-token chunk has ~512 equal 16-row tiles per 64-expert group and ny = that count + 64, so each work-group takes about one tile |
 | 18.10 | RoPE pow table (P1-7) | ⚠️ | skipped: attn_prep is 0.3 % of a Flash Next prompt, ~0.5 % of generation |
-| 18.13 | Real 4-bit V cache (per-64 scale, review 18) | [~] | e0e93a4 + da226d1, opt-in `--v4`: 35B generation at depth +7-8 %, prompts -25-30 % (prompt attention re-quantizes P per 64-dim block); off by default. Open: Flash Next + V4, session save / load with V4, a cheaper prompt path |
+| 18.13 | 4-bit V (review 18 / 18.7 option D, user: "PP terbaik, TG baik") | ✅ | opt-in `--v4`: int8 V for prompts + a 4-bit copy (per 64 dims, (n - 8) * amax / 7) for generation; 35B 125K prompt 321 -> 316 tok/s, generation at depth 72.8 -> 67.5 ms per step, expert cache 90 -> 87 %. Open: session save / load with --v4 |
 | 18.11 | Flash Next QSA row tiling (N-5) | ✅ | commit ec25201: qsa_score_rt (8 rows), bit-identical; pp32768 +5..17 %, 125K prompt 78.6 -> 123.4 tok/s; --attn-f32 refused for QSA (it had no masks) |
 | 18.12 | Docs: speed-progress (35B IQ4_XS, sweep), lessons (mach scan, KV 4-bit results), README 35B line | ✅ | |

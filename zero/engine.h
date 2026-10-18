@@ -66,7 +66,7 @@ struct EngineOptions {
   double w8_budget_gb = 9.0;  // keep decoded W8 weights resident if raw + W8 fit in this budget
   bool act32_all = true;      // per-32 activation scales for every GEMM (false: only for the sensitive inputs)
   bool attn_int8 = true;      // int8 (DP4a) attention scores; false = f32 scores
-  bool v4 = false;            // 4-bit V cache (Qwen; K stays int8): a scale per key and 64 dims, 16 levels (opt-in)
+  bool v4 = false;            // + a 4-bit copy of V for generation (Qwen; prompts read the int8 V; opt-in)
   bool mtp = false;           // load the MTP (nextn) block for speculative decoding (mtp_draft / verify)
   int mtp_drafts = 0;         // drafts per step (1..7; later ones chained on the MTP block's own output); 0 = auto:
                               // 3 for wide dense Qwen models (27B: code 7.8 -> 9.5 tok/s, text +2.5 %), else 2
@@ -472,9 +472,9 @@ class Engine {
     return n;
   }
   // KV cache bytes of the MTP block's attention layer (allocated with the block)
-  // Qwen KV bytes per position and kv head: K int8 + V int8 (4-bit V: half) + their scales (4-bit V: one per 64 dims)
+  // Qwen KV bytes per position and kv head: K and V int8 + their scales (--v4: + the 4-bit V copy and its scales)
   size_t kv_pos_bytes() const {
-    return opt.v4 ? (size_t)hp.head_dim + hp.head_dim / 2 + 4 + 4 * (hp.head_dim / 64) : 2 * (size_t)hp.head_dim + 8;
+    return 2 * (size_t)hp.head_dim + 8 + (opt.v4 ? hp.head_dim / 2 + 4 * (hp.head_dim / 64) : 0);
   }
   size_t mtp_kv_bytes(int c) const {
     c = (c + 15) / 16 * 16;
@@ -688,7 +688,7 @@ class Engine {
     // attention
     GpuWeight wq, wk, wv, wo;
     cl_mem q_norm = nullptr, k_norm = nullptr, kc = nullptr, vc = nullptr, kq = nullptr, ksc = nullptr,
-           vq = nullptr, vsc = nullptr;
+           vq = nullptr, vsc = nullptr, vq4 = nullptr, vsc4 = nullptr;  // (vq4 / vsc4: --v4's copy of V)
     // FFN
     GpuWeight gate, up, down;
     // MoE FFN: router (+ shared-expert gate row), shared expert, routed experts (gate/up/down codes and scales)
@@ -840,11 +840,9 @@ class Engine {
       const int nbc = k.cap / 16, b0 = br[i].first, n = br[i].second - br[i].first, s0 = b0 % nbc;
       const int first = std::min(n, nbc - s0);
       for (int g = 0; g < k.nkv; ++g)
-        for (int t = 0; t < 4; ++t) {
-          cl_mem b = t == 0 ? k.L->kq : t == 1 ? k.L->vq : t == 2 ? k.L->ksc : k.L->vsc;
-          size_t unit = t < 2 ? (size_t)16 * k.hd : (size_t)k.sb * 16 * 4;
-          if (opt.v4 && !hp.gemma && t == 1) unit /= 2;                        // (4-bit V)
-          if (opt.v4 && !hp.gemma && t == 3) unit = (size_t)(k.hd / 64) * 16 * 4;
+        for (int t = 0; t < (k.L->vq4 ? 6 : 4); ++t) {  // (--v4: + the 4-bit V copy and its scales)
+          cl_mem b = t == 0 ? k.L->kq : t == 1 ? k.L->vq : t == 2 ? k.L->ksc : t == 3 ? k.L->vsc : t == 4 ? k.L->vq4 : k.L->vsc4;
+          const size_t unit = t < 2 ? (size_t)16 * k.hd : t < 4 ? (size_t)k.sb * 16 * 4 : t == 4 ? (size_t)8 * k.hd : (size_t)(k.hd / 64) * 16 * 4;
           const size_t base = (size_t)g * nbc;
           if (first > 0) v.push_back({b, (base + s0) * unit, (size_t)first * unit});
           if (n > first) v.push_back({b, base * unit, (size_t)(n - first) * unit});
@@ -1233,9 +1231,12 @@ class Engine {
   }
   // int8 attention scale blocks per row: Gemma 4 one per 64 dims (its V rows have a few large dims, which a single
   // row scale lets swamp the others: measured against an f32 reference), Qwen one per row (as accurate there, faster)
-  std::string sb_opt(int hd) const {
-    return " -DSB=" + std::to_string(hp.gemma ? hd / 64 : 1) + (opt.v4 && !hp.gemma ? " -DV4" : "");
-  }
+  std::string sb_opt(int hd) const { return " -DSB=" + std::to_string(hp.gemma ? hd / 64 : 1); }
+  // --v4: attn_prep also writes the 4-bit copy of V, and the generation / verification kernels (attn_decode,
+  // attn_split, attn_dsplit: up to 8 rows) read it; prompt chunks (attn_q8, attn_ps) read the int8 V at full speed
+  std::string v4_opt() const { return opt.v4 && !hp.gemma ? " -DV4" : ""; }
+  cl_mem vq_dec(const Layer& L) const { return opt.v4 && L.vq4 ? L.vq4 : L.vq; }
+  cl_mem vsc_dec(const Layer& L) const { return opt.v4 && L.vsc4 ? L.vsc4 : L.vsc; }
   // Experiment, not a feature: ARC_KV4 = "K32V32", "V32", "K64" ... (block sizes 16-256) simulates a 4-bit K and / or V
   // cache inside the int8 one (ops.cl kv4_fake), to measure its accuracy. Anything else is refused.
   static std::string kv4_opts() {
@@ -1335,7 +1336,7 @@ class Engine {
     }
     k_conv_upd_ = p("conv_state_update");
     k_gnorm_ = hp.hc ? kernel("ops", "-DGATE_SIGMOID", "gated_norm_quant") : p("gated_norm_quant");
-    k_attn_prep_ = kernel("ops", sb_opt(256) + kv4_opts(), "attn_prep");
+    k_attn_prep_ = kernel("ops", sb_opt(256) + v4_opt() + kv4_opts(), "attn_prep");
     k_attn_gate_ = p("attn_gate_quant");
     k_gdn_gates_ = p("gdn_gates");
     const std::string big = "-cl-intel-256-GRF-per-thread -DGQ=" + std::to_string(gq());
@@ -1348,7 +1349,7 @@ class Engine {
     {
       const int hpg = hp.n_head / hp.n_head_kv, hs = attn_hs_for(hpg);
       k_attn_dec_ = kernel("ops", "-cl-intel-256-GRF-per-thread -DHPG=" + std::to_string(hpg) + " -DHS=" + std::to_string(hs) +
-                                      " -DTPW=" + std::to_string(32 / (hpg / hs)) + sb_opt(256), "attn_decode");
+                                      " -DTPW=" + std::to_string(32 / (hpg / hs)) + sb_opt(256) + v4_opt(), "attn_decode");
     }
     k_attn_comb_ = kernel("ops", "", "attn_combine");
     k_mtp_concat_ = kernel("ops", "", "mtp_concat");
@@ -1934,14 +1935,18 @@ class Engine {
         L.kc = buf(opt.attn_int8 ? 64 : kvb);
         L.vc = buf(opt.attn_int8 ? 64 : kvb);
         L.kq = buf(kvi / 2);
-        L.vq = buf(opt.v4 ? kvi / 4 : kvi / 2);  // (4-bit V: half the bytes)
+        L.vq = buf(kvi / 2);
+        if (opt.v4 && opt.attn_int8) {  // (--v4: the 4-bit copy, half the bytes; a scale per 64 dims)
+          L.vq4 = buf(kvi / 4);
+          L.vsc4 = buf(scb * (hp.head_dim / 64));
+          fill(L.vq4, kvi / 4);
+          fill(L.vsc4, scb * (hp.head_dim / 64));
+        }
         L.ksc = buf(scb);
-        L.vsc = buf(opt.v4 ? scb * (hp.head_dim / 64) : scb);  // (4-bit V: a scale per 64 dims)
+        L.vsc = buf(scb);
         for (cl_mem m : {L.kc, L.vc}) fill(m, opt.attn_int8 ? 64 : kvb);
-        fill(L.kq, kvi / 2);
-        fill(L.vq, opt.v4 ? kvi / 4 : kvi / 2);
-        fill(L.ksc, scb);
-        fill(L.vsc, opt.v4 ? scb * (hp.head_dim / 64) : scb);
+        for (cl_mem m : {L.kq, L.vq}) fill(m, kvi / 2);
+        for (cl_mem m : {L.ksc, L.vsc}) fill(m, scb);
       }
     }
     if (hp.hc && L.il < (int)hp.qsa_ratio.size() && hp.qsa_ratio[L.il] > 0) {
@@ -2962,7 +2967,7 @@ class Engine {
     static const int dec_smax = getenv("ARC_ATTN_DEC_SMAX") ? atoi(getenv("ARC_ATTN_DEC_SMAX")) : 256;  // (keys per split, most)
     auto opts = [&](int tpw) {
       return dec_grf + "-DHD=" + std::to_string(hd) + " -DHPG=" + std::to_string(hpg) +
-             " -DHS=" + std::to_string(hs) + " -DTPW=" + std::to_string(tpw) + sb_opt(hd);
+             " -DHS=" + std::to_string(hs) + " -DTPW=" + std::to_string(tpw) + sb_opt(hd) + v4_opt();
     };
     // split length: the longest (fewest partials to combine, up to smax) that still gives `target` sub-groups
     auto pick_split = [&](int lo, int plast, int sg_per_split, int smax, int target, int& S, int& kstart, int& ns) {
@@ -2997,7 +3002,7 @@ class Engine {
         int p0 = pos0 + r0, nv = n, q0 = r0, SS = S, ks = kstart, nss = ns;
         cl_kernel k = kernel("ops", opts(1) + " -DHG=" + std::to_string(hg) + " -DNSUB=" + std::to_string(nsub) +
                                         " -DTR=" + std::to_string(tr) + " -DROWVMT", "attn_dsplit");
-        set_args(k, 0, qi_, qsc_, L.kq, L.ksc, L.vq, L.vsc, cp, nn, p0, nv, apart_, w, ks, SS, nss, q0);
+        set_args(k, 0, qi_, qsc_, L.kq, L.ksc, vq_dec(L), vsc_dec(L), cp, nn, p0, nv, apart_, w, ks, SS, nss, q0);
         size_t gws[2] = {(size_t)ns * lsz, (size_t)nkv}, lws[2] = {(size_t)lsz, 1};
         run(name, k, 2, gws, lws);
         for (int m = 0; m < n; ++m) {
@@ -3022,7 +3027,7 @@ class Engine {
         pick_split(lo, plast, sgs, 512, 512, S, kstart, ns);
         cl_kernel k = kernel("ops", opts(1) + " -DHG=" + std::to_string(hg) + " -DNSUB=" + std::to_string(nsub) +
                                         " -DTR=" + std::to_string(tr), "attn_dsplit");
-        set_args(k, 0, qi_, qsc_, L.kq, L.ksc, L.vq, L.vsc, cp, nn, p0, nv, apart_, w, kstart, S, ns, q0);
+        set_args(k, 0, qi_, qsc_, L.kq, L.ksc, vq_dec(L), vsc_dec(L), cp, nn, p0, nv, apart_, w, kstart, S, ns, q0);
         size_t gws[2] = {(size_t)ns * lsz, (size_t)nkv}, lws[2] = {(size_t)lsz, 1};
         run(name, k, 2, gws, lws);
         for (int m = 0; m < n; ++m) {
@@ -3046,7 +3051,7 @@ class Engine {
         int S, kstart, ns, p0 = pos0 + r0, nv = n, q0 = r0;
         pick_split(lo, plast, lsz / 16, dec_smax, dec_sg, S, kstart, ns);
         cl_kernel k = kernel("ops", opts(tpw), "attn_split");
-        set_args(k, 0, qi_, qsc_, L.kq, L.ksc, L.vq, L.vsc, cp, nn, p0, nv, apart_, w, kstart, S, ns, q0);
+        set_args(k, 0, qi_, qsc_, L.kq, L.ksc, vq_dec(L), vsc_dec(L), cp, nn, p0, nv, apart_, w, kstart, S, ns, q0);
         size_t gws[2] = {(size_t)ns * lsz, (size_t)nkv}, lws[2] = {(size_t)lsz, 1};
         run(name, k, 2, gws, lws);
         for (int m = 0; m < n; ++m) {
@@ -3061,7 +3066,7 @@ class Engine {
           const int p = pos0 + t, lo = win ? std::max(0, p - win + 1) : 0;
           int S, kstart, ns, pp = p, row = t, prow = 0;
           pick_split(lo, p, nsp, dec_smax, dec_sg, S, kstart, ns);
-          set_args(kd, 0, qi_, qsc_, L.kq, L.ksc, L.vq, L.vsc, cp, nn, pp, apart_, row, w, kstart, S);
+          set_args(kd, 0, qi_, qsc_, L.kq, L.ksc, vq_dec(L), vsc_dec(L), cp, nn, pp, apart_, row, w, kstart, S);
           size_t gws[2] = {(size_t)ns * 16, (size_t)(nkv * nsp)}, lws[2] = {16, (size_t)nsp};
           run(name, kd, 2, gws, lws);
           set_args(k_attn_comb_, 0, apart_, ns, nn, o_, row, hdd, prow);
@@ -3351,14 +3356,14 @@ class Engine {
     }
     const int hs = attn_hs_for(hpg), nsp = hpg / hs;
     cl_kernel kd = kernel("ops", "-cl-intel-256-GRF-per-thread -DHD=" + std::to_string(hd) + " -DHPG=" + std::to_string(hpg) +
-                                     " -DHS=" + std::to_string(hs) + " -DTPW=1" + sb_opt(hd) + q, "attn_decode");
+                                     " -DHS=" + std::to_string(hs) + " -DTPW=1" + sb_opt(hd) + v4_opt() + q, "attn_decode");
     int nn = nh, hdd = hd, cp = ctx, w = 0;
     for (int t = 0; t < T; ++t) {
       const int p = pos + t;
       int S = 256;
       while (S > 32 && (p / S + 1) * nkv * nsp < 512) S /= 2;
       int kstart = 0, ns = p / S + 1, pp = p, row = t, prow = 0;
-      set_args(kd, 0, qi_, qsc_, L.kq, L.ksc, L.vq, L.vsc, cp, nn, pp, apart_, row, w, kstart, S, qsa_mask_, qmw);
+      set_args(kd, 0, qi_, qsc_, L.kq, L.ksc, vq_dec(L), vsc_dec(L), cp, nn, pp, apart_, row, w, kstart, S, qsa_mask_, qmw);
       size_t gws[2] = {(size_t)ns * 16, (size_t)(nkv * nsp)}, lws[2] = {16, (size_t)nsp};
       run("attention", kd, 2, gws, lws);
       set_args(k_attn_comb_, 0, apart_, ns, nn, o_, row, hdd, prow);
@@ -3381,6 +3386,7 @@ class Engine {
       struct alignas(16) Int4 { int x, y, z, w; } sect = {hp.rope_sect[0], hp.rope_sect[1], hp.rope_sect[2], hp.rope_sect[3]};
       set_args(k_attn_prep_, 0, big_, ldq, nh, nkv, L.q_norm, L.k_norm, T, p0, eps, theta_scale, nr, kq_scale, qrope_,
                L.kc, L.vc, cx, qi_, qsc_, L.kq, L.ksc, L.vq, L.vsc, f32a, rs, rpos_ ? rpos_ : qsc_, ur, sect);
+      if (opt.v4) set_args(k_attn_prep_, 27, L.vq4, L.vsc4);  // (the 4-bit copy of V)
       size_t gws[2] = {(size_t)(nh + nkv) * 16, (size_t)T}, lws[2] = {16, 1};
       run("attn_prep", k_attn_prep_, 2, gws, lws);
     }
@@ -3391,7 +3397,7 @@ class Engine {
       // flash-decoding, token by token (single tokens and speculative verification): split the keys over many
       // sub-groups, then merge
       attn_decode_rows("attention", L, ctx, nkv, nh / nkv, hd, pos, T, 0);
-    } else if (opt.attn_int8 && !opt.v4 && qwen_ps(hd, nh / nkv).pns && pos + T > qwen_ps(hd, nh / nkv).from) {  // (attn_ps: int8 V only)
+    } else if (opt.attn_int8 && qwen_ps(hd, nh / nkv).pns && pos + T > qwen_ps(hd, nh / nkv).from) {
       // long prompts: head dims split over sub-groups (attn_ps; one scale per row: bit-identical to attn_q8)
       const PsCfg c = qwen_ps(hd, nh / nkv);
       const int hpg = nh / nkv, lsz = 16 * (hpg / c.phg) * (c.tpw / c.ptt) * c.pns;

@@ -420,6 +420,11 @@ inline void kv4_fake(float* v, int B) {
 }
 #endif
 
+#ifdef V4
+#define V4_PREP_ARGS , __global uint* vq4, __global float* vsc4
+#else
+#define V4_PREP_ARGS
+#endif
 // Full-attention prep: per-head RMSNorm of q and k, NeoX RoPE on the first n_rot dims, q scaled by kq_scale.
 // qkv row: [q|gate interleaved per head (nh*512) | k (nkv*256) | v (nkv*256)], row stride ldq.
 // Writes q to qout [M][nh][256] and k, v (f16) to the cache [nkv][ctx][256] at pos0 + m. Also writes int8 copies of
@@ -431,7 +436,7 @@ __kernel void attn_prep(__global const float* qkv, int ldq, int nh, int nkv, __g
                         float kq_scale, __global float* qout, __global half* kc, __global half* vc, int ctx,
                         __global char* qi, __global float* qsc, __global uint* kq, __global float* ksc,
                         __global uchar* vq, __global float* vsc, int f32_attn, int rope_shift,
-                        __global const int* rpos, int use_rpos, int4 sect) {
+                        __global const int* rpos, int use_rpos, int4 sect V4_PREP_ARGS) {
   const int m = get_global_id(1), hs = get_global_id(0) / SG, lane = get_sub_group_local_id();
   if (m >= M_valid) return;
   const bool isq = hs < nh;
@@ -517,29 +522,30 @@ __kernel void attn_prep(__global const float* qkv, int ldq, int nh, int nkv, __g
 #pragma unroll
   for (int i = 0; i < 16; ++i) vv[i] = vs[i];
 #ifdef V4
-  // 4-bit V (-DV4): per key and 64-dim block (4 lanes) a scale d = amax / 7.5 and 16 levels (n - 7.5) * d, n = 0..15
-  // stored as nibbles: dim e of block blk is 2 words, word w = keys 8w..8w+7, byte j = key 8w+j (low nibble) and key
-  // 8w+j+4 (high nibble), so the low nibbles of a word are keys 8w..8w+3 as DP4a bytes and the high ones the next 4.
-  // Other keys of the same word belong to other positions, written by other sub-groups at the same time: the nibble
-  // is cleared and set with atomics (positions are written again after a rollback).
+  // 4-bit copy of V (-DV4) for the generation kernels, next to the int8 V that prompts read: per key and 64-dim block
+  // (4 lanes) a scale d = amax / 7 and 16 levels (n - 8) * d, n = 0..15 (an exact zero, the range [-8/7, 1] amax):
+  // KL against int8 0.017 on the 35B (8K), against 0.024 for (n - 7.5) * amax / 7.5. Nibbles: dim e of block blk is 2
+  // words, word w = keys 8w..8w+7, byte j = key 8w+j (low nibble) and key 8w+j+4 (high nibble), so the low nibbles
+  // of a word are keys 8w..8w+3 as DP4a bytes and the high ones the next 4. Other keys of the same word belong to
+  // other positions, written by other sub-groups at the same time: the nibble is cleared and set with atomics
+  // (positions are written again after a rollback; 35B 32K prompt: attn_prep 0.31 -> 0.33 s).
   {
+    float am = 0.0f;
 #pragma unroll
-    for (int i = 0; i < 16; ++i) vmax = fmax(vmax, fabs(vv[i]));
-    vmax = fmax(vmax, intel_sub_group_shuffle_xor(vmax, 1));
-    vmax = fmax(vmax, intel_sub_group_shuffle_xor(vmax, 2));
-    const float d = vmax / 7.5f, id = d > 0.0f ? 1.0f / d : 0.0f;
+    for (int i = 0; i < 16; ++i) am = fmax(am, fabs(vv[i]));
+    am = fmax(am, intel_sub_group_shuffle_xor(am, 1));
+    am = fmax(am, intel_sub_group_shuffle_xor(am, 2));
+    const float d = am / 7.0f, id = d > 0.0f ? 1.0f / d : 0.0f;
     const int sh = (kk & 3) * 8 + ((kk >> 2) & 1) * 4;
-    __global volatile uint* vw = (__global volatile uint*)vq;
+    __global volatile uint* vw = (__global volatile uint*)vq4;
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
-      const uint n = (uint)clamp((int)floor(vv[i] * id + 8.0f), 0, 15);
+      const uint n = (uint)clamp((int)floor(vv[i] * id + 8.5f), 0, 15);
       const size_t wi = (blk * 256 + 16 * lane + i) * 2 + (kk >> 3);
       atomic_and(vw + wi, ~(0xFu << sh));
       atomic_or(vw + wi, n << sh);
     }
-    if (lane % 4 == 0) vsc[(blk * 4 + lane / 4) * 16 + kk] = d;
-    if (lane % (16 / SB) == 0) ksc[(blk * SB + lane / (16 / SB)) * 16 + kk] = amax / 127.0f;
-    return;
+    if (lane % 4 == 0) vsc4[(blk * 4 + lane / 4) * 16 + kk] = d;
   }
 #endif
 #ifdef KV4V
@@ -807,9 +813,10 @@ inline uint4 pack_p(int q) {
   }
 #endif
 #ifdef V4
-// 4-bit V (attn_prep -DV4): a tile's V is [HD dims][2 words] of nibbles (vt: uint2 per dim) with a scale per key and
-// 64-dim block ([block][VSB][key]; vob = this tile's first scale + lane). Per block P is quantized against
-// P * scale as for int8 V (PV_PACK), then o += scale-folded P . (n - 7.5): (2 P.n - 15 sum(P)) / 2, in integers.
+// 4-bit V (attn_prep -DV4: the generation kernels' copy): a tile's V is [HD dims][2 words] of nibbles (vt: uint2 per
+// dim) with a scale per key and 64-dim block ([block][VSB][key]; vob = this tile's first scale + lane). Per block P is
+// quantized against P * scale as for int8 V (PV_PACK), then o += scale-folded P . (n - 8) = P.n - 8 sum(P), in
+// integers.
 #define VSB (HD / 64)
 #define V4M 0x0F0F0F0Fu
 #define PV4_DIM(vt, i)                                                                  \
@@ -822,7 +829,7 @@ inline uint4 pack_p(int q) {
     _Pragma("unroll") for (int r = 0; r < HS; ++r) a[r] = PDOT_ACC(pw[r].z, v.z, a[r]); \
     _Pragma("unroll") for (int r = 0; r < HS; ++r) a[r] = PDOT_ACC(pw[r].w, v.w, a[r]); \
     _Pragma("unroll") for (int r = 0; r < HS; ++r)                                      \
-      o[r][i] = fma((float)(2 * a[r] - 15 * psum[r]), 0.5f * ps[r], o[r][i]);           \
+      o[r][i] = fma((float)(a[r] - 8 * psum[r]), ps[r], o[r][i]);                       \
   }
 #define PV4_TILE(vt, vob, valid)                                                        \
   _Pragma("unroll") for (int c = 0; c < VSB; ++c) {                                     \
@@ -1557,7 +1564,7 @@ __kernel void attn_dsplit(__global const char* qi, __global const float* qsc, __
           a += PDOT(pw[x].z, v.z);
           a += PDOT(pw[x].w, v.w);
 #ifdef V4
-          o[x][4 * cc + ii] = fma((float)(2 * a - 15 * psum[x]), 0.5f * pq[x], o[x][4 * cc + ii]);
+          o[x][4 * cc + ii] = fma((float)(a - 8 * psum[x]), pq[x], o[x][4 * cc + ii]);
 #else
           o[x][4 * cc + ii] = fma((float)a, pq[x], o[x][4 * cc + ii]);
 #endif

@@ -135,7 +135,32 @@ first row of each model is the cost of int8 itself: f16 K/V (`--attn-f32`) again
   per-key scale is the simple kernel change (nibbles, an 8 x sum(P) correction per tile) but doubles the error of
   q4_0's per-32 scales; per-64 scales need the SB > 1 path of every attention kernel.
 
-### 4-bit V cache, implemented (`--v4`, experimental, off by default)
+### 4-bit V copy for generation (`--v4`, opt-in, since 18 Oct)
+
+`--v4` keeps the int8 V that prompt chunks read and adds a 4-bit copy that generation and the verification of
+drafts read (attn_decode / attn_split / attn_dsplit, up to 8 rows): prompts keep their speed, generation at depth
+reads half the V bytes, and the KV cache takes ~25 % more memory. The copy: per key and 64-dim block a scale
+amax / 7 and 16 levels (n - 8) (an exact zero). Grids compared first with the `ARC_KV4` simulation (35B, 8K, KL vs
+int8): (n - 8) * amax / 7 per 64 dims 0.0172, / 8 0.0212, (n - 7.5) * amax / 7.5 0.0237, per key 0.0264, per 128
+dims 0.0292 (q4_0 per 32: 0.016).
+
+35B UD-IQ4_XS, ctx 131,072:
+
+| | int8 | `--v4` |
+|---|---|---|
+| 125K prompt | 321 tok/s | 316 |
+| Generation after it (median step) | 72.8 ms (13.5 tok/s) | 67.5 ms (14.3 tok/s) |
+| 32K prompt (attention) | 540 tok/s (15.4 s) | 570 (15.7 s) |
+| Expert cache | 90 % | 87 % |
+| Generation-path accuracy (8K fed 8 tokens at a time): perplexity, KL vs int8 | 2.8805 | 2.8915, 0.0208 |
+| Flash Next, the same | 2.3162 | 2.2877, 0.0297 |
+
+Greedy answers with MTP and DFlash2 are identical to plain decoding under `--v4`; tool calls and prefix reuse
+work through the server; the default path is bit-identical to before. Not tested yet: a session saved to disk with
+`--v4` and loaded again.
+
+#### First version (17-18 Oct): one 4-bit V for prompts and generation
+
 
 Per key and 64-dim block a scale amax / 7.5 and 16 levels (n - 7.5) (the scale folds into P like the int8 one;
 q4_0's signed scale cannot). 35B UD-IQ4_XS, against the int8 cache:
