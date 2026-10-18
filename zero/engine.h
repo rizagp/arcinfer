@@ -1751,8 +1751,14 @@ class Engine {
   }
   // After the routing of layer L: read the chosen experts and make them resident (see zero/xcache.h).
   // (tl1: one token's tiles when the caller has read them already)
+  // (host time of streamed MoE, printed by expert_stats: the routing read (waits for the GPU), ensure (expert reads
+  //  and copies while the GPU waits), and Flash Next's PLE rows)
+  double hst_sync_ms_ = 0, hst_ensure_ms_ = 0, hst_ple_ms_ = 0;
+  using hclk = std::chrono::steady_clock;
+  static double hms(hclk::time_point a) { return std::chrono::duration<double, std::milli>(hclk::now() - a).count(); }
   void stream_layer(Layer& L, int T, bool gemm, const int* tl1 = nullptr) {
     const int NU = hp.n_expert_used;
+    const auto h0 = hclk::now();
     static std::vector<int> ids;
     ids.resize((size_t)T * NU);
     std::vector<int> guess;
@@ -1773,7 +1779,10 @@ class Engine {
     } else {
       CL_CHECK(clEnqueueReadBuffer(cl_.queue, mids_, CL_TRUE, 0, ids.size() * 4, ids.data(), 0, nullptr, nullptr));
     }
+    const auto h1 = hclk::now();
+    hst_sync_ms_ += std::chrono::duration<double, std::milli>(h1 - h0).count();
     xc_->ensure(L.il, ids.data(), ids.size(), T > 8, gemm);
+    hst_ensure_ms_ += hms(h1);
     if (!guess.empty()) xc_->prefetch_ids(L.il + 1, guess.data(), (int)guess.size());
     pf_next_ = false;
     static const bool xcheck = getenv("ARC_XCHECK") != nullptr;  // (debug: every tile's expert address is in a pool)
@@ -1812,7 +1821,7 @@ class Engine {
   }
  public:
   // expert cache statistics (empty without streaming)
-  std::string expert_stats() const {
+  std::string expert_stats() const {  // (+ host times, see stream_layer)
     if (!xc_) return "";
     const XCache& x = *xc_;
     char b[512];
@@ -1823,7 +1832,11 @@ class Engine {
              (unsigned long long)x.p_hits, (unsigned long long)x.p_reads, (unsigned long long)x.pf_reads,
              x.st.bytes_read / 1e9, x.read_ms, x.st.bytes_read / 1e6 / std::max(1e-9, x.read_ms),
              (unsigned long long)x.g_pf, (unsigned long long)x.g_pf_used);
-    return b;
+    std::string r = b;
+    char h[160];
+    snprintf(h, sizeof h, "\nhost: routing reads %.0f ms (waiting for the GPU), ensure %.0f ms, PLE rows %.0f ms",
+             hst_sync_ms_, hst_ensure_ms_, hst_ple_ms_);
+    return r + h;
   }
  private:
   // part offsets of an expert record (gate, up, down)
@@ -3169,6 +3182,8 @@ class Engine {
   // token history (host and the PLE layer's state). llama.cpp qwen4exp: predecessors that are missing (sequence
   // start) or an EOS cut the window; everything at or before the cut reads as EOS.
   void ple_embed(const int* tokens, int T) {
+    const auto h0 = hclk::now();
+    struct Acc { double& t; hclk::time_point a; ~Acc() { t += hms(a); } } acc{hst_ple_ms_, h0};
     const int ng = hp.ple_ng, per = hp.ple_per, dim = hp.ple_dim, E = hp.n_embd;
     const int64_t eos = hp.ple_eos;
     const size_t prb = ple_table_->nbytes / ple_table_->dims[1];

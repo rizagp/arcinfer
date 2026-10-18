@@ -389,3 +389,15 @@ time, no model GGUF deleted, no large new disk use without asking (Flash Next ex
 | 18.11 | Flash Next QSA row tiling (N-5) | ✅ | commit ec25201: qsa_score_rt (8 rows), bit-identical; pp32768 +5..17 %, 125K prompt 78.6 -> 123.4 tok/s; --attn-f32 refused for QSA (it had no masks) |
 | 18.12 | Docs: speed-progress (35B IQ4_XS, sweep), lessons (mach scan, KV 4-bit results), README 35B line | ✅ | |
 | 18.14 | DeepSeek review re-check (agent, every item vs HEAD e85bd08) | 🔄 | done since: chunk-size line cap + chunk trailers, --host warning, --v4 / --mtp-drafts help, "one answer at a time" note. Left, by importance: kernel lane guards (the shim already fails loudly) + a non-multiple-dims test; writer thread so a slow client does not hold the engine lock; --v4 Flash Next beyond 8K (35B done: 32K KL 0.0124; 262K generation -8 % per step at 76 % cache); Ctrl+C session save / RAII writers; qsa_select histogram; GEMM / GEMV / moe_group autotune; merge kernels/ and zero/kernels/; split server.cpp / ops.cl; /props and /v1/models schema test; check-docs script; small test model |
+
+## F19: prompt speed after V4 (review section 19, requested 2026-10-18)
+
+| # | Task | Status | Notes |
+|---|---|---|---|
+| 19.1 | Flash Next prompt: where the GPU waits | ✅ | 11K prompt: wall 99 s, GPU kernels 58 s, expert reads (`ensure`, GPU idle) 29 s, PLE host rows 3 s (not the cause, review 19.2 C); 117 GB read from the SSD (2 layer-major segments of 8192, ~89 % of a layer's experts missing per segment) at 3.9 GB/s, hardly overlapped with the GPU. Host times now in the expert statistics line |
+| 19.2 | Larger prefetch staging (ARC_XSTAGE) | ⚠️ | 256: prompt +5..11 % (A/B), generation -2..3 % (cache 22 -> 20 %); 512: +24 % once, generation -1..30 %; not made the default (staging is host RAM, the expert cache shrinks) |
+| 19.3 | Overlap expert reads with the GPU without a larger staging (copy engine / ring) | ⏳ | the copies out of staging wait behind the layer's kernels on the one in-order queue |
+| 19.4 | 35B chunk 8192 for contexts <= 32K | ⏳ | review 19.6: costs ~25-30K tokens of auto context |
+| 19.5 | GEMM / moe_group autotune, 27B --budget | ⏳ | |
+| 19.6 | 35B: expert decode once per layer | ⏳ | large |
+
