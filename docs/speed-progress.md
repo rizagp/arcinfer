@@ -154,10 +154,15 @@ dims 0.0292 (q4_0 per 32: 0.016).
 | Expert cache | 90 % | 87 % |
 | Generation-path accuracy (8K fed 8 tokens at a time): perplexity, KL vs int8 | 2.8805 | 2.8915, 0.0208 |
 | Flash Next, the same | 2.3162 | 2.2877, 0.0297 |
+| 35B, 32K fed 8 tokens at a time | 2.3491 | 2.3600, 0.0124 |
 
-Greedy answers with MTP and DFlash2 are identical to plain decoding under `--v4`; tool calls and prefix reuse
-work through the server; the default path is bit-identical to before. Not tested yet: a session saved to disk with
-`--v4` and loaded again.
+At ctx 262,144 (35B): the 250K prompt 193 -> 190.8 tok/s, generation after it 92.5 -> 84.9 ms per step (10.6 ->
+11.5 tok/s), expert cache 81 -> 76 %: the smaller cache does not cancel the gain.
+
+Greedy answers with MTP and DFlash2 are identical to plain decoding under `--v4`; tool calls, prefix reuse and the
+session cache (saved, server restarted, loaded again: the same follow-up answer; an int8 server refuses those
+files) work through the server; the default path is bit-identical to before. Not measured: Flash Next's
+generation path at 32K and beyond (8K: KL 0.0297).
 
 #### First version (17-18 Oct): one 4-bit V for prompts and generation
 
