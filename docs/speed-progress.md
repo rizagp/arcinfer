@@ -3,31 +3,51 @@
 One file that tracks the speed of arcinfer over time on the same laptop (Core Ultra 5 125H, Arc Xe-LPG 112 EU, no
 XMX, DP4a, ~75 GB/s, 32 GB LPDDR5x-6400, Windows 11). The newest measurements come first; each dated section keeps
 what was measured then; where a later change overturned a statement, a **Later:** note says so. Add a new dated
-section at the top when the speed changes, and update the current table.
+section at the top when the speed changes, and update "Where it stands" in [before-after.md](before-after.md).
 The story behind the numbers: [review.md](review.md); what helped and what did not: [lessons-intel-arc-igpu.md](lessons-intel-arc-igpu.md).
 
-## Current speed (2026-10-17, arcinferzero)
+## Current speed
 
-Greedy answers of 96 tokens, identical to plain decoding in every column (`runz`, warm kernels):
+The current numbers for every model are in one place: [before-after.md](before-after.md#where-it-stands-2026-10-18)
+("Where it stands"). In short (18 Oct): 35B UD-IQ4_XS prompt 604 tok/s (32K), generation 20.6 tok/s; 27B prompt
+~135 tok/s (4K), generation 4.9 tok/s; Flash Next prompt 166 tok/s (4K), generation 6-7 tok/s. The sections below
+keep what was measured on each date.
 
-| Model, text | plain | MTP alone | DFlash2 + MTP |
-|---|---|---|---|
-| Qwen3.8 27B, Python code | 4.91 tok/s | 15.5 | 18.1 |
-| Qwen3.8 27B, Indonesian prose | 4.88 | 7.0 | 6.8 |
-| Qwen3.6 35B-A3B, Python code | 21.2 | 39.3 | 49.8 |
-| Qwen3.6 35B-A3B, Indonesian prose | 21.0 | 22.7 | 22.7 |
+## 2026-10-18 (later): deep prefetch, 35B chunk 8192, drafter variants
 
-| Model | Prompt | Generation |
+Full table with the checks: [before-after.md](before-after.md#changes-newest-first).
+
+**Deep expert prefetch** (arcinferzero, prompts with >= 2048 tokens; `ARC_XCOPY=0` turns it off): while the GPU runs
+layer L of a prompt, a thread reads every missing expert of layer L+1 from the SSD and the GPU's copy engine copies
+them into their slots. Logits bit-identical (56 regression runs).
+
+| Prompt | Before | After |
 |---|---|---|
-| Qwen3.8 27B (IQ3_S GSQ) | pp4096 ~135 tok/s, pp16384 ~130 | 4.9 tok/s (207 ms per token; 231 ms at 32K context) |
-| Qwen3.6 35B-A3B (UD-Q3_K_M) | pp4096 ~795 tok/s, pp8192 ~757 | ~21 tok/s |
-| Qwen3.8 Flash Next (IQ3_S GSQ, experts streamed from the SSD) | pp8192 ~165 tok/s | 7.3 tok/s |
+| Flash Next, 4096 tokens | 107 tok/s | 166 |
+| Flash Next, 9000 tokens | 116.9 tok/s | 144.5 |
+| Flash Next, 32K tokens (GPU idle on SSD reads) | 131.7 tok/s (62.4 s) | 162.6 (5.8 s) |
+| 35B, 32K at ctx 131K | 488.6 tok/s | 557 |
+| 35B, 41 % expert cache | 541 tok/s | 592 |
 
-These are `runz` runs with a short context. Through the server the MoE models also hold the image encoder, the
-DFlash2 drafter and a 32-40K context, which leaves a smaller expert cache: the 35B (cache 77 %) answers code at about
-32 tok/s and Indonesian prose at about 18. Since 17 October the automatic context gives the expert cache priority
-(up to 90 % of the experts) because a small cache makes generation pause for SSD reads; before, the 35B took a
-253,952-token context with a 60 % cache and generated 10-15 tok/s.
+**35B prompt chunks 4096 -> 8192** (ctx 262K; Flash Next stays at 2048). Not compared bit for bit: the chunk size
+groups the prompt arithmetic differently.
+
+| Chunk | 2048 | 4096 | 8192 |
+|---|---|---|---|
+| Expert cache | 83 % | 81 % | 77 % |
+| 32K prompt | 485 tok/s | 533 | 604 |
+| 128K prompt | 284 tok/s | 306 | 324 |
+| Generation at 128K depth | 13.0 tok/s | 12.8 | 12.6 |
+
+**Drafter variants** (`<id>-nodf`: MTP block only; `<id>-df`: DFlash2 only, MTP block not loaded; `--draft
+auto|mtp|dflash`). Greedy text identical in every mode.
+
+| 35B UD-IQ4_XS | both (default) | MTP only | DFlash2 only |
+|---|---|---|---|
+| Python code | 45.1 tok/s | 39.1 | 49.9 |
+| Indonesian prose | 21.0 tok/s | 21.9 | 16.5 |
+
+The 27B `-df` (no MTP block) gets an automatic context of 94,208 tokens instead of 69,632.
 
 ## 2026-10-18: long contexts with the experts streamed from the SSD
 
@@ -220,7 +240,11 @@ plain decoding under `--v4`; the default path is bit-identical to before.
 | Automatic context: expert cache first for streamed MoE | 35B server: 253,952 tokens, 60 % cache, 10-15 tok/s | 32,768-40,960 tokens, 77 % cache, ~32 / 18 tok/s (code / Indonesian) |
 | Automatic context: Flash Next | 4,096 tokens (the 60 % cache reservation did not fit) | 32,768 |
 
-Details of each change: [arcinferzero-log.md](arcinferzero-log.md) (16-17 October entries).
+**Later:** since 18 Oct the 35B uses 8192-token prompt chunks and Flash Next 2048 (35B at ctx 262K: 32K prompt
+533 -> 604 tok/s); the automatic context reserves 128K before sizing the expert cache, so both MoE models get 131,072
+tokens (35B cache ~76-81 %, Flash Next ~20 %). See the 18 Oct sections above.
+
+Details of each change: [arcinferzero-log.md](archive/arcinferzero-log.md) (16-17 October entries).
 
 ## 2026-10-16: arcinferzero (Level Zero) becomes the default engine
 
@@ -348,7 +372,7 @@ Performance test report for arcinfer, 10–14 October 2026: prompt processing (p
 
 **Running a 35B model on a laptop without a discrete graphics card.** This report summarizes the performance tests of arcinfer, an inference engine built specifically for the Intel Arc iGPU, from its first version to its current state. The tests cover prefill (prompt processing) speed and token generation speed on six models, from Qwen3.5 4B to Qwen3.6 35B-A3B.
 
-Every measurement was taken on the same machine. Data sources: the arcinfer CHANGELOG, QUEUE, review_notes and bench/results.
+Every measurement was taken on the same machine. Data sources: the arcinfer CHANGELOG, QUEUE, review_notes ([archive/review_notes.md](archive/review_notes.md)) and bench/results.
 
 
 ### Test platform
@@ -489,7 +513,8 @@ The second check caught a well-hidden bug on the 35B. Two-token verification use
 
 ### Long context
 
-Automatic context uses as much of the remaining GPU memory as possible after the weights, the work buffers and about 1.2 GiB kept free for Windows (**Later:** for MoE models with streamed experts the expert cache now comes first, see the current section). Results at the extremes:
+Automatic context uses as much of the remaining GPU memory as possible after the weights, the work buffers and about 1.2 GiB kept free for Windows (**Later:** for MoE models with streamed experts the automatic context now reserves 128K of context before sizing the expert
+cache, which gives 131,072 tokens; see the 18 Oct sections). Results at the extremes:
 
 | Model | Prompt length | Processing time | Generation afterwards |
 |---|---|---|---|
@@ -520,7 +545,8 @@ Not every idea worked. These approaches were tried and dropped, with the reason:
 - **Per-chunk DeltaNet.** Only 4–9 % of prefill time, so the extra complexity is not worth it.
 - **attn_ps for the Qwen configurations.** Only 1.0–1.6 T MAC/s, below attn_q8 at about 2.2.
 - **A third MTP draft on the 4B and the MoE.** No speed gain. Defaults: 3 drafts for the 27B, 1 for the MoE, and 2 for the other models.
-  **Later: overturned** by faster multi-token verification: defaults now 7 (27B), 5 (35B), 3 (4B), 2 (9B).
+  **Later: overturned** by faster multi-token verification: defaults now 7 (Qwen 27B-class, and whenever DFlash2
+  drafts), 5 (MoE, 35B), 3 (4B), 2 (9B and Gemma).
 
 ### Next steps
 
@@ -530,6 +556,7 @@ Two priorities matter most to keep long-context performance up:
 - **Decode the 35B experts once per layer:** today about 22 % of the 35B prefill time is spent decoding the same weights again for every prompt chunk.
   **Later:** partly addressed on 17 Oct: 4096-token chunks (decode share 29 -> 17 %), and moe_rg, which reads the raw
   expert rows without the decode pass, for 320-1279-token chunks. Decoding once per layer across chunks is still
-  open (it needs per-chunk MoE buffers of ~1 GB).
+  open (it needs per-chunk MoE buffers of ~1 GB). **Later (18 Oct):** 8192-token chunks for the 35B give most of
+  that gain (32K prompt 533 -> 604 tok/s), so decoding once per layer was not built.
 
 Methodology note: generation numbers are the best of two runs, because the first run after another process stops tends to be slower, and the iGPU lowers its clock by about 5–8 % under sustained load. During this period some models also changed files (Gemma community quantization to Google QAT; 35B GSQ to Unsloth), and the tables note where the first measurement came from a different file.

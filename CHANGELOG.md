@@ -544,7 +544,7 @@ why: without its memory loads the kernel still took 75-90 % of its time, i.e. de
   message instead of a PowerShell error.
 - Help: `server.exe --help` (exit code 0) lists every option with its default; `pi-arc --help` has a WORKING IN PI
   section (Esc, new sessions, project folders); `arc-server help` says where saved system prompts are.
-- `docs/review.html` and `docs/review_notes.md` updated: stages 12–14, contexts at 17.4 GiB, Pi on the 27B with
+- `docs/review.html` and `docs/review_notes.md` (now docs/archive/) updated: stages 12–14, contexts at 17.4 GiB, Pi on the 27B with
   today's measurements and the use-case run, two new limits.
 
 ## 2026-10-11 (evening): system prompt kept on disk

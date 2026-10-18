@@ -3,8 +3,8 @@
 #   arc-server start                  asks which model to load: every supported GGUF model in the Hugging Face cache
 #                                     (and %LOCALAPPDATA%\arcinfer\models), listed by its full name; Enter keeps the
 #                                     running one. Waits until the server is ready.
-#   arc-server start -Model 27b       the same without asking: a shortcut (27b 35b 35b-s 35b-mtp 9b 4b g12 e4b, with
-#                                     -mtp / -vision / -std for a variant, e.g. 9b-std), a model id, part of a model's
+#   arc-server start -Model 27b       the same without asking: a shortcut (27b 35b 35b-s 35b-mtp flash 9b 4b g12 e4b,
+#                                     with -mtp / -vision / -std / -nodf / -df for a variant), a model id, part of a model's
 #                                     name (e.g. swift) or a path to a .gguf file
 #        [-SessionCacheGb N]          save conversations to disk when switching (N GB; default 8, 0 = off)
 #        [-Vision on|off]             image / audio encoders (default on; off: no mmproj, more context)
@@ -73,7 +73,8 @@ $exe = Join-Path $root $(if ($Zero) { "bin\serverz.exe" } else { "bin\server.exe
 $log = Join-Path $stateDir "server.log"
 $stateFile = Join-Path $stateDir "server.json"
 $base = "http://127.0.0.1:$Port"
-$sessDir = Join-Path $stateDir "sessions"  # saved conversations (server --session-cache-gb, default 8 GB)
+# saved conversations (server --session-cache-gb, default 8 GB): each engine keeps its own (arcinferzero under zero\)
+$sessDir = Join-Path $stateDir $(if ($Zero) { "zero\sessions" } else { "sessions" })
 
 # The models come from `server.exe --list-models` (Hugging Face cache + %LOCALAPPDATA%\arcinfer\models): name, file,
 # alias (= the model id of the API and Pi), shortcut, the context --ctx auto chose for the current GPU memory. The
@@ -185,12 +186,12 @@ arc-server: the arcinfer server in the background (port $Port), for Pi and other
   arc-server status              running model, its context and chunk size, saved conversations
   arc-server stop                stop the server and free the GPU memory
   arc-server clear-cache         delete saved conversations (session cache). Saved system prompts (per project
-                                 folder, 8 GB in all, reused across restarts) are in %LOCALAPPDATA%\arcinfer\prefix;
+                                 folder, 8 GB in all, reused across restarts) are in %LOCALAPPDATA%\arcinfer\zero\prefix;
                                  deleting that folder is safe while the server is stopped.
   arc-server help                this text (also --help, -h)
 
 Options for start / restart:
-  -Model <shortcut|text|path>    27b 35b 35b-s 35b-mtp 9b 4b g12 e4b; a variant with -mtp (MTP, no images),
+  -Model <shortcut|text|path>    27b 35b 35b-s 35b-mtp flash 9b 4b g12 e4b; a variant with -mtp (MTP, no images),
                                  -vision (images, no MTP) or -std (neither), e.g. 9b-std, 27b-std; a model id
                                  (as in Pi's /model), part of a model's name (e.g. swift) or a .gguf path.
                                  -nodf / -df (models with a DFlash2 drafter): the MTP block only / DFlash2 only.
@@ -200,42 +201,47 @@ Options for start / restart:
                                  of a model, remembered, recomputed when the GPU memory changes). Not given:
                                  a running server keeps its context, a new one starts with auto. -Ctx auto
                                  also restarts a server that runs a fixed context.
-  -Chunk <N>                     prompt chunk size (default 4096; 1024 = less GPU memory, more context)
+  -Chunk <N>                     prompt chunk size (default 4096; 35B 8192, Flash Next 2048; smaller = less GPU
+                                 memory, more context)
   -SessionCacheGb <N>            save conversations to disk when switching sessions (default 8 GB, 0 = off)
   -NoMtp                         no speculative decoding
   -OpenCL                        arcinfer on OpenCL (bin\server.exe), the engine before arcinferzero became the
                                  default (2026-10-16); without it arcinferzero runs (-Zero is accepted, the same)
   -Zero                          arcinferzero (bin\serverz.exe, Level Zero; the default): MoE models keep their
                                  experts (MTP layer included) on the SSD and the most used ones in a GPU cache
-                                 (Qwen3.6 35B: 262K context with images and MTP, Windows keeps 14 GB); dense
-                                 models only change engine (same context). Without -Zero the usual arcinfer runs; a
-                                 running server of the other engine is restarted. The first start writes the
-                                 expert file (35B: 15 GB, ~2.5 min) to %LOCALAPPDATA%\arcinfer\zero (safe to delete).
+                                 and read the next layer's missing experts while the GPU computes (35B and Flash
+                                 Next: 131,072 tokens of context by default, up to 262,144 with -Ctx; Windows keeps
+                                 14 GB); dense models only change engine (same context). A running server of the
+                                 other engine is restarted. The first start writes the expert file (35B: 16 GB,
+                                 ~2.5 min; Flash Next: 56 GB, ~9.5 min) to %LOCALAPPDATA%\arcinfer\zero (safe to
+                                 delete: it is written again).
   -NoStream                      arcinferzero (Level Zero) with every expert on the GPU, as arcinfer: no expert
                                  file, no SSD reads; MoE models then get arcinfer's (smaller) context
   -Vision on|off                 image / audio input (default on). off: the projector (mmproj) is not loaded and
                                  --ctx auto keeps no GPU memory for it, so the context is longer
   -Port <N>                      port (default 8090; also for status / stop)
-  -MtpDrafts <1..7>              drafts per step (default arcinferzero: 7 for Qwen 27B-class, 5 for MoE, 3 for 4B, 2 otherwise)
+  -MtpDrafts <1..7>              drafts per step (default arcinferzero: 7 for Qwen 27B-class and with DFlash2, 5
+                                 for MoE, 3 for 4B, 2 otherwise)
   -ThinkBudget <N>               default reasoning budget in tokens (default 8192; requests can override it)
   -ImageMinTokens / -ImageMaxTokens <N>  tokens per image (defaults: Qwen 256..2048, Gemma 4 12B 1120..2048)
   -BudgetGb <GB>                 keep decoded weights resident up to GB (default: chosen with the context)
   -AttnF32                       f32 attention (tests)
   -V4                            + a 4-bit copy of V for generation (arcinferzero, Qwen; experimental): faster long
-                                 answers deep in long contexts, ~25 % more attention-cache memory
+                                 answers deep in long contexts (100K+ tokens), ~25 % more attention-cache memory
   -PreserveThinking              earlier turns keep their reasoning (Qwen3.6 35B; Qwen3.8 27B always does)
   -NoPrefixCache                 do not keep system prompts on disk;  -PrefixCacheGb <N>  their disk space (8)
   -NoSwap                        the server keeps its model (requests for another model do not switch)
   -ListenHost <addr>             listen address (default 127.0.0.1; 0.0.0.0 = other computers too)
-  -SessionDir <folder>           where saved conversations go (default %LOCALAPPDATA%\arcinfer\sessions)
+  -SessionDir <folder>           where saved conversations go (default %LOCALAPPDATA%\arcinfer\zero\sessions; -OpenCL: arcinfer\sessions)
   -Quiet                         no messages
 A running server is kept when the model and every option given match; otherwise it is restarted with them.
 
 A window for all of this: arc-launcher.cmd in the project folder (models with their memory and automatic
 context, every option filled in with the best value, Start / Stop, the running server's memory and speeds).
 
-The server is started as bin\server.exe (bin\serverz.exe with -Zero) with --ctx, --mtp (when the model has an MTP block or a Gemma drafter),
---think-budget 8192 and the options above; its other options (bin\server.exe --help) keep their defaults.
+The server is started as bin\serverz.exe (bin\server.exe with -OpenCL) with --ctx, --mtp (when the model has
+an MTP block or a Gemma drafter), --draft for the -nodf / -df variants, --think-budget 8192 and the options above;
+its other options (bin\serverz.exe --help) keep their defaults.
 
 Log: $log
 Everything (Pi launcher, server options, files): pi-arc --help
@@ -286,9 +292,14 @@ if (-not $Model) {
   $m = $models | Where-Object { $_.supported -and ($_.short -eq $Model.ToLower() -or $_.alias -eq $Model.ToLower()) } | Select-Object -First 1
   if (-not $m) {
     $hits = @($models | Where-Object { $_.supported -and ($_.name + " " + $_.file) -like "*$Model*" })
+    # (the variants of one file all match its name: then the file's main entry, the one listed first)
+    $files = @($hits | ForEach-Object { $_.path } | Select-Object -Unique)
+    if ($files.Count -eq 1) { $hits = @($hits[0]) }
     if ($hits.Count -ne 1) {
-      $list = ($models | Where-Object { $_.supported } | ForEach-Object { "  $($_.name)  ($($_.file))" }) -join "`n"
-      throw "'$Model' matches $($hits.Count) models. Available:`n$list"
+      $pool = if ($hits.Count) { $hits } else { @($models | Where-Object { $_.supported }) }
+      $list = ($pool | ForEach-Object { "  {0,-34} {1,-14} {2}" -f $_.alias, $(if ($_.short) { $_.short } else { "-" }), $_.file }) -join "`n"
+      $what = if ($hits.Count) { "matches $($hits.Count) models" } else { "matches no model" }
+      throw "'$Model' $what. Use an id or a shortcut:`n  id                                 shortcut       file`n$list"
     }
     $m = $hits[0]
   }
@@ -352,7 +363,7 @@ if ($novision -eq "1") { $srvArgs += "--no-mmproj" }
 Say "Starting $(if ($NoStream) { 'arcinferzero (no SSD cache)' } elseif ($Zero) { 'arcinferzero' } else { 'arcinfer' }): $($m.name) as $($m.alias), context $ctxArg, port $Port$(if ($useMtp) { ', speculative decoding' })"
 Say "  engine: $(Engine-Text $Engine $m.arch)"
 if ($Zero -and -not $NoStream) {
-  Say "  (MoE models: the first start writes the expert file to $stateDir\zero, 35B: 15 GB / ~2.5 min, once;"
+  Say "  (MoE models: the first start writes the expert file to $stateDir\zero, 35B: 16 GB / ~2.5 min, Flash Next: 56 GB / ~9.5 min, once;"
   Say "   dense models (27B, 9B, 4B, Gemma) only change engine: same context as arcinfer)"
 }
 Say "  (loading takes 5-40 s; log: $log)"

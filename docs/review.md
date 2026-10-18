@@ -4,15 +4,15 @@ arcinfer is a from-scratch LLM inference engine for Intel's integrated Arc graph
 the wait before a model starts answering a long prompt. It runs Qwen3.5, Qwen3.6 and Qwen3.8 (dense and mixture of
 experts) and Gemma 4 with image and audio input, serves an OpenAI-, Anthropic- and Ollama-compatible API, and plugs
 into the Pi coding agent. This page tells the story of the build from the first working forward pass to
-17 October 2026, with the emphasis on how prompt and generation speed developed and what caused each step.
+18 October 2026, with the emphasis on how prompt and generation speed developed and what caused each step.
 
 Two engines share the kernels and the server code: **arcinfer** (`src/`, OpenCL), which the work up to 15 October was
 done on, and **arcinferzero** (`zero/`), which runs the same kernels through Level Zero, is bit-identical to the
 OpenCL engine on every model, streams mixture-of-experts weights from the SSD, and has been the default since
 16 October.
 
-Sources: [CHANGELOG.md](../CHANGELOG.md), [review_notes.md](review_notes.md) (working notes),
-[arcinferzero-log.md](arcinferzero-log.md), [speed-progress.md](speed-progress.md) (the speed tables by date),
+Sources: [CHANGELOG.md](../CHANGELOG.md), [review_notes.md](archive/review_notes.md) (working notes),
+[arcinferzero-log.md](archive/arcinferzero-log.md), [speed-progress.md](speed-progress.md) (the speed tables by date),
 [lessons-intel-arc-igpu.md](lessons-intel-arc-igpu.md), [QUEUE.md](../QUEUE.md),
 the README, `bench/results/results.jsonl` and the git log. Every figure below comes from one of them.
 
@@ -66,25 +66,14 @@ CHANGELOG.md and the working notes. The first ten stages are recorded only as "b
 | 15 Oct | Full API; overnight Level Zero tests | Anthropic / Ollama / Responses formats, structured output, constrained tool calls; Level Zero baseline for every model, MTP up to 7 drafts |
 | 16 Oct | arcinferzero default; Flash Next; DFlash2 | register-spill fixes, GEMM with 16 tokens side by side (27B prompt 2K 110 → 130 tok/s), Qwen3.8 Flash Next running, DFlash2 block drafter (27B code 4.85 → 11.5 tok/s), token-outer verification GEMVs |
 | 17 Oct | Speculative decoding and MoE prompts | more drafts by default (27B 7, 35B 5), DFlash2 drafter in Q4_0, `moe_rg`, Flash Next 7.3 tok/s and 8K prompt 165 tok/s, kernel warm-up |
+| 18 Oct | Long contexts and MoE prompts | automatic context 131,072 for the MoE models, 35B prompt chunks 8,192 (32K prompt 533 → 604 tok/s), deep expert prefetch (Flash Next 4K prompt 107 → 166 tok/s), `qsa_score_rt`, `--v4`, drafter variants `-nodf` / `-df` |
 
-## Speed now (17 October, arcinferzero)
+## Speed now
 
-Speculative decoding through the server, greedy, answers identical to plain decoding (README):
-
-| Model, text | plain | MTP alone | DFlash2 + MTP |
-|---|---:|---:|---:|
-| Qwen3.8 27B, Python code | 4.91 tok/s | 15.5 | 18.1 |
-| Qwen3.8 27B, Indonesian prose | 4.88 | 7.0 | 6.8 |
-| Qwen3.6 35B-A3B, Python code | 21.2 | 39.3 | 49.8 (99 % of drafts accepted) |
-| Qwen3.6 35B-A3B, Indonesian prose | 21.0 | 22.7 | 22.7 |
-
-| Model | Prompt | Generation |
-|---|---|---|
-| Qwen3.8 27B (IQ3_S GSQ) | pp4096 ~135 tok/s, pp16384 ~130 | 4.9 tok/s (207 ms per token; 231 ms at 32K context) |
-| Qwen3.6 35B-A3B (UD-Q3_K_M) | pp4096 ~795 tok/s, pp8192 ~757 | ~21 tok/s |
-| Qwen3.8 Flash Next (IQ3_S GSQ, experts streamed from the SSD) | pp8192 ~165 tok/s | 7.3 tok/s |
-
-The other models' latest numbers are in their tables below (Level Zero, 15–16 October). All speed tables by date:
+The current numbers for every model are kept in one place: [before-after.md](before-after.md#where-it-stands-2026-10-18)
+("Where it stands", 18 October). The model tables below end at their last milestone. The 17 October speculative
+decoding numbers (27B code 4.91 / 15.5 / 18.1 tok/s plain / MTP / DFlash2 + MTP; 35B UD-Q3_K_M 21.2 / 39.3 / 49.8)
+were `runz` runs with 96-token greedy answers and warm kernels, not server runs. All speed tables by date:
 [speed-progress.md](speed-progress.md).
 
 ## Model by model
@@ -163,16 +152,32 @@ in a 2,048-token chunk each expert sees only ~64 tokens, which is hard on the GE
 | 16 Oct | 651–654 tok/s | 19.9 | expert-cache pools grouped by record size (all experts cached again) |
 | 16 Oct (night) | — | 19.9 → 21.5; MTP code 31.5 → 34.7, Indonesian 22.3 → 24.3; DFlash2 code 44.4 → 46.0 | token-outer verification GEMVs |
 | 16 Oct (night) | — | MTP code 34.2 → 37.7 | 5 MTP drafts by default |
-| 17 Oct | 8K prompt 620 → 750 tok/s | — | the server reports the engine's 4,096-token chunks (was 2,048) |
+| 17 Oct | 8K prompt 620 → 750 tok/s | — | the server reports the engine's 4,096-token chunks (was 2,048; 8,192 since 18 Oct) |
 | 17 Oct | — | MTP 37.5 → 39.1; DFlash2 48.4 → 52.7, 49.4 → 53.3 | one-pass top-16 selector; vectorized float exp for the drafts' confidence |
 | 17 Oct | 384–1,152-token prompts +3–14 % (768 tokens 449 → 511) | — | `moe_rg`: the MoE prompt GEMM on raw expert rows, bit-identical to decode + GEMM |
-| 17 Oct (now) | ~795 tok/s at 4,096-token chunks | plain 21.2; code MTP 39.3, DFlash2 + MTP 49.8; Indonesian 22.7 / 22.7 | — |
+| 17 Oct | ~795 tok/s at 4,096-token chunks (UD-Q3_K_M) | plain 21.2; code MTP 39.3, DFlash2 + MTP 49.8; Indonesian 22.7 / 22.7 | — |
+| 18 Oct (UD-IQ4_XS, ctx 262K) | 32K prompt 533 → 604, 128K 306 → 324 tok/s | 12.8 → 12.6 at 128K depth | 8,192-token chunks (was 4,096) |
+| 18 Oct (ctx 131K) | 32K prompt 488.6 → 557 tok/s | — | deep expert prefetch on the copy engine |
+| 18 Oct (now) | 604 tok/s (32K), 324 (128K) | 20.6; code 49.9 DFlash2 only, 45.1 both, 39.1 MTP only; Indonesian 21.9 MTP only, 21.0 both | drafter variants `-nodf` / `-df` |
+
+Current numbers: [before-after.md](before-after.md).
 
 Context with MTP: 40,960 tokens on the OpenCL engine (4,096 with images as well); 262,144 with images and MTP on
 arcinferzero, with Windows keeping 14 GB of RAM. Since 17 October the automatic context gives the expert cache
 priority instead (32,768 tokens with images, MTP and DFlash2, cache 77 %): at 253,952 tokens the cache was 60 % and
-generation paused for SSD reads (10-15 tok/s); 262K is still available with `--ctx`. The expert file (15.1 GB) is written once in 144 s; the cache's
-contents are saved and loaded again at start (10.6 GB in ~6 s).
+generation paused for SSD reads (10-15 tok/s); 262K is still available with `--ctx`. **Later (18 Oct):** the
+automatic context reserves 128K before sizing the expert cache, so the 35B gets 131,072 tokens (cache ~76-81 %);
+262,144 with `--ctx` (cache 71-77 %). Prompt chunks are 8,192 tokens for the 35B and 2,048 for Flash Next. The
+expert file (15.1 GB) is written once in 144 s; the cache's contents are saved and loaded again at start (10.6 GB
+in ~6 s).
+
+**Deep expert prefetch (18 October).** Before it, long MoE prompts left the GPU idle while experts came from the SSD
+(Flash Next, 32K prompt: 62.4 s idle). Since 18 October, for prompts of 2,048 tokens or more, a thread reads every missing expert of layer
+L+1 while the GPU runs layer L, and a second command list on the GPU's copy engine copies them into their slots; the
+kernels of layer L+1 wait on an event. The cache never evicts the current layer's or the next layer's experts, and
+prefetched experts go to the back of the LRU. Results: 35B 32K prompt at ctx 131K 488.6 → 557 tok/s; Flash Next 4,096
+tokens 107 → 166, 32K 131.7 → 162.6 (GPU idle on SSD reads 62.4 → 5.8 s). Logits bit-identical (56 regression
+runs); `ARC_XCOPY=0` turns it off.
 
 ### Qwen3.5 4B (Unsloth UD-Q4_K_XL, 2.78 GiB)
 
@@ -238,7 +243,9 @@ experts fit in the GPU cache.
 | 16 Oct (night) | unchanged | 5.45 → 5.9–6.2, then 6.85 | pools grouped by record size (12 → 16 %), dense W8 copies released for the cache (16 → 22 %, hits 80 → 85.5 %), MoE decode kernels reworked, fused single-token mixers (25.1 → 17.4 ms per token) |
 | 17 Oct | — | 6.6 → 7.3 | a token's cached experts run while its missing ones are read from the SSD |
 | 17 Oct | 8K prompt 98 → 127 tok/s | — | the prompt mixer's gated mean with vector loads (45 → 3.7 ms per 2,048-row chunk) |
-| 17 Oct (now) | 8K prompt 145 → 165 tok/s | 7.3 | down projection through `moe_rg` |
+| 17 Oct | 8K prompt 145 → 165 tok/s | 7.3 | down projection through `moe_rg` |
+| 18 Oct | 125K prompt 78.6 → 123.4 tok/s; 32K 131-146 → 153-154 | — | QSA block scores for 8 query rows per work-group (`qsa_score_rt`) |
+| 18 Oct (now) | 4,096 tokens 107 → 166, 9,000 tokens 116.9 → 144.5, 32K 131.7 → 162.6 tok/s | 5.85 code / 6.44 Indonesian at ctx 131K | deep expert prefetch (see the 35B section); automatic context 131,072 |
 
 The SSD reads random 2 MB records at 3.6–3.8 GB/s at any queue depth (`zero/ssd_bench.cpp`), and the engine is at
 that limit.
@@ -359,7 +366,7 @@ each step picks the drafter: DFlash2 while its drafts are accepted, else MTP. It
 | drafter in Q4_0 (was Q8_0; 0.84 GiB less) | 16.9 → 17.2 | — |
 | one-pass top-16 selector | 16.9 → 18.3 | 48.4 → 52.7 |
 | vectorized float exp for the drafts' confidence | unchanged | 49.4 → 53.3 |
-| README (17 Oct) | 18.1 | 49.8 |
+| 17 Oct (`runz`, 96-token answers, warm kernels) | 18.1 | 49.8 |
 
 The drafters are trained mostly on English and code: on Indonesian prose DFlash2 takes ~11 % of its drafts, and the
 MTP block does most of the work (27B 6.8 tok/s with both, 7.0 with MTP alone).
@@ -431,7 +438,9 @@ The ones that shaped the design:
 - **More MTP drafts before the GEMV fix**, a fixed draft vocabulary (faster on English code, slower on Indonesian),
   other MTP confidence cut-offs.
 - **Expert-cache tricks**: prefetching from a routing guess (SSD +55 %, no faster), a per-layer LRU (80 % vs 82 %
-  hits), split SSD reads, a weight arena against the slow-run variance.
+  hits), split SSD reads, a weight arena against the slow-run variance. Later: prefetching did pay off for prompts
+  (deep prefetch, 18 Oct, see the 35B section): instead of a guess it reads every missing expert of the next layer,
+  copies them on the copy engine, and the kernels wait on an event.
 - **`attn_dsplit` for Qwen on the OpenCL engine**: up to 2x faster verification, but not bit-identical to
   single-token decoding, which the MTP test requires (on arcinferzero a variant with fixed key splits is used).
 
@@ -450,7 +459,7 @@ The ones that shaped the design:
   the README still lists long-context QSA as not validated beyond the 3,566-token check.
 - **Register spills left**: `gdn_conv` 1 KB and `moe_gateup_q` 2 KB (256 registers remove them but are not faster).
 - **Not done yet**: cheaper MTP drafts (dynamic token list or draft tree), several conversations at once and batched
-  decoding, `/v1/embeddings`, a 4-bit KV cache, removing the OpenCL engine (arcinferzero is the default; the OpenCL
+  decoding, `/v1/embeddings`, a 4-bit KV cache (since 18 Oct an opt-in 4-bit V copy for generation, `--v4`), removing the OpenCL engine (arcinferzero is the default; the OpenCL
   path is kept with `--opencl` until it has been used daily for a while).
 - From the OpenCL-era review, not re-investigated: on the 27B each request took ~3 s before the first token even for a
   handful of new tokens (15 tokens: 2.8–3.8 s); a cancelled Gemma 4 prompt can only be rolled back while its

@@ -28,26 +28,11 @@ The setup is safe to run again (steps that are already done are skipped). It:
 
 `.\setup.cmd -Tests` also runs the regression tests.
 
-Available models (setup downloads them into `%USERPROFILE%\.cache\huggingface\hub`):
-
-| Command | Model | GGUF file |
-|---|---|---|
-| `pi-arc 27b` | Qwen3.8 27B | `ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF` → `Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` |
-| `pi-arc 35b` | Qwen3.6 35B-A3B (MoE) with MTP and images, ~131K context automatically (262K with `--ctx 262144`) | `unsloth/Qwen3.6-35B-A3B-MTP-GGUF` → `Qwen3.6-35B-A3B-UD-IQ4_XS.gguf` (or `UD-Q3_K_M.gguf`) + `mmproj-BF16.gguf` (downloaded by hand with `hf download`); if it is not there: the GSQ 2-bit version `ISTA-DASLab/Qwen3.6-35B-A3B-2Bit-GSQ`, converted (see below; without MTP) |
-| `pi-arc g12` | Gemma 4 12B (+ images) | `google/gemma-4-12B-it-qat-q4_0-gguf` → `gemma-4-12b-it-qat-q4_0.gguf` + `mmproj-gemma-4-12b-it-qat-q4_0.gguf`; drafter `mtp-gemma-4-12B-it.gguf` from `unsloth/gemma-4-12B-it-qat-GGUF`, copied into the snapshot folder of Google's model |
-| `pi-arc e4b` | Gemma 4 E4B | `google/gemma-4-E4B-it-qat-q4_0-gguf` → `gemma-4-E4B_q4_0-it.gguf`; drafter `mtp-gemma-4-E4B-it.gguf` from `unsloth/gemma-4-E4B-it-qat-GGUF`, copied into the snapshot folder of Google's model |
-| `pi-arc 9b` | Qwen3.5 9B | `unsloth/Qwen3.5-9B-MTP-GGUF` → `Qwen3.5-9B-UD-Q4_K_XL.gguf` |
-| `pi-arc 4b` | Qwen3.5 4B | `unsloth/Qwen3.5-4B-MTP-GGUF` → `Qwen3.5-4B-UD-Q4_K_XL.gguf` |
-| (no short alias) | Qwen3.8 Flash Next (MoE with 512 experts, arcinferzero only) | `ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF` → folder `IQ3_S`, 2 files (54.8 + 28.8 GB): `hf download ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF --include "IQ3_S/*"` (not downloaded by setup) |
-| (optional) | DFlash2 drafters for the 27B / 35B (see section 3) | `hf download z-lab/Qwen3.8-27B-DFlash2` (3.85 GB) / `hf download incoai/Qwen3.6-35B-A3B-DFlash2` (1.05 GB) |
-
-The `35b` choice in `setup.cmd` downloads ISTA-DASLab's GSQ 2-bit version. This version is not available as a
-GGUF, so it is converted once (~2.5 minutes, 10.9 GB result in `%LOCALAPPDATA%\arcinfer\models`):
-
-```powershell
-python tools\convert_gsq.py "<HF cache>\models--ISTA-DASLab--Qwen3.6-35B-A3B-2Bit-GSQ\snapshots\<rev>" `
-  "$env:LOCALAPPDATA\arcinfer\models\Qwen3.6-35B-A3B-GSQ2-arc.gguf" --vocab-from "<any Qwen3.5/3.6 GGUF>"
-```
+Download a model by hand: see [README, section 6](README.md#6-download-models) (every model, its shortcut and the
+`hf download` command). `pi-arc 35b` is Qwen3.6 35B-A3B UD-IQ4_XS from Unsloth's MTP repository (MTP and images);
+the `35b` choice in `setup.cmd` downloads ISTA-DASLab's GSQ 2-bit version instead and converts it once (no MTP;
+[README, section 7](README.md#7-qwen36-35b-a3b-optional-convert-the-gsq-checkpoint)). Qwen3.8 Flash Next (`flash`)
+and the DFlash2 drafters are not downloaded by setup.
 
 ## 2. Using Pi
 
@@ -63,6 +48,7 @@ python tools\convert_gsq.py "<HF cache>\models--ISTA-DASLab--Qwen3.6-35B-A3B-2Bi
 | `pi-arc --pick` | Choose a model from the list of every downloaded model, by full name |
 | `pi-arc 27b` | Qwen3.8 27B: very smart, slowest |
 | `pi-arc 35b` | Qwen3.6 35B-A3B: smart and fast (mixture of experts, only ~3B active parameters per token) |
+| `pi-arc flash` | Qwen3.8 Flash Next: large mixture of experts, slower (~6-7 tokens/s) |
 | `pi-arc g12` | Gemma 4 12B: reads images (attach an image in Pi or the web UI) |
 | `pi-arc e4b` | Gemma 4 E4B: small and fast |
 | `pi-arc 9b` | Qwen3.5 9B: faster, medium quality |
@@ -83,7 +69,7 @@ The server keeps running after Pi is closed. The next session is ready right awa
 and a repeated prompt (for example Pi's system prompt) comes from the cache. If `pi-arc` is called with another
 model, the server switches models automatically.
 
-Pi's system prompt is also saved to disk (`%LOCALAPPDATA%\arcinfer\prefix`), so after the server restarts or
+Pi's system prompt is also saved to disk (`%LOCALAPPDATA%\arcinfer\zero\prefix`), so after the server restarts or
 switches models, a new Pi session still starts within a few seconds (27B: ~5 s instead of ~40 s). Pi's system
 prompt contains the project folder and its `AGENTS.md`, so the saved prompts are grouped per project folder: each
 folder keeps its 2 latest versions and is not pushed out by other folders (27B: ~290 MB per file). All models
@@ -146,8 +132,8 @@ The server log is `%LOCALAPPDATA%\arcinfer\server.log`. The server uses port 809
 Its output is identical to the old OpenCL engine (tested on every model, images, audio, MTP, tool calls, Pi). For
 MoE models (Qwen3.6 35B) the experts are kept on the SSD and only the frequently used experts are in GPU memory (a
 cache): the context can reach 262K together with images and MTP, and Windows still keeps at least 14 GB of RAM.
-The automatic context gives the expert cache priority (up to 90 % of the experts; 35B ~40K tokens), because a small
-cache makes generation pause for SSD reads; choose more with `--ctx`. The
+The automatic context reserves 128K tokens, then sizes the expert cache (35B: 131,072 tokens with ~76-81 % of the
+experts cached), because a small cache makes generation pause for SSD reads; 262,144 with `--ctx 262144`. The
 old OpenCL engine is still there: the "Engine" field in the launcher, or:
 
 ```powershell
@@ -160,7 +146,7 @@ pi-arc 35b --no-stream               # Level Zero without the SSD cache: every e
 
 `-Zero` / `--zero` are still accepted (they change nothing).
 
-On first use, arcinferzero writes the expert file once (35B: 15 GB, about 2.5 minutes) to
+On first use, arcinferzero writes the expert file once (35B UD-IQ4_XS: 16 GB, about 2.5 minutes; Flash Next: 56 GB, about 9.5 minutes) to
 `%LOCALAPPDATA%\arcinfer\zero\`. This file can be deleted at any time; when it is missing, it is written again
 automatically. The cache size is set automatically (it can be changed: server options `--expert-cache-gb`,
 `--expert-cache-pct`, `--windows-reserve-gb`). If GPU memory suddenly runs short because of other apps (e.g.
@@ -177,26 +163,17 @@ arcinferzero notes:
 
 **DFlash2 drafter (`--dflash`, arcinferzero only: `serverz.exe` / `runz.exe`).** This drafter guesses 7 tokens at
 once from the main model's hidden state, then the main model checks them in a single pass. Download the drafter
-(table in section 1), then pass its folder (the snapshot folder containing `config.json` and `model.safetensors`)
+([README, section 6](README.md#6-download-models)), then pass its folder (the snapshot folder containing `config.json` and `model.safetensors`)
 with `--dflash DIR`. The model's MTP block is still used: at each step the server picks DFlash2 while many of its
 drafts are accepted, otherwise MTP. Results (greedy, answers identical to running without a drafter):
 
 A model with a DFlash2 drafter is also listed (Pi's `/model`, `pi-arc --pick`) with one drafter only:
 `<id>-nodf` drafts with the MTP block only, `<id>-df` with DFlash2 only (the MTP block is not loaded, which leaves a
 little more GPU memory for the expert cache), e.g. `35b`, `35b-nodf`, `35b-df`; picking one in Pi switches the
-server like another model does. On the command line: `--draft auto|mtp|dflash` (server and `runz`). The MTP block
-alone suits prose in languages other than English and long contexts (35B at 262K, Indonesian: 23.4 tokens/s vs 19.2
-with both), DFlash2 alone code.
-
-| Model, kind of text | No drafts | MTP alone | DFlash2 + MTP |
-|---|---|---|---|
-| Qwen3.8 27B, Python code | 4.91 tokens/s | 15.5 | 18.1 |
-| Qwen3.8 27B, Indonesian text | 4.88 | 7.0 | 6.8 |
-| Qwen3.6 35B-A3B, Python code | 21.2 | 39.3 | 49.8 (99 % of drafts accepted) |
-| Qwen3.6 35B-A3B, Indonesian text | 21.0 | 22.7 | 22.7 |
-
-This drafter was trained mostly on English text and code, so for Indonesian it adds almost no speed (MTP does most
-of the work).
+server like another model does. On the command line: `--draft auto|mtp|dflash` (server and `runz`). Which one to
+use: `-df` for code, `-nodf` for Indonesian and other prose (the drafter was trained mostly on English text and
+code), the default (both) when the text is mixed. Speeds of each variant:
+[docs/before-after.md, "Where it stands"](docs/before-after.md#where-it-stands-2026-10-18).
 
 **4-bit V copy for long answers at long contexts (`--v4`, arcinferzero, Qwen models, experimental).**
 `arc-server start -Model 35b -V4` (or `serverz.exe ... --v4`) keeps the normal int8 attention cache for reading
@@ -212,11 +189,12 @@ Pi windows or clients share one model and take turns).
 
 **Qwen3.8 Flash Next (arcinferzero only).** A MoE model with 512 experts fetched from the SSD (like the 35B). Run
 `serverz.exe` with `-m` pointing to the first file (`...-IQ3_S-00001-of-00002.gguf`); the second file must be in the
-same folder. The first start writes a 56 GB expert file to `%LOCALAPPDATA%\arcinfer\zero\` (~9.5 minutes); later
-starts take ~13–25 s. It writes ~6–7 tokens/s at any context up to 131K (the expert cache holds about a fifth of
-the experts); prompts: ~150 tokens/s at 8–32K, ~120 at 125K. The difference from the CPU reference is small (KL
-0.0014 on a short chat prompt). This model has no MTP block and cannot read images. Its sparse long-context
-attention (QSA) works up to the full 262,144 tokens (measured 18 Oct, docs/speed-progress.md).
+same folder (or use `pi-arc flash` / `arc-server start -Model flash`). The first start writes a 56 GB expert file
+to `%LOCALAPPDATA%\arcinfer\zero\` (~9.5 minutes); later loads through the server take ~21–26 s. It writes ~6–7
+tokens/s (the expert cache holds about a fifth of the experts at 131K); prompts: 166 tokens/s at 4K, ~145-163 at
+9-32K, ~123 at 125K. The automatic context is 131,072; up to 262,144 with `--ctx`. The difference from the CPU
+reference is small (KL 0.0014 on a short chat prompt, 0.020 on a 3,566-token prompt); accuracy at longer prompts is
+not measured. This model has no MTP block and cannot read images.
 
 Stop the server (`arc-server stop`) before using the laptop for other heavy GPU work (games, video editing), or
 before moving or rebuilding the arcinfer folder.
@@ -277,13 +255,13 @@ print(r.choices[0].message.content)
 ## 5. Context size, and when a conversation gets long
 
 Each model uses the largest context that fits the GPU memory currently available (set in Intel Graphics Software,
-~18–19 GiB on this laptop; the amount the driver offers changes with what other apps run), with ~1 GiB left for
+a 21.45 GiB GPU budget on this laptop now; the amount the driver offers changes with what other apps run), with ~1 GiB left for
 Windows and other apps, or the model's training limit. The context adjusts itself when that setting is changed (run
 `arc-server restart` afterwards). The launcher window shows the current numbers. Examples:
 
 | Model | Default context |
 |---|---|
-| Qwen3.8 27B | ~41K tokens with images + MTP (larger without images: `27b-mtp`, or without both: `27b-std`) |
+| Qwen3.8 27B | 69,632 with images + MTP + DFlash2 (`27b`); 94,208 `27b-df`; 110,592 `27b-mtp` / `27b-nodf`; 143,360 `27b-vision`; 188,416 `27b-std` |
 | Qwen3.6 35B-A3B | 131,072 automatically (images + MTP + DFlash2, ~80 % of the experts cached); up to 262,144 with `--ctx` (smaller expert cache) |
 | Qwen3.8 Flash Next | 131,072 automatically; up to 262,144 with `--ctx` |
 | Qwen3.5 9B / 4B | 262,144 tokens (full) |
@@ -308,22 +286,14 @@ Qwen3.5/3.8 keep a state that cannot "forget" individual tokens.
 
 ## 6. How fast
 
-Measured on this laptop with arcinferzero, 15–16 October 2026 (details and the speed history:
-`docs/speed-progress.md`; comparison with llama.cpp: `docs/review.md`). Prompt speed = tokens per second
-while reading a 16K-token prompt; writing speed = a 400-token answer through the server (code / Indonesian text;
-MTP does not change the content of the answer).
+Current numbers, measured on this laptop with arcinferzero (every model, how it was measured, and llama.cpp for
+comparison: [docs/before-after.md, "Where it stands"](docs/before-after.md#where-it-stands-2026-10-18)):
 
-| Model | Reading the prompt (16K) | Writing without MTP | Writing with MTP |
-|---|---|---|---|
-| Qwen3.6 35B-A3B | ~680 tokens/s | ~20 tokens/s | ~31 / 25 tokens/s |
-| Qwen3.5 4B | ~700 tokens/s | ~20 tokens/s | ~30 / 26 tokens/s |
-| Gemma 4 E4B | ~625 tokens/s | ~22 tokens/s | ~40 tokens/s (code) |
-| Qwen3.5 9B | ~390 tokens/s | ~12 tokens/s | ~17 / 15 tokens/s |
-| Gemma 4 12B | ~228 tokens/s | ~10 tokens/s | ~21 tokens/s (code) |
-| Qwen3.8 27B | ~103 tokens/s | ~5 tokens/s | ~9 / 7.4 tokens/s |
-
-Very long prompts are read more slowly (attention gets heavier): at 131K tokens the 35B ~250 tokens/s, the 4B ~280,
-E4B ~200.
+- Qwen3.6 35B-A3B (UD-IQ4_XS): reads a 32K prompt at 604 tokens/s, 128K at 324; writes 20.6 tokens/s, Python code
+  ~50 with DFlash2, Indonesian ~22 with MTP; 12.6-13.0 tokens/s deep in a 128K context.
+- Qwen3.8 27B: reads ~135 tokens/s; writes 4.9 tokens/s, code 18.1 with DFlash2 + MTP, Indonesian ~7 with MTP.
+- Qwen3.8 Flash Next: reads 166 tokens/s (4K) to 123 (125K); writes ~6-7 tokens/s.
+- Very long prompts are read more slowly (attention gets heavier), and drafting helps code more than prose.
 
 Tips:
 
@@ -363,7 +333,7 @@ Only the `pi-arc` / `arc-server` shortcut commands store the folder location; ev
 | Windows is slow or stops responding while a model loads | The GPU memory is set too high (section 5): lower it in Intel Graphics Software, then `arc-server restart`. |
 | `web_search` in Pi answers "No results found" or never finishes | Its default search engines are DuckDuckGo and Startpage; DuckDuckGo is blocked in Indonesia, so neither returns results. Add Yandex in `%USERPROFILE%\.pi\agent\settings.json`: `"webSearch": {"engines": ["yandex", "startpage", "duckduckgo"]}` (or with the `/search-config` command in Pi). |
 | A new Pi session takes ~40 s before answering | Normal for the first session in a new project folder (the system prompt is processed once); later sessions in that folder are fast. |
-| "Model file ... not found" | The model has not been downloaded to the Hugging Face cache yet (see the table in section 1). |
+| "Model file ... not found" | The model has not been downloaded to the Hugging Face cache yet (see [README, section 6](README.md#6-download-models)). |
 | Models moved to another drive | Write the folders (one per line) in `%LOCALAPPDATA%\arcinfer\model-dirs.txt`, e.g. `D:\models` (a Hugging Face cache layout `models--...`, or `.gguf` files directly in that folder). The Hugging Face cache on C: is still searched first. If that drive is removed, its models disappear from the list until the drive is connected again. |
 | Pi stops with a context error | Type `/compact` in Pi, or start a new session. |
 | The answer is very slow at the start | Normal for the first large prompt (see section 6); later ones use the cache. |

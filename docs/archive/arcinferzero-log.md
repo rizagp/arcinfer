@@ -1,5 +1,8 @@
 # arcinferzero work log (14 October 17:00 – 15 October morning)
 
+> Archived development log (14-17 October). The current state and every later change with its numbers:
+> [before-after.md](../before-after.md); the specification of Flash Next: [flash-next-spec.md](../flash-next-spec.md).
+
 Goal: a new engine `arcinferzero` (folder `zero/`, the old arcinfer is not changed) for MoE models. Experts are stored on
 the SSD, and only frequently used experts are kept in GPU memory (LRU cache). Target: Qwen3.6 35B with a 262K context
 and MTP at about 21 tok/s, results bit-identical to arcinfer, and Windows still gets at least 14 GB of RAM.
@@ -355,7 +358,7 @@ The 27B FFN is dominated by IQ3_S / IQ3_XXS (±5 GB). Estimate: IQ3 decoding on 
 
 ## Qwen3.8 Flash Next (qwen4exp), from 16 Oct midday
 
-Specification: docs/flash-next-spec.md (from llama.cpp src/models/qwen4exp.cpp). Done and tested (16 Oct 11:40–12:10):
+Specification: docs/flash-next-spec.md (still in docs/) (from llama.cpp src/models/qwen4exp.cpp). Done and tested (16 Oct 11:40–12:10):
 - Loader: type Q2_0 (42) and CPU decoding of IQ4_NL / Q2_0; matches an independent Python decoder exactly (5 rows,
   including a patched n-gram table row). gguf_dump reads 1,224 tensors / 77.9 GiB (2 parts).
 - CPU reference (tools/ref_forward, qwen4exp): hyper-connections, DeltaNet with a sigmoid gate, dense attention (same

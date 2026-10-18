@@ -75,9 +75,9 @@ That property is what every speed change is held to:
 | 10-18 | `--v4`: a 4-bit copy of V for generation (opt-in) | 35B at 250K depth 92.5 ms per token (10.6 tok/s) | **84.9 ms (11.5 tok/s)**; 125K prompt 321 -> 316 tok/s; KV memory +25 % | KL 0.005-0.008 vs int8 with the int8 sink / recent windows |
 | 10-18 | Flash Next QSA block scores: 8 query rows per work-group (`qsa_score_rt`) | 125K prompt 78.6 tok/s (26.5 min); 32K 131-146 | **123.4 (16.9 min)**; 153-154 | bit-identical |
 | 10-18 | Automatic context reserves 128K tokens before sizing the expert cache | MoE models ~32-40K by default | **131,072** tokens for 35B and Flash Next (35B cache 81 %, generation as fast as at 64K) | – |
-| 10-17 | Host work out of the speculative loop (one-pass top-16, vectorized float exp) | 35B code DFlash2 48.4 tok/s, 27B 16.9 | **52.7**, **18.3** | identical |
+| 10-17 | Host work out of the speculative loop (one-pass top-16, vectorized float exp) | 35B code DFlash2 48.4 tok/s, 27B 16.9 (one code prompt, measured back to back) | **52.7**, **18.3** | identical |
 | 10-17 | DFlash2 drafter weights in Q4_0 | 27B drafter layers 539 ms per answer | **296 ms**, 0.84 GiB less memory | drafts accepted as often |
-| 10-16 | **DFlash2 block drafter** (7 tokens per guess) + MTP | 27B Python code 4.85 tok/s; 35B 15.7 | first version 11.5 / 44.4, now **18.1** / **49.8** | identical to plain decoding |
+| 10-16 | **DFlash2 block drafter** (7 tokens per guess) + MTP | 27B Python code 4.85 tok/s; 35B 15.7 | first version 11.5 / 44.4; **18.1** / **49.8** in the 17 Oct table (96-token answers; other prompts give 45-53 on the 35B, e.g. 49.9 with DFlash2 only on 18 Oct) | identical to plain decoding |
 | 10-16 | arcinferzero (Level Zero) becomes the default engine | – | the same speed or faster on every model | bit-identical to OpenCL |
 | 10-14 | 35B experts streamed from the SSD (arcinferzero) | context limited by the GPU memory | the full 262K context fits with images and MTP | bit-identical |
 | 10-13 | MTP speculative decoding for the 35B (MoE in the MTP block, Q3_K / K-quant experts) | 19.7 tok/s | **22.3** | identical to plain decoding |

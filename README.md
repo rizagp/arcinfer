@@ -61,7 +61,7 @@ consistency checks (56 of 56 regression runs bit-identical): **[docs/before-afte
 - What made LLM inference fast on this iGPU, and what did not: [docs/lessons-intel-arc-igpu.md](docs/lessons-intel-arc-igpu.md)
 - Results and the story of the build: [docs/review.md](docs/review.md)
 - Speed by date, long contexts, the 4-bit V cache: [docs/speed-progress.md](docs/speed-progress.md)
-- arcinferzero development log: [docs/arcinferzero-log.md](docs/arcinferzero-log.md)
+- arcinferzero development log: [docs/archive/arcinferzero-log.md](docs/archive/arcinferzero-log.md)
 - What changed recently: [CHANGELOG.md](CHANGELOG.md); usage guide (step by step): [USAGE.md](USAGE.md)
 
 ## Supported models
@@ -71,7 +71,7 @@ consistency checks (56 of 56 regression runs bit-identical): **[docs/before-afte
 | `qwen35` | Qwen3.5 (0.8B–27B dense), Qwen3.6, Qwen3.8 27B | hybrid Gated DeltaNet + gated attention; MTP speculative decoding; image input with a Qwen3-VL `mmproj` next to the model (encoded on the GPU; Qwen3.5 4B and 9B) |
 | `qwen35moe` | Qwen3.6-35B-A3B: standard GGUFs (e.g. Unsloth UD-IQ4_XS / UD-Q3_K_M) or ISTA-DASLab GSQ 2-bit | mixture of experts (256 experts, 8 active); standard GGUF experts (IQ / Q3_K / Q4_K / Q5_K / Q6_K / Q8_0 / Q4_0) load as they are; GSQ converted from the safetensors checkpoint with `tools/convert_gsq.py`; Unsloth's MTP repository adds speculative decoding and its `mmproj` image input (arcinferzero: both together; the automatic context reserves 128K tokens of context, then sizes the expert cache: 131K tokens with ~80 % of the UD-IQ4_XS experts cached; up to 262K with `--ctx`, with a smaller cache; context sweep in docs/speed-progress.md) |
 | `gemma4` | Gemma 4 12B, Gemma 4 E4B (Google's QAT Q4_0 GGUFs) | sliding-window + global attention, per-layer embeddings (E4B); image and audio input (`mmproj`: 12B gemma4uv / gemma4ua, E4B gemma4v ViT and gemma4a conformer on the GPU); speculative decoding with the Gemma 4 assistant drafters (`mtp-*.gguf`) |
-| `qwen4exp` | Qwen3.8 Flash Next (ISTA-DASLab GSQ-RCO IQ3_S, GGUF in 2 parts) | **arcinferzero only**; 4 hyper-connection streams, Gated DeltaNet + gated attention with QSA sparse attention, 512 experts (10 active) streamed from the SSD, PLE n-gram table read from part 2 per token; no MTP block, no image input; long-context QSA not validated yet |
+| `qwen4exp` | Qwen3.8 Flash Next (ISTA-DASLab GSQ-RCO IQ3_S, GGUF in 2 parts) | **arcinferzero only**; 4 hyper-connection streams, Gated DeltaNet + gated attention with QSA sparse attention, 512 experts (10 active) streamed from the SSD, PLE n-gram table read from part 2 per token; no MTP block, no image input; runs up to 262,144 tokens, accuracy measured up to a 3.5K-token prompt (KL 0.020) |
 
 Weight types: `Q4_0`, `Q8_0`, `Q2_K`, `Q4_K`, `Q5_K`, `Q6_K`, `IQ1_M`, `IQ2_XXS`, `IQ2_XS`, `IQ2_S`, `IQ3_XXS`, `IQ3_S`,
 `IQ4_XS` (mixed per tensor, e.g. Unsloth dynamic or ISTA-DASLab GSQ-RCO quants), plus `F32/F16/BF16` small matrices;
@@ -183,12 +183,20 @@ in the same folder as the model: download them from the same repository in the s
 | `4b` | Qwen3.5 4B (with MTP head) | `hf download unsloth/Qwen3.5-4B-MTP-GGUF Qwen3.5-4B-UD-Q4_K_XL.gguf` | 3.0 GB |
 | `g12` | Gemma 4 12B QAT (Google, Q4_0) + image projector; drafter from Unsloth, copied into the model's snapshot folder | `hf download google/gemma-4-12B-it-qat-q4_0-gguf` and `hf download unsloth/gemma-4-12B-it-qat-GGUF mtp-gemma-4-12B-it.gguf` | 7.0 + 0.2 + 0.3 GB |
 | `e4b` | Gemma 4 E4B QAT (Google, Q4_0); drafter from Unsloth, copied into the model's snapshot folder | `hf download google/gemma-4-E4B-it-qat-q4_0-gguf gemma-4-E4B_q4_0-it.gguf` and `hf download unsloth/gemma-4-E4B-it-qat-GGUF mtp-gemma-4-E4B-it.gguf` | 5.2 + 0.1 GB |
-| `35b` | Qwen3.6 35B-A3B, 2-bit GSQ | see step 7 (download 12.6 GB, then convert) | 11.7 GB |
-| | Qwen3.8 Flash Next (arcinferzero only, no short alias) | `hf download ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF --include "IQ3_S/*"` | 54.8 + 28.8 GB |
+| `35b` | Qwen3.6 35B-A3B UD-IQ4_XS (Unsloth's MTP repository: MTP block + image projector) | `hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-IQ4_XS.gguf mmproj-BF16.gguf` | 18.2 GB + projector |
+| `35b-mtp` | Qwen3.6 35B-A3B UD-Q3_K_M of the same repository | `hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-Q3_K_M.gguf mmproj-BF16.gguf` | |
+| (`35b`) | Qwen3.6 35B-A3B, 2-bit GSQ, no MTP (what `setup.cmd -Models 35b` downloads) | see step 7 (download 12.6 GB, then convert) | 11.7 GB |
+| `flash` | Qwen3.8 Flash Next (arcinferzero only) | `hf download ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF --include "IQ3_S/*"` | 54.8 + 28.8 GB |
 | | DFlash2 drafters (optional, see `--dflash` below) | `hf download z-lab/Qwen3.8-27B-DFlash2` / `hf download incoai/Qwen3.6-35B-A3B-DFlash2` | 3.85 / 1.05 GB |
 
 With their `mmproj` file next to the model, Gemma 4 12B and E4B read images and audio, and Qwen3.5 4B / 9B and
 Qwen3.6 35B read images (all encoders run on the GPU).
+
+Shortcuts (`pi-arc <shortcut>`, `arc-server start -Model <shortcut>`): `27b`, `35b`, `35b-s`, `35b-mtp`, `flash`,
+`9b`, `4b`, `g12`, `e4b`. `35b` is the UD-IQ4_XS file above, or UD-Q3_K_M / the GSQ file when that is the one
+downloaded (with several, the first found keeps the shortcut); `35b-s` is Unsloth's UD-Q3_K_S. Variant suffixes:
+`-mtp` (MTP, no images), `-vision` (images, no MTP), `-std` (neither), and for a model with a DFlash2 drafter
+`-nodf` / `-df` (see `--dflash` below).
 
 ### 7. Qwen3.6-35B-A3B (optional): convert the GSQ checkpoint
 
@@ -214,14 +222,14 @@ speculative decoding. `arc-server` / `pi-arc` find the converted file in `%LOCAL
 ### 8. First run
 
 ```powershell
-.\scripts\arc-server.ps1 start -Model e4b      # or 27b, 35b, 9b, 4b, g12
+.\scripts\arc-server.ps1 start -Model e4b      # or 27b, 35b, flash, 9b, 4b, g12
 ```
 
 This starts arcinferzero; add `-OpenCL` for the OpenCL engine. The first start of each model compiles its GPU
 kernels (up to a minute or two); they are cached in `%LOCALAPPDATA%\arcinfer\kernels`, so later starts take 5–40 s
 (mostly reading the model file). The first arcinferzero start of a mixture-of-experts model also writes its expert
-file once (35B: 15 GB, about 2.5 minutes; Qwen3.8 Flash Next: 56 GB, about 9.5 minutes, later loads ~13–25 s) to
-`%LOCALAPPDATA%\arcinfer\zero\`; it can be deleted at any time and is written again when missing. Then open the web
+file once (35B UD-IQ4_XS: 16 GB, about 2.5 minutes; Qwen3.8 Flash Next: 56 GB, about 9.5 minutes; later loads through the
+server ~21–26 s) to `%LOCALAPPDATA%\arcinfer\zero\`; it can be deleted at any time and is written again when missing. Then open the web
 UI at http://127.0.0.1:8090/ or call the OpenAI API at `http://127.0.0.1:8090/v1`. `arc-server status` shows what
 is running and `arc-server stop` frees the GPU memory.
 
@@ -265,7 +273,7 @@ The same numbers come from `server.exe --list-models` ("memory", "defaults") and
    pi-arc                  # the model the server runs or used last (the first time: choose from a list)
    pi-arc --pick           # choose the model from the list of every downloaded model
    pi-arc 27b              # Qwen3.8 27B;  35b = Qwen3.6 35B-A3B (mixture of experts, much faster);
-                           # 35b-mtp = the file of Unsloth's MTP repository (~13 % faster generation, 131K context)
+                           # 35b-mtp = its UD-Q3_K_M file;  flash = Qwen3.8 Flash Next (step 6 lists the files)
    pi-arc g12              # Gemma 4 12B (also reads images);  e4b = Gemma 4 E4B;  9b / 4b = Qwen3.5 9B / 4B
    pi-arc -c               # continue the last session in this folder;  pi-arc -r = choose a session
    pi-arc --think off      # no reasoning; also minimal / low (default) / medium / high
@@ -356,7 +364,7 @@ Qwen3.8 Flash Next.
   prompt blocks that were complete stay processed. A reply the client drops after an abort or error costs nothing
   on the next request: the resume point sits at the start of the reply's turn header.
 - System-prompt cache: the state after a client's system prompt (Pi: ~4K tokens; it contains the project folder
-  and its `AGENTS.md`, so each project has its own) is saved to `%LOCALAPPDATA%\arcinfer\prefix\<model>` the first
+  and its `AGENTS.md`, so each project has its own) is saved to `%LOCALAPPDATA%\arcinfer\zero\prefix\<model>` the first
   time it is processed, written in the background, and loaded when a request starts with it while the server holds
   something else: after a server start, a model switch or another project's conversation. Pi's are kept per project
   folder (read from the `<cwd>` section of its system prompt): each folder keeps its 2 latest versions, which other
@@ -364,7 +372,7 @@ Qwen3.8 Flash Next.
   stay under `--prefix-cache-gb` (default 8; least recently used go first); `--no-prefix-cache` turns it off.
   Files: `<folder>-<folder hash>-<prompt hash>-<tokens>.arcp`.
 - Session cache: when a request belongs to another conversation (a new Pi session, or switching back to an older
-  one), the server saves the conversation it holds to disk (KV cache, DeltaNet states; `%LOCALAPPDATA%\arcinfer\sessions`)
+  one), the server saves the conversation it holds to disk (KV cache, DeltaNet states; `%LOCALAPPDATA%\arcinfer\zero\sessions`)
   and loads a saved one that matches the request, instead of processing its whole prompt again. New conversations
   resume after the system prompt they share (Qwen: a recurrent-state snapshot there, kept in host memory). Saving
   and loading take about a second; outputs are identical to never switching. `--session-cache-gb N` (the server's default 0 = off; arc-server / pi-arc start it with 8 GB, `pi-arc --session-cache 0` = off;
@@ -379,8 +387,8 @@ Qwen3.8 Flash Next.
   (`nextn` tensors). Gemma 4: the assistant drafter `mtp-*.gguf` next to the model (found automatically), which
   reads the main model's KV cache. The drafts are verified in one main-model pass and the next token is still
   sampled from the model's distribution, so the output is unchanged (checked: identical answers at every draft
-  count). `--mtp-drafts N`: arcinferzero 1–7 (default 7 for the 27B, 5 for the 35B, 3 for the 4B, 2 for the 9B and
-  Gemma), the OpenCL engine up to 2 (Qwen) / 3 (Gemma).
+  count). `--mtp-drafts N`: arcinferzero 1–7 (default 7 for the 27B and whenever DFlash2 drafts, 5 for the 35B,
+  3 for the 4B, 2 for the 9B and Gemma), the OpenCL engine up to 2 (Qwen) / 3 (Gemma).
 - `--v4` (arcinferzero, Qwen; experimental, off by default): a 4-bit copy of the attention cache's V half that
   generation and draft verification read, next to the int8 cache that prompts read. Prompts keep their speed;
   generation deep in a long context is ~7 % faster (35B after 125K tokens: median step 72.8 -> 67.5 ms); the
@@ -390,16 +398,12 @@ Qwen3.8 Flash Next.
   the folder with its `config.json` and `model.safetensors` (the snapshot folder of `hf download
   z-lab/Qwen3.8-27B-DFlash2` for the 27B, `hf download incoai/Qwen3.6-35B-A3B-DFlash2` for the 35B). It drafts a
   block of 7 tokens per pass from the main model's hidden states. The model's MTP block stays loaded and each step
-  picks the drafter: DFlash2 while its drafts are accepted, else MTP. Greedy, answers identical to plain decoding:
-
-  | Model, text | plain | MTP alone | DFlash2 + MTP |
-  |---|---|---|---|
-  | Qwen3.8 27B, Python code | 4.91 tok/s | 15.5 | 18.1 |
-  | Qwen3.8 27B, Indonesian prose | 4.88 | 7.0 | 6.8 |
-  | Qwen3.6 35B-A3B, Python code | 21.2 | 39.3 | 49.8 (99 % of drafts accepted) |
-  | Qwen3.6 35B-A3B, Indonesian prose | 21.0 | 22.7 | 22.7 |
-
-  The drafters are trained mostly on English and code; on other text the MTP block does most of the work.
+  picks the drafter: DFlash2 while its drafts are accepted, else MTP. Greedy answers are identical to plain decoding.
+  A model with a DFlash2 drafter is also listed with one drafter only: `<id>-nodf` drafts with the MTP block only,
+  `<id>-df` with DFlash2 only (the MTP block is not loaded); `--draft auto|mtp|dflash` (server, `runz`) does the
+  same, default `auto` = both. The drafters are trained mostly on English and code: `-df` is the fastest for code,
+  `-nodf` for Indonesian and other prose. Speeds of each variant:
+  [docs/before-after.md](docs/before-after.md#where-it-stands-2026-10-18).
 - Images (`image_url` content parts, data URLs) and audio (`input_audio`, `/v1/audio/transcriptions`) when the
   model's `mmproj-*.gguf` is next to it (or given with `--mmproj`): images on Gemma 4 12B / E4B, Qwen3.5 4B / 9B and
   Qwen3.6 35B, audio on Gemma 4 12B / E4B; the encoders run on the GPU.
@@ -409,9 +413,10 @@ Qwen3.8 Flash Next.
   logs the raw text of every tool call.
 - During a long prompt, streaming responses carry `: prefill N/M` progress comments (also shown in the web UI).
 - Qwen3.8 Flash Next (arcinferzero only): pass the first part (`...-IQ3_S-00001-of-00002.gguf`) with `-m`; part 2
-  must sit next to it. First numbers on the 32 GB laptop: generation ~4 tok/s, short prompts slow while the expert
-  cache is cold (cache 7.9 GiB = 12 % of the experts); KL vs the CPU reference 0.0014 on a short chat prompt. No
-  MTP block, no image input, long-context QSA still to be validated.
+  must sit next to it. Generation ~6-7 tok/s; prompts 166 tok/s (4K) to 123 (125K); context up to 262,144 with
+  `--ctx`. KL vs the CPU reference: 0.0014 on a short chat prompt, 0.020 on a 3,566-token prompt with QSA; accuracy
+  at longer prompts is not measured. No MTP block, no image input. Details:
+  [docs/before-after.md](docs/before-after.md#where-it-stands-2026-10-18).
 
 ## Using Pi
 
@@ -427,10 +432,11 @@ every option.
 - **Context:** each model gets the largest context that fits the GPU memory currently set (Intel Graphics
   Software), with ~1 GiB left for Windows and other apps, at most its max context length (the GGUF's
   `context_length`). The GPU memory the driver offers changes with what else runs, so the numbers move; the launcher
-  window shows how each one is counted. Examples at ~18–19 GiB: Qwen3.6 35B-A3B 40,960 with images, MTP and DFlash2
-  (arcinferzero: experts streamed from the SSD, the automatic context leaves them up to 90 % of the cache; 262,144 fits
-  with `--ctx 262144`, but generation then waits for SSD reads); Qwen3.8 Flash Next 40,960; Qwen3.5 4B / 9B and Gemma 4
-  12B 262,144; Gemma 4 E4B 131,072; Qwen3.8 27B 40,960 with images, MTP and the DFlash2 drafter, more without them. `pi-arc --ctx N` sets a context, `pi-arc --ctx auto` goes back to the automatic one (restarting a server
+  window shows how each one is counted. Examples (arcinferzero, 21.45 GiB GPU budget): Qwen3.6 35B-A3B 131,072 with
+  images, MTP and DFlash2 (experts streamed from the SSD; the automatic context reserves 128K, then sizes the expert
+  cache: ~76-81 % of the experts cached; 262,144 with `--ctx 262144`, 71-77 % cached); Qwen3.8 Flash Next 131,072
+  (~20 % cached); Qwen3.5 4B / 9B and Gemma 4 12B 262,144; Gemma 4 E4B 131,072; Qwen3.8 27B 69,632 with images, MTP
+  and DFlash2 (`27b-df` 94,208, `27b-mtp` / `27b-nodf` 110,592, `27b-vision` 143,360, `27b-std` 188,416). `pi-arc --ctx N` sets a context, `pi-arc --ctx auto` goes back to the automatic one (restarting a server
   that runs a fixed context). `--chunk 1024` frees 1.1 GiB on the 27B for more context (118,784 at 18.3 GiB;
   prompts of ~11K tokens ~4 % slower, from ~34K on no difference). Pi's `maxTokens` is the whole window: Pi clamps
   each request to the room left (window − prompt − 4096).
@@ -588,7 +594,7 @@ tests/      run_tests.ps1 and its reference data
 webui/      index.html
 docs/       before-after.md (every change, before / after, accuracy), review.md (results), speed-progress.md
             (speed by date), lessons-intel-arc-igpu.md,
-            arcinferzero-log.md, review_notes.md (working notes)
+            archive/ (arcinferzero-log.md, review_notes.md, flash-next-spec.md: older logs and notes)
 setup.cmd   setup.ps1: checks, builds, downloads models, connects Pi;  build.ps1: builds one or more tools
 ```
 
@@ -602,8 +608,9 @@ setup.cmd   setup.ps1: checks, builds, downloads models, connects Pi;  build.ps1
 - `tests/run_tests.ps1` runs all of the above plus chat-template rendering against the GGUF Jinja templates and an
   OpenAI API test (streaming tool calls, prefix reuse); with `-ModelGemma` / `-Model35B` also the Gemma 4 and
   35B-A3B paths (KL vs the f32 reference, greedy equal to llama.cpp, drafter output identical).
-- Mean KL of the next-token distributions vs the f32 reference: Qwen3.5-4B 0.0021, Qwen3.6-35B-A3B 0.0008,
-  Gemma 4 12B 0.029 (Gemma 4 is about 7x more sensitive to int8 rounding: int8 activations alone give ~0.009).
+- Mean KL of the next-token distributions vs the f32 reference: Qwen3.5-4B 0.0021; Qwen3.6-35B-A3B 0.0008 with the
+  GSQ file, 0.004-0.008 with UD-IQ4_XS (generation path); Gemma 4 12B 0.021 with Google's QAT file (0.029 with the
+  older Q4_K_M file). Gemma 4 is about 7x more sensitive to int8 rounding: int8 activations alone give ~0.009.
 - Consistency: logits are compared bit for bit before and after every speed change (`runz --dump-logits`); the
   SSD expert streaming was run with small caches, simulated GPU out-of-memory (`ARC_FAKE_OOM`) and 40 prompts in a
   row, 56 of 56 runs identical; speculative decoding must give the text of plain decoding. The record:

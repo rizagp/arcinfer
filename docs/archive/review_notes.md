@@ -2,7 +2,7 @@
 
 > These notes cover the OpenCL engine up to 15 October 2026. Since 16 October the default engine is arcinferzero
 > (Level Zero, bit-identical output); see [arcinferzero-log.md](arcinferzero-log.md) and
-> [speed-progress.md](speed-progress.md).
+> [speed-progress.md](../speed-progress.md). Archived: the current state is in [before-after.md](../before-after.md).
 
 ## Setup
 - Laptop: Acer, Intel Core Ultra 5 125H (Meteor Lake), Arc iGPU 7 Xe-cores / 112 EUs @ 2.2 GHz, no XMX.

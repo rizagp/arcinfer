@@ -1,27 +1,23 @@
 # LLM inference on an Intel Arc iGPU: what made it fast, and what did not
 
 Lessons from building arcinfer, a from-scratch inference engine for the integrated Arc GPU of a Meteor Lake laptop,
-from the first working forward pass (early October 2026) to the Level Zero engine of 17 October 2026. Every number
+from the first working forward pass (early October 2026) to the Level Zero engine of 18 October 2026. Every number
 below was measured on one machine; your hardware, driver and models will differ, so treat them as starting points,
-not promises. Sources: [CHANGELOG.md](../CHANGELOG.md), [review.md](review.md), [review_notes.md](review_notes.md),
-[speed-progress.md](speed-progress.md), [arcinferzero-log.md](arcinferzero-log.md), [QUEUE.md](../QUEUE.md); how to
-run it: [USAGE.md](../USAGE.md).
+not promises. Sources: [CHANGELOG.md](../CHANGELOG.md), [review.md](review.md), [review_notes.md](archive/review_notes.md),
+[speed-progress.md](speed-progress.md), [arcinferzero-log.md](archive/arcinferzero-log.md), [QUEUE.md](../QUEUE.md),
+[before-after.md](before-after.md) (every change with its numbers); how to run it: [USAGE.md](../USAGE.md).
 
 **Machine:** Intel Core Ultra 5 125H, Arc iGPU (Xe-LPG, 7 Xe-cores / 112 EUs at 2.2 GHz, **no XMX matrix engines**),
 32 GB LPDDR5x-6400 shared with the CPU, Windows 11, Intel driver 32.0.101.9033. Engines: OpenCL 3.0 first, then
 (since 16 October the default) the same OpenCL C kernels run through Level Zero, with MoE experts streamed from the
 SSD.
 
-**Where it ended up (17 October, Level Zero engine; greedy answers identical to plain decoding):**
-
-| Model | Prompt | Generation: plain / MTP / DFlash2 + MTP (Python code) |
-|---|---|---|
-| Qwen3.8 27B (IQ3_S GSQ, dense) | pp4096 ~135 tok/s (llama.cpp Vulkan pp2048: 23) | 4.91 / 15.5 / 18.1 tok/s |
-| Qwen3.6 35B-A3B (UD-Q3_K_M, MoE) | pp4096 ~795 tok/s | 21.2 / 39.3 / 49.8 tok/s |
-| Qwen3.8 Flash Next (512 experts streamed from the SSD) | pp8192 ~165 tok/s | 7.3 tok/s |
-
-On Indonesian prose the drafters help far less (27B 4.88 / 7.0 / 6.8, 35B 21.0 / 22.7 / 22.7 tok/s): they are
-trained mostly on English and code.
+**Where it ended up (18 October, Level Zero engine; greedy answers identical to plain decoding):** Qwen3.6 35B-A3B
+(UD-IQ4_XS, MoE, experts on the SSD) prompt 604 tok/s at 32K, generation 20.6 tok/s, Python code 49.9 with DFlash2;
+Qwen3.8 27B (IQ3_S GSQ, dense) prompt ~135 tok/s (llama.cpp Vulkan pp2048: 23), generation 4.91 plain, 18.1 with
+DFlash2 + MTP on code; Qwen3.8 Flash Next (512 experts on the SSD) prompt 166 tok/s at 4K, generation 6-7 tok/s. On
+Indonesian prose the drafters help far less (27B 4.88 / 7.0 / 6.8 tok/s plain / MTP / both; 35B 21.9 with MTP
+only): they are trained mostly on English and code. Every model, kept current: [before-after.md](before-after.md#where-it-stands-2026-10-18).
 
 ## 1. Know the hardware first (measured)
 
@@ -73,7 +69,8 @@ after the steps below (llama.cpp: 590 s Vulkan, 504 s SYCL).
 | **MoE prompts through the int8 GEMM**: per group of 64 experts the raw rows decoded to W8, then one GEMM over that group's slot tiles (chunks >= 1152 tokens) | Qwen3.6 35B 2048-token prompt 476 -> 642 tok/s |
 | W8 decoding of whole expert rows staged in local memory with coalesced loads (`decode_w8_sl`) | IQ3_XXS 1038 -> 518 ms, IQ4_XS 433 -> 303 ms per 2048-token chunk; Q8_0 through its vector block decoder 211 -> 72 ms |
 | **moe_rg**: the MoE GEMM on raw expert rows, each lane decoding its row's superblocks in registers (320–1279-token chunks) | equals decode + GEMM bit for bit, without the decode pass; 35B 384–1152-token prompts +3–14 %, and its logits no longer depend on the chunk size |
-| 4096-token chunks for streamed MoE (the experts a chunk misses are read once per chunk) | 35B 8K prompt 620 -> 750 tok/s |
+| 4096-token chunks for streamed MoE (the experts a chunk misses are read once per chunk) | 35B 8K prompt 620 -> 750 tok/s. Later (18 Oct): 8192 for the 35B, 2048 for Flash Next; 35B at ctx 262K, chunk 2048 / 4096 / 8192: cache 83 / 81 / 77 %, 32K prompt 485 / 533 / 604 tok/s, 128K 284 / 306 / 324, generation at 128K 13.0 / 12.8 / 12.6 |
+| **Deep expert prefetch on the copy engine** (prompts >= 2048 tokens): while the GPU runs layer L, a thread reads every missing expert of L+1 from the SSD and a second command list on the copy engine copies them; layer L+1's kernels wait on an event | bit-identical (56 regression runs); Flash Next prompt 4096 tokens 107 -> 166 tok/s, 9000 116.9 -> 144.5, 32K 131.7 -> 162.6 (GPU idle on SSD reads 62.4 -> 5.8 s); 35B 32K at ctx 131K 488.6 -> 557 |
 | The same kernels through Level Zero instead of OpenCL | bit-identical, 35B time to first token 6.45 -> 4.07 s, generation 16.9 -> 18.3 tok/s, model load 4.3 -> 2.3 s (4B) |
 | Flash Next prompt mixer (gated mean) with vector loads instead of one value per lane per load | 45 -> 3.7 ms per 2048-row chunk; 8K prompt 98 -> 127 tok/s (with moe_rg for its down projection: 165) |
 | Flash Next QSA block scores for 8 query rows per work-group (`qsa_score_rt`: each pooled key block read once for 8 rows instead of once per row) | bit-identical; qsa_score 13.8 -> 2.4 s on a 32K prompt, pp32768 131-146 -> 153-154 tok/s, 125K prompt 78.6 -> 123.4 tok/s (16 rows: slower) |
@@ -140,7 +137,7 @@ MoE expert kernels read small scattered blocks: the 35B's gate/up IQ3_XXS runs 5
 | Plain global LRU for the expert cache (from recorded routes and `zero/cache_sim.py`) | pinning popular experts was worse; hits 99.8 % at 88 % cached, 98 % at 70 %, 95 % at 50 %, 87 % at 30 % (35B) |
 | Cache contents saved at exit (`.lru`) and loaded at start | 10.6 GB in ~6 s; first prompt 3.4 -> 0.6–1.1 s |
 | Expert cache with one pool of the largest record size when a model mixes more than two record sizes (Qwen3.8 Flash Next: 512 experts, 5 type mixes) | separate pools each needed a whole layer and ran out of GPU memory; one pool runs it with a 7.9 GiB cache (12 % of a 56 GB expert file) |
-| Prompt chunks of 4,096 with the experts of a chunk streamed through a separate buffer | a long prompt does not sweep the cache that generation uses |
+| Prompt chunks of 4,096 with the experts of a chunk streamed through a separate buffer | a long prompt does not sweep the cache that generation uses. Later (18 Oct): chunks of 8,192 for the 35B (32K prompt 533 -> 604 tok/s, cache 81 -> 77 % at ctx 262K) and 2,048 for Flash Next |
 | Out of GPU memory at launch: the expert cache gives back 1 GiB and retries | the GPU share is shared with every program (24 simulated failures, results identical) |
 | Q8_0 kept only in its raw form for MoE / just-in-time models (decoded per chunk) | 35B UD-Q3_K_S GPU 16.47 -> 15.04 GiB, load 62 -> 28 s, context 61,440 -> 208,896 tokens; prompts ~4 % slower |
 | MoE buffers aliased over buffers only used in the attention / DeltaNet half of a layer | 167 MB: 35B context 86K -> 102K |
@@ -183,7 +180,7 @@ MoE expert kernels read small scattered blocks: the 35B's gate/up IQ3_XXS runs 5
 | Other MTP confidence cut-offs (`--mtp-min-p`) | 27B, 0.3 / 0.5 / 0.7 / 0.85: code 14.6 / 15.3 / 14.0 / 13.9, Indonesian 6.6 / 6.9 / 6.8 / 6.6 tok/s: 0.5 stays |
 | Loading the DFlash2 drafter before the main weights | 27B: its lm_head back from 21 to 10 ms per pass, but other weights slowed and the wall-clock speed was no better (6.1–6.3 vs 6.6 tok/s) |
 | Running the next expert group's decode to W8 beside the current group's MoE GEMM, on the second compute engine (Level Zero queue group 1) | a 1 GiB stream kernel and a DP4a kernel: 109 ms one after the other, 89 ms on two engines; the MoE prompt GEMM itself is ALU-bound, so at most ~7 % back for the cross-engine synchronization |
-| Prefetching the next layer's experts from a routing guess (its router on this layer's FFN input) | Flash Next, 16 % cache: 37 % of the guesses used, 48 % of the misses caught, SSD reads +55 %, no faster (the SSD is the limit, and wrong guesses take its time) |
+| Prefetching the next layer's experts from a routing guess (its router on this layer's FFN input) | Flash Next, 16 % cache: 37 % of the guesses used, 48 % of the misses caught, SSD reads +55 %, no faster (the SSD is the limit, and wrong guesses take its time). Later: prefetching did pay off for prompts (deep prefetch, 18 Oct, section 2): no guess but every missing expert of the next layer, copied by a second command list on the copy engine, with an event the kernels wait on; the cache never picks a victim among the current layer's or the next layer's experts, and prefetched experts go to the back of the LRU |
 | A per-layer LRU for the expert cache (against the cyclic layer order of decoding) | a recorded Flash Next trace: 80 % hits vs 82 % for the global LRU (Belady's optimum: 90 %) |
 | Reading a token's few missing expert records in 512 KB pieces, so that more reads are in flight | ssd_bench: one 2.2 MB record 0.88 ms alone, ~0.53 ms as four concurrent pieces; Flash Next generation equal (7.19 vs 7.19 tok/s), SSD time slightly up |
 | Layer-major prompt segments of 32K instead of 16K for narrow models (experts decoded once per segment) | 35B, 40K prompt: 530 -> 521 tok/s (the larger residual buffer costs expert-cache room) |
@@ -270,6 +267,11 @@ predicating the loads gave 905 -> 843 ms, bit-identical. Check bit identity afte
   `zeKernelSetIndirectAccess`, or the driver may leave that memory paged out (only ~9.9 of 15.5 GiB were resident;
   random crashes in about half of the server test sequences). Set it only on those kernels: on every kernel it made
   the driver touch every allocation per launch, and the 27B got slower.
+- **A prefetch's evictions must respect every layer still in use.** In the first deep prefetch a small expert pool
+  was shared by three consecutive layers, and the next chunk's victim walk could evict that chunk's own hits: rows
+  2048 and later came out wrong, and the first visible error was one layer later than the cause. A dump of the
+  logits per layer and per chunk found it; the debugging guesses (stale cache lines, overreads, event reuse) were
+  each ruled out first and none was the cause.
 - **Release what you allocate.** The engine never freed its GPU buffers, so the dry load that sizes the context
   stayed resident and made the real load page.
 

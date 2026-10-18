@@ -10,9 +10,11 @@
 #include "../zero/engine.h"
 #include "../zero/gguf_pack.h"
 #define ARC_DATA "/arcinfer/zero/"
+#define ARC_DATA_HELP "%%LOCALAPPDATA%%\\arcinfer\\zero\\"  // (the same folder, as --help prints it)
 #else
 #include "../src/engine.h"
 #define ARC_DATA "/arcinfer/"
+#define ARC_DATA_HELP "%%LOCALAPPDATA%%\\arcinfer\\"
 #endif
 #include "../src/tokenizer.h"
 #include "../src/chat.h"
@@ -1741,6 +1743,10 @@ static std::vector<ModelInfo> scan_models() {
       // Unsloth's standard GGUFs: 35b = UD-Q3_K_M (IQ4_XS down experts), 35b-s = UD-Q3_K_S (smaller: longer context)
       {"Qwen3.6-35B-A3B-UD-Q3_K_M.gguf", {"qwen3.6-35b-a3b", "35b"}},
       {"Qwen3.6-35B-A3B-UD-Q3_K_S.gguf", {"qwen3.6-35b-a3b-s", "35b-s"}},
+      // UD-IQ4_XS from the MTP repository (the tested 35B file since 18 Oct; it keeps the id it had): 35b as well (with
+      // a UD-Q3_K_M or GSQ file also downloaded, the first one found keeps the shortcut)
+      {"Qwen3.6-35B-A3B-UD-IQ4_XS.gguf", {"qwen3.6-35b-a3b-mtp", "35b"}},
+      {"Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf", {"qwen3.8-flash-next-gsq-rco", "flash"}},
       {"Qwen3.5-9B-UD-Q4_K_XL.gguf", {"qwen3.5-9b", "9b"}},
       {"Qwen3.5-4B-UD-Q4_K_XL.gguf", {"qwen3.5-4b", "4b"}},
       {"gemma-4-12b-it-qat-q4_0.gguf", {"gemma4-12b", "g12"}},
@@ -2490,12 +2496,12 @@ int main(int argc, char** argv) {
             "  --alias NAME          model id in the API (default: the file name)\n"
             "  -c, --ctx N|auto      context in tokens (default 40960); auto: the largest that fits the GPU memory with\n"
             "                        ~1 GiB left for other apps, at most the trained context (remembered in\n"
-            "                        %%LOCALAPPDATA%%\\arcinfer\\ctx-auto.txt)\n"
+            "                        " ARC_DATA_HELP "ctx-auto.txt)\n"
             "  --chunk N             prompt tokens per step (default 4096; MoE 2048; arcinferzero streamed MoE 8192,\n"
             "                        Flash Next 2048; 512 when decoded weights stay resident)\n"
             "  --mtp                 speculative decoding with the model's MTP block or Gemma assistant drafter\n"
-            "  --mtp-drafts N        drafts per step, 1..3, arcinferzero Qwen 1..7 (default 3 for Qwen 27B-class, 1 for\n"
-            "                        MoE, else 2)\n"
+            "  --mtp-drafts N        drafts per step, 1..3, arcinferzero Qwen 1..7 (arcinferzero default: 7 for Qwen\n"
+            "                        27B-class and with DFlash2, 5 for MoE, 3 for 4B, 2 otherwise and for Gemma)\n"
 #ifdef ARC_ZERO
             "  --dflash DIR          speculative decoding with a DFlash2 block drafter instead (z-lab, Qwen3.8 27B;\n"
             "                        7 drafts per step); default with --mtp: a *DFlash2* drafter for the model in the\n"
@@ -2531,8 +2537,8 @@ int main(int argc, char** argv) {
             "  --kernels DIR         OpenCL kernel folder;  --webui DIR  web UI folder\n"
             "  --session-cache-gb N  disk space for saved conversations (default 0 = off): switching between\n"
             "                        conversations loads the other one's state instead of processing its prompt again\n"
-            "  --session-dir DIR     where they are kept (default %%LOCALAPPDATA%%\\arcinfer\\sessions)\n"
-            "  --no-prefix-cache     do not keep system prompts on disk (default: kept in %%LOCALAPPDATA%%\\arcinfer\\prefix,\n"
+            "  --session-dir DIR     where they are kept (default " ARC_DATA_HELP "sessions)\n"
+            "  --no-prefix-cache     do not keep system prompts on disk (default: kept in " ARC_DATA_HELP "prefix,\n"
             "                        per project folder for Pi (its 2 latest versions), the 8 latest for other clients;\n"
             "                        a request that starts with one loads it instead of processing it)\n"
             "  --prefix-cache-gb N   disk space for them, all models together (default 8, 0 = no limit; least recently\n"

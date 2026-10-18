@@ -5,29 +5,29 @@
 #
 #   pi-arc                          the running / last model (the first time: choose from the list)
 #   pi-arc --pick                   choose from the list
-#   pi-arc 27b  /  pi-arc -Model swift   a shortcut (27b 35b 35b-s 35b-mtp 9b 4b g12 e4b, with -mtp / -vision /
-#                                   -std for a variant) or part of a model's name
+#   pi-arc 35b  /  pi-arc -Model swift   a shortcut (27b 35b 35b-s 35b-mtp flash 9b 4b g12 e4b, with -mtp /
+#                                   -vision / -std / -nodf / -df for a variant) or part of a model's name
 #   pi-arc -c  /  pi-arc -r         continue the last Pi session in this folder / choose one (Pi's options)
 #   pi-arc --think off              no reasoning (fastest answers); also minimal / low (default) / medium / high /
 #                                   xhigh / max
 #   pi-arc -p "explain src/x"       any Pi arguments after the launcher options
 #   pi-arc --ctx auto|N --chunk N   context (default auto: the largest that fits the GPU memory) / chunk size
 #   pi-arc --session-cache 0        do not keep conversations on disk when switching (default 8 GB)
-#   pi-arc --help                   all options
+#   pi-arc --help / --help-all      the short help / every option
 #   arc-server stop                 stop the background server when you are done (frees the GPU memory)
 #
 # (No param() block on purpose: PowerShell would otherwise try to bind Pi's own options such as -p or --tools.)
 $ErrorActionPreference = "Stop"
-$shortcuts = @("27b", "35b", "35b-s", "35b-m", "35b-mtp", "9b", "4b", "g12", "e4b")
+$shortcuts = @("27b", "35b", "35b-s", "35b-m", "35b-mtp", "flash", "9b", "4b", "g12", "e4b")
 # (a shortcut with a variant suffix: 27b-std, 9b-vision, 35b-mtp-std, g12-mtp, ...)
 function Test-Shortcut([string]$s) { $s = $s.ToLower(); return ($shortcuts | Where-Object { $s -match "^$([regex]::Escape($_))(-mtp|-vision|-std)?(-df|-nodf)?$" }).Count -gt 0 }
 $model = ""; $pick = $false; $thinking = "low"; $noMtp = $false; $ctx = ""; $chunk = 0; $sessGb = $null; $vision = ""; $zero = $true; $noStream = $false; $preserve = $false; $v4 = $false
 $piArgs = New-Object System.Collections.Generic.List[string]
 for ($i = 0; $i -lt $args.Count; $i++) {
   $a = [string]$args[$i]
-  if ($a -in "--help", "-h", "-?", "/?", "help") {
+  if ($a -in "--help-all", "-HelpAll") {
     Write-Host @'
-pi-arc: the Pi coding agent on the local arcinfer server (Intel Arc iGPU).
+pi-arc: the Pi coding agent on the local arcinfer server (Intel Arc iGPU), every option.
 
 USAGE
   pi-arc [model] [launcher options] [Pi options and message]
@@ -35,7 +35,7 @@ USAGE
   pi-arc                         start Pi right away: on the model the server runs, else the one used last
                                  (the first time: choose from the list)
   pi-arc --pick                  choose the model from the list first
-  pi-arc 27b                     start Pi on a known model
+  pi-arc 35b                     start Pi on a known model
   pi-arc -c                      continue the last Pi session in this folder (pi-arc -r: choose a session)
   pi-arc -Model swift --think off -p "summarize README.md"
 
@@ -56,7 +56,7 @@ WORKING IN PI
                                  a model switch (27B: ~5 s to the first token instead of ~40 s).
   another project folder         Pi's system prompt contains the folder and its AGENTS.md, so the first session
                                  in a project processes it once (27B: ~40 s); later ones reuse it. Kept per
-                                 folder in %LOCALAPPDATA%\arcinfer\prefix: its 2 latest versions, which other
+                                 folder in %LOCALAPPDATA%\arcinfer\zero\prefix: its 2 latest versions, which other
                                  projects do not replace; past 8 GB in all the least recently used go first.
   going back to an old session   (pi-arc -c, pi-arc -r, /resume) right after closing it: only the new message.
                                  After other sessions (or the web UI): loaded from disk in seconds (session
@@ -69,10 +69,11 @@ MODEL
                                  by full name (e.g. ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF); Enter keeps the
                                  model that is already running. Image projectors (mmproj-*) and drafters
                                  (mtp-*) next to a model are loaded with it, not listed.
-  27b 35b 35b-s 35b-mtp 9b 4b g12 e4b
-                                 shortcuts, as the first argument: Qwen3.8 27B, Qwen3.6 35B-A3B (35b: UD-Q3_K_M,
-                                 35b-s: UD-Q3_K_S, longer context; 35b-mtp: the file of Unsloth's MTP repository),
-                                 Qwen3.5 9B / 4B, Gemma 4 12B / E4B
+  27b 35b 35b-s 35b-mtp flash 9b 4b g12 e4b
+                                 shortcuts, as the first argument: Qwen3.8 27B; Qwen3.6 35B-A3B (35b: UD-IQ4_XS
+                                 from Unsloth's MTP repository, or UD-Q3_K_M / the GSQ file when that is the one
+                                 downloaded; 35b-s: UD-Q3_K_S, longer context; 35b-mtp: UD-Q3_K_M of the MTP
+                                 repository); flash: Qwen3.8 Flash Next; Qwen3.5 9B / 4B; Gemma 4 12B / E4B
   <shortcut>-mtp / -vision / -std  a variant of the same file: MTP without images, images without MTP, neither
                                  (e.g. 9b-std: the most context, 27b-std, 35b-mtp-std). A shortcut must come
                                  before Pi's options and message; any model's id from --pick works too.
@@ -87,11 +88,12 @@ LAUNCHER OPTIONS
                                  thinking budget per level: minimal = reasoning off on arcinfer, low 2,048,
                                  medium 8,192, high / xhigh / max 16,384 tokens; the <think> block is closed there.
   --opencl                       arcinfer on OpenCL, the engine before arcinferzero became the default
-  --zero                         arcinferzero (Level Zero; the default since 2026-10-16). MoE models (35B)
-                                 keep their experts, MTP layer included, on the SSD and the most used ones in a
-                                 GPU cache: 35B at 262K context with images and MTP. Dense models (27B, 9B, 4B,
-                                 Gemma) only change engine: same context. --opencl: the OpenCL engine instead.
-                                 The expert file (35B: 15 GB) is written once and reused; a new kernel variant
+  --zero                         arcinferzero (Level Zero; the default since 2026-10-16). MoE models (35B,
+                                 Flash Next) keep their experts, MTP layer included, on the SSD and the most used
+                                 ones in a GPU cache, and read the next layer's missing experts while the GPU
+                                 computes: 131,072 tokens of context by default, up to 262,144 with --ctx. Dense
+                                 models (27B, 9B, 4B, Gemma) only change engine: same context. The expert file
+                                 (35B: 16 GB, Flash Next: 56 GB) is written once and reused; a new kernel variant
                                  or a GPU driver update compiles kernels once (first request slower)
   --no-stream                    arcinferzero (Level Zero) without the SSD expert cache: every expert on the
                                  GPU as in arcinfer (MoE: arcinfer's smaller context)
@@ -105,22 +107,25 @@ LAUNCHER OPTIONS
                                  currently set (bin\clinfo.exe, "global mem"), leaving ~1 GiB for Windows and
                                  other apps, at most the model's max context length. Computed for every model in
                                  a few seconds (a dry load that only adds up the memory), remembered in
-                                 %LOCALAPPDATA%\arcinfer\ctx-auto.txt, recomputed when the GPU memory changes.
-                                 At 18.3 GiB: Qwen3.8 27B 81,920 (122,880 for 27b-std), 35B 102,400, 9B
-                                 143,360 (262,144 for 9b-std), 4B / Gemma 4 12B 262,144, E4B 131,072.
+                                 %LOCALAPPDATA%\arcinfer\zero\ctx-auto.txt, recomputed when the GPU memory changes.
+                                 For example (2026-10-18, 21.5 GiB GPU budget): 27b 69,632 (images, MTP and
+                                 DFlash2), 27b-df 94,208, 27b-std 188,416; 35b and flash 131,072 (the expert cache
+                                 gets the rest). --pick shows every model's value.
                                  Without --ctx: a running server keeps its context, a new one starts with auto.
                                  --ctx auto also restarts a server that runs a fixed context (e.g. one started
                                  with --ctx 32768).
-  --chunk <N>, -Chunk            prompt chunk size in tokens (default per model: 4096; MoE 2048; 512 when the
-                                 decoded weights stay resident, as on the 4B / 9B / E4B). Smaller chunks need less GPU
+  --chunk <N>, -Chunk            prompt chunk size in tokens (default per model: 4096; 35B 8192, Flash Next 2048;
+                                 512 when the decoded weights stay resident, as on the 4B / 9B / E4B). Smaller chunks need less GPU
                                  memory, which the auto context turns into more context: 27B with
                                  --chunk 1024 -> ~65K tokens at 17.4 GiB, 118,784 at 18.3 GiB; ~11K-token
                                  prompts ~4 % slower, long prompts the same speed.
-  --session-cache <GB>           keep conversations on disk (%LOCALAPPDATA%\arcinfer\sessions) when you switch
+  --session-cache <GB>           keep conversations on disk (%LOCALAPPDATA%\arcinfer\zero\sessions) when you switch
   (also -SessionCache)           Pi sessions: going back to one loads it in seconds instead of processing its
                                  whole prompt again (default: 8 GB; 0 = off). New sessions always reuse the
                                  system prompt (in memory; from disk after a restart or a model switch).
-  --help, -h, -?, /?, help       this text
+  --v4                           a 4-bit copy of V for generation (Qwen): ~5-9 % faster answers deep in a long
+                                 context (100K+ tokens), ~25 % more attention-cache memory; opt-in
+  --help, -h, -?, /?, help       the short help;  --help-all: this text
 
   A launcher option that differs from what the running server uses restarts the server (loading takes
   5-40 s). Without launcher options the running server is kept as it is.
@@ -153,7 +158,7 @@ SERVER COMMANDS (arc-server)
   arc-server stop                stop the server and free the GPU memory
   arc-server clear-cache         delete all saved conversations (session cache)
   arc-server help                its own options:
-    -Model <shortcut|text|path>  -Ctx <N|auto>  -Chunk <N>  -SessionCacheGb <N>  -NoMtp  -Vision on|off  -Zero  -NoStream
+    -Model <shortcut|text|path>  -Ctx <N|auto>  -Chunk <N>  -SessionCacheGb <N>  -NoMtp  -Vision on|off  -OpenCL  -NoStream  -V4
     -Port <N> (default 8090)  -MtpDrafts <1..7>  -ThinkBudget <N>  -ImageMinTokens / -ImageMaxTokens <N>
     -BudgetGb <GB>  -AttnF32  -NoPrefixCache  -PrefixCacheGb <N>  -NoSwap  -ListenHost <addr>  -SessionDir <dir>
     -Quiet
@@ -161,11 +166,15 @@ SERVER COMMANDS (arc-server)
                                  field for every option, Start / Stop, and the running server's GPU memory,
                                  requests and speeds (the server keeps running when it is closed)
 
-SERVER DIRECTLY (bin\server.exe; arc-server passes these for you; details: bin\server.exe --help)
+SERVER DIRECTLY (bin\serverz.exe, bin\server.exe with --opencl; arc-server passes these for you; details:
+bin\serverz.exe --help)
   -m, --model <model.gguf>       model file              --port <N>          port (default 8080)
-  -c, --ctx <N|auto>             context (default 40960) --chunk <N>         prompt chunk size
+  -c, --ctx <N|auto>             context                 --chunk <N>         prompt chunk size
   --alias <name>                 model id in the API     --mtp               speculative decoding
-  --mtp-drafts <N>               drafts per step (arcinferzero: 27B 7, 35B 5, 4B 3, else 2)  --think-budget <N>  close reasoning after N tokens
+  --mtp-drafts <N>               drafts per step (arcinferzero: 27B 7, 35B 5, 4B 3, else 2; 7 with DFlash2)
+  --draft auto|mtp|dflash        with a DFlash2 drafter: both (auto), the MTP block only, DFlash2 only (the
+                                 -nodf / -df variants)
+  --think-budget <N>             close reasoning after N tokens
                                                                              (arc-server: 8192)
   --mmproj <file> / --no-mmproj  image projector (Gemma 4 12B; found next to the model by default)
   --session-cache-gb <N>         disk session cache      --session-dir <dir> where it is kept
@@ -188,11 +197,33 @@ FILES
   %LOCALAPPDATA%\arcinfer\server.json     what arc-server started (model, context, chunk)
   %LOCALAPPDATA%\arcinfer\last-model.txt  the model started last (pi-arc starts it again by default)
   %LOCALAPPDATA%\arcinfer\kernels         compiled GPU kernels (cache)
-  %LOCALAPPDATA%\arcinfer\ctx-auto.txt    computed contexts per model and GPU memory
-  %LOCALAPPDATA%\arcinfer\sessions        saved conversations (--session-cache)
-  %LOCALAPPDATA%\arcinfer\prefix          saved system prompts, per project folder (Pi's differs per
+  %LOCALAPPDATA%\arcinfer\zero\          arcinferzero's data (--opencl: the same names one folder up):
+    ctx-auto.txt                          computed contexts per model and GPU memory
+    sessions                              saved conversations (--session-cache)
+    prefix                                saved system prompts, per project folder (Pi's differs per
                                           project: it contains the folder and its AGENTS.md)
+    *.experts / *.lru                     MoE expert files (written once per model) and their cache state
   %LOCALAPPDATA%\arcinfer\build.log       compiler output of the last setup.cmd build
+'@
+    exit 0
+  }
+  if ($a -in "--help", "-h", "-?", "/?", "help") {
+    Write-Host @'
+pi-arc: the Pi coding agent on the local arcinfer server (Intel Arc iGPU).
+
+  pi-arc                         start Pi on the model the server runs, else the one used last
+  pi-arc -c                      continue the last Pi session in this folder (pi-arc -r: choose a session)
+  pi-arc 35b                     start on a model: 35b, 27b, flash (Qwen3.8 Flash Next), 9b, 4b, g12, e4b
+  pi-arc 35b-nodf / 35b-df       drafting with the MTP block only (prose, Indonesian) / DFlash2 only (code)
+  pi-arc --pick                  choose from the list of every model on disk
+  pi-arc --think off             no reasoning (fastest answers); minimal / low (default) / medium / high
+  pi-arc -p "summarize x.md"     answer one message and exit (any other Pi option works too)
+  arc-server stop                stop the background server (frees the GPU memory)
+
+In Pi: /model switches the model (5-40 s), Esc stops the answer, /new starts a new session, /compact
+shortens a long conversation (the details it drops are gone for the model).
+
+  pi-arc --help-all              every option: models and variants, context, chunk size, caches, server
 '@
     exit 0
   }

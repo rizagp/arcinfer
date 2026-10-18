@@ -69,8 +69,8 @@ static int run_main(int argc, char** argv) {
   const bool help = argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h");
   if (argc < 2 || help) {
     fprintf(stderr,
-            "usage: run model.gguf PROMPT [options]   feeds a prompt, prints the top next tokens and a greedy continuation\n"
-            "       run model.gguf --bench-pp N [--n N]  prompt processing of N tokens, then generation speed\n"
+            "usage: runz model.gguf PROMPT [options]  feeds a prompt, prints the top next tokens and a greedy continuation\n"
+            "       runz model.gguf --bench-pp N [--n N] prompt processing of N tokens, then generation speed\n"
             "prompt:\n"
             "  --tokens 1,2,3        token ids               --tokens-file F   token ids from a file (comma separated)\n"
             "  --text-file F         text, tokenized with the model's vocabulary (special tokens such as <|im_start|> parsed)\n"
@@ -98,7 +98,11 @@ static int run_main(int argc, char** argv) {
             "  --perplexity F        perplexity of a text file (llama-perplexity method: second half of each chunk scored)\n"
             "  --ppl-ctx N           chunk length (default 512)   --ppl-chunks N   chunks to score (default all)\n"
             "  --ppl-dump F          write the chunks' token ids to F (for ref_forward)\n"
-            "  --ppl-kl-save F       save each scored token's top-64 log-probs   --ppl-kl F   KL against such a file\n");
+            "  --ppl-kl-save F       save each scored token's top-64 log-probs   --ppl-kl F   KL against such a file\n"
+            "  --ppl-score-last N    score only the last N positions of each chunk   --ppl-score-step S  feed those S at a\n"
+            "                        time (S <= 8: through the generation / verification kernels)\n"
+            "PROMPT is text (special tokens such as <|im_start|> parsed); a long one: --text-file (Windows limits a\n"
+            "command line to ~32K characters).\n");
     return help ? 0 : 1;
   }
   std::string model = argv[1], tokens_arg, kl_ref, ppl_file, ppl_dump, text_prompt, dump_ids;
@@ -157,6 +161,8 @@ static int run_main(int argc, char** argv) {
     else if (a == "--ppl-ctx") ppl_ctx = atoi(argv[++i]);
     else if (a == "--ppl-chunks") ppl_chunks = atoi(argv[++i]);
     else if (a == "--budget") eo.w8_budget_gb = atof(argv[++i]);
+    else if (!a.empty() && a[0] != '-' && text_prompt.empty()) text_prompt = a;  // PROMPT (special tokens parsed)
+    else { fprintf(stderr, "unknown option %s (--help: the options)\n", a.c_str()); return 1; }
   }
   std::vector<int> toks = parse_ids(tokens_arg);
   if (!text_prompt.empty()) {  // the vocabulary is read from the GGUF before the engine loads
