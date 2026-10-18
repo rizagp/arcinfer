@@ -208,7 +208,9 @@ struct XCache {
   // ones the current layer uses, which move into the least recently used slots elsewhere. Every pool keeps at
   // least one layer's worth of slots. Returns false when nothing can go.
   bool shrink() {
-    join();
+    // (called from a kernel launch that ran out of memory: a failed prefetch's experts are dropped by join(), its
+    // error is not thrown from here; the layer's ensure() reads them again and reports a lasting read error itself)
+    try { join(); } catch (const std::exception&) {}
     zrt::sync();
     Pool* P = nullptr;
     for (auto& Q : pools) {
@@ -689,6 +691,7 @@ struct XCache {
           join();
           s = P.tail;
           while (skip(s, -1)) s = P.prev[s];
+          if (s < 0) throw std::runtime_error("expert cache: no free slot for layer " + std::to_string(l));
         }
         unlink(P, s);
         if (P.key[s] >= 0) where[P.key[s]] = -1, fresh_[P.key[s]] = 0;
