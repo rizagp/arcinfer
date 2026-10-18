@@ -29,7 +29,9 @@ foreach ($src in $Sources) {
   $full = Join-Path $root $src
   $name = [IO.Path]::GetFileNameWithoutExtension($full)
   # (_CRT_SECURE_NO_WARNINGS: no "getenv / fopen may be unsafe" deprecation notes)
-  $cmd = "`"$vcvars`" >nul && cl /nologo /std:c++20 /O2 /Oi /arch:AVX2 /fp:fast /EHsc /MD /W3 /openmp:llvm /D_CRT_SECURE_NO_WARNINGS /I`"$root\third_party`" " +
+  # (the f32 references and checks, ref_forward / bitcheck / tests: /fp:precise; the rest /fp:fast)
+  $fp = if ($name -match '^(ref_forward|bitcheck|test_)') { '/fp:precise' } else { '/fp:fast' }
+  $cmd = "`"$vcvars`" >nul && cl /nologo /std:c++20 /O2 /Oi /arch:AVX2 $fp /EHsc /MD /W3 /openmp:llvm /D_CRT_SECURE_NO_WARNINGS /I`"$root\third_party`" " +
          "/Fe`"$out\$name.exe`" /Fo`"$out\\`" `"$full`""
   cmd /c $cmd
   if ($LASTEXITCODE -ne 0) { throw "build failed: $src" }

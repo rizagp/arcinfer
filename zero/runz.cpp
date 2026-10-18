@@ -80,6 +80,8 @@ static int run_main(int argc, char** argv) {
             "  --dump-logits F       write the prompt logits and every generation step's (f32) to F, to compare runs bitwise\n"
             "  --mtp                 speculative decoding (MTP block / Gemma drafter)  --mtp-drafts N  drafts per step\n"
             "  --dflash DIR          speculative decoding with a DFlash2 block drafter (Qwen3.8 27B, Qwen3.6 35B-A3B)\n"
+            "  --draft auto|mtp|dflash  with --dflash: both drafters picked per step (auto), the MTP block only, or\n"
+            "                        DFlash2 only (the MTP block is not loaded)\n"
             "  --mtp-min-p P         draft a second token only above this MTP probability (default 0.5)\n"
             "engine:\n"
             "  --ctx N               context (default: what the prompt needs)     --chunk N   prompt tokens per step\n"
@@ -136,6 +138,12 @@ static int run_main(int argc, char** argv) {
     else if (a == "--v4") eo.v4 = true;  // (4-bit V cache, Qwen)
     else if (a == "--mtp") eo.mtp = true;
     else if (a == "--dflash") { eo.dflash = argv[++i]; eo.mtp = true; }  // DFlash2 drafter folder
+    else if (a == "--draft") {  // auto: DFlash2 and the MTP block, picked per step; mtp: the block only; dflash: DFlash2 only
+      const std::string d = argv[++i];
+      if (d == "mtp") eo.dflash.clear();
+      else if (d == "dflash") eo.mtp_block = false;
+      else if (d != "auto") { fprintf(stderr, "--draft: auto, mtp or dflash\n"); return 1; }
+    }
     else if (a == "--mtp-drafts") eo.mtp_drafts = atoi(argv[++i]);
     else if (a == "--mtp-min-p") eo.mtp_min_p = (float)atof(argv[++i]);
     else if (a == "--kl-ref") kl_ref = argv[++i];

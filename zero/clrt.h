@@ -487,6 +487,9 @@ struct ClRt {
     zrt::rcl::getDeviceInfo(zrt::rcl::device, 0x102D, sizeof(drv) - 1, drv, nullptr);   // CL_DRIVER_VERSION
     device_id = std::string(name) + "|" + drv;  // (the same key as arcinfer's kernel cache)
     if (const char* la = getenv("LOCALAPPDATA"); la && !getenv("ARC_NO_KCACHE")) cache_dir = std::string(la) + "\\arcinfer\\kernels";
+    // a second engine in the process (the server switching models, after the first one freed its memory) keeps the
+    // runtime: the context, its command lists and events, the staging buffer (all of zrt:: belongs to that context)
+    if (zrt::ctx) return true;
     if (!ze_load()) { fprintf(stderr, "cannot load ze_loader.dll (Level Zero)\n"); return false; }
     ZE_CHECK(zeInit(1));
     uint32_t n = 1;

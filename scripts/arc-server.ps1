@@ -193,6 +193,7 @@ Options for start / restart:
   -Model <shortcut|text|path>    27b 35b 35b-s 35b-mtp 9b 4b g12 e4b; a variant with -mtp (MTP, no images),
                                  -vision (images, no MTP) or -std (neither), e.g. 9b-std, 27b-std; a model id
                                  (as in Pi's /model), part of a model's name (e.g. swift) or a .gguf path.
+                                 -nodf / -df (models with a DFlash2 drafter): the MTP block only / DFlash2 only.
                                  Without it: a numbered list of the models in the Hugging Face cache.
   -Ctx <N|auto>                  context in tokens, or auto = the largest that fits the GPU memory currently
                                  set, leaving ~1 GiB for Windows and other apps (computed on the first start
@@ -343,6 +344,7 @@ elseif ($Action -eq "restart") { Stop-Arc | Out-Null }
 $useMtp = [bool]$m.mtp  # (the variant's setting; -NoMtp picked the variant without it)
 $srvArgs = @("-m", "`"$($m.path)`"", "--port", $Port, "--ctx", $ctxArg, "--alias", $m.alias, "--think-budget", $ThinkBudget) + $extra
 if ($useMtp) { $srvArgs += "--mtp" }
+if ($useMtp -and $m.draft -and $m.draft -ne "auto") { $srvArgs += @("--draft", $m.draft) }  # (-nodf: MTP block only, -df: DFlash2 only)
 if ($NoStream) { $srvArgs += "--no-stream" }
 if ($Chunk -gt 0) { $srvArgs += @("--chunk", $Chunk) }
 if ($SessionCacheGb -gt 0) { $srvArgs += @("--session-cache-gb", $SessionCacheGb) }  # saved conversations on disk (default 8 GB, 0 = off)

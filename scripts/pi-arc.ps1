@@ -20,7 +20,7 @@
 $ErrorActionPreference = "Stop"
 $shortcuts = @("27b", "35b", "35b-s", "35b-m", "35b-mtp", "9b", "4b", "g12", "e4b")
 # (a shortcut with a variant suffix: 27b-std, 9b-vision, 35b-mtp-std, g12-mtp, ...)
-function Test-Shortcut([string]$s) { $s = $s.ToLower(); return ($shortcuts | Where-Object { $s -match "^$([regex]::Escape($_))(-mtp|-vision|-std)?$" }).Count -gt 0 }
+function Test-Shortcut([string]$s) { $s = $s.ToLower(); return ($shortcuts | Where-Object { $s -match "^$([regex]::Escape($_))(-mtp|-vision|-std)?(-df|-nodf)?$" }).Count -gt 0 }
 $model = ""; $pick = $false; $thinking = "low"; $noMtp = $false; $ctx = ""; $chunk = 0; $sessGb = $null; $vision = ""; $zero = $true; $noStream = $false; $preserve = $false; $v4 = $false
 $piArgs = New-Object System.Collections.Generic.List[string]
 for ($i = 0; $i -lt $args.Count; $i++) {
@@ -76,6 +76,8 @@ MODEL
   <shortcut>-mtp / -vision / -std  a variant of the same file: MTP without images, images without MTP, neither
                                  (e.g. 9b-std: the most context, 27b-std, 35b-mtp-std). A shortcut must come
                                  before Pi's options and message; any model's id from --pick works too.
+  <shortcut>-nodf / -df          a model with a DFlash2 drafter (27b, 35b): drafts with the MTP block only /
+                                 DFlash2 only (default: both, picked per step), e.g. 35b-nodf
   -Model <text>                  the model whose id, name or file contains <text>, or a path to a .gguf file.
                                  Also --model <text> (or arcinfer/<id>, as in Pi), --arc-model, --model-name.
 

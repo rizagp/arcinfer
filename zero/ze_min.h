@@ -145,7 +145,9 @@ struct ze_kernel_timestamp_result_t { ze_kernel_timestamp_data_t global, context
     (ze_context_handle_t, const ze_event_pool_desc_t*, uint32_t, ze_device_handle_t*, ze_event_pool_handle_t*))  \
   X(ze_result_t, zeEventCreate, (ze_event_pool_handle_t, const ze_event_desc_t*, ze_event_handle_t*))            \
   X(ze_result_t, zeEventHostSynchronize, (ze_event_handle_t, uint64_t))                                          \
-  X(ze_result_t, zeEventHostReset, (ze_event_handle_t))                                                            X(ze_result_t, zeEventQueryKernelTimestamp, (ze_event_handle_t, ze_kernel_timestamp_result_t*))
+  X(ze_result_t, zeEventHostReset, (ze_event_handle_t))                                                          \
+  X(ze_result_t, zeEventHostSignal, (ze_event_handle_t))                                                         \
+  X(ze_result_t, zeEventQueryKernelTimestamp, (ze_event_handle_t, ze_kernel_timestamp_result_t*))
 
 #define ZE_DECL(ret, name, args) typedef ret(__stdcall* PFN_##name) args; inline PFN_##name name = nullptr;
 ZE_FUNCS(ZE_DECL)

@@ -1037,7 +1037,7 @@ class Engine {
     return e;
   }
   static int gemm_tm() {
-    static const int tm = getenv("ARC_GEMM_TM") ? atoi(getenv("ARC_GEMM_TM")) : 16;
+    static const int tm = getenv("ARC_GEMM_TM") ? std::max(1, atoi(getenv("ARC_GEMM_TM"))) : 16;
     return tm;
   }
   cl_kernel gemm_kernel(int qtype, bool act32) {
@@ -1055,7 +1055,7 @@ class Engine {
     auto p = [&](const char* n) { return kernel("ops", "", n); };
     k_rmsnorm_ = p("rmsnorm_quant");
     k_swiglu_ = p("swiglu_quant");
-    if (getenv("ARC_CT")) conv_ct_ = atoi(getenv("ARC_CT"));
+    if (getenv("ARC_CT")) conv_ct_ = std::max(1, atoi(getenv("ARC_CT")));
     k_gdn_conv_ = kernel("ops", "-DCT=" + std::to_string(conv_ct_), "gdn_conv");
     k_conv_upd_ = p("conv_state_update");
     k_gnorm_ = p("gated_norm_quant");
@@ -1944,7 +1944,7 @@ class Engine {
     int M = Mp, N = w.N, K = w.K;
     // Long reductions are split into ~17-superblock pieces (the activation slab of a token-row group then stays in
     // L3); later pieces accumulate into C. Token rows are swept together per weight slice (rgroup).
-    static const int rg_env = getenv("ARC_GEMM_RG") ? atoi(getenv("ARC_GEMM_RG")) : 4;
+    static const int rg_env = getenv("ARC_GEMM_RG") ? std::max(1, atoi(getenv("ARC_GEMM_RG"))) : 4;
     static const int wgy_max = getenv("ARC_GEMM_WGY") ? atoi(getenv("ARC_GEMM_WGY")) : 8;
     const int tm = gemm_tm();
     const int nsb = K / 256, splits = K > 8192 ? (nsb + 16) / 17 : 1, rgroup = rg_env;
@@ -2507,7 +2507,7 @@ class Engine {
       matmul("gemm_up_sh", L.up_sh, Mp, big_, 2 * Fs, Fs, 0, true);
     }
     // routing, then the slots grouped by expert and their tiles
-    static const int tm_std = getenv("ARC_MOE_TM") ? atoi(getenv("ARC_MOE_TM")) : 16;  // (standard experts: slots per decoded weight; 2048-token prompt: TM 8 416, 16 473, 32 423, 64 187 tok/s)
+    static const int tm_std = getenv("ARC_MOE_TM") ? std::max(1, atoi(getenv("ARC_MOE_TM"))) : 16;  // (standard experts: slots per decoded weight; 2048-token prompt: TM 8 416, 16 473, 32 423, 64 187 tok/s)
     const int tm = T == 1 ? 1 : hp.moe_std ? tm_std : 16, n = T * NU;
     const std::string defs = "-cl-intel-256-GRF-per-thread -DNE=" + std::to_string(hp.n_expert) +
                              " -DNU=" + std::to_string(NU) + " -DTM=" + std::to_string(tm);

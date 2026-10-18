@@ -179,7 +179,7 @@ struct XCache {
   // Gives the cache's GPU and host memory back (the server switches models in one process: a 35B cache of 8.5 GiB
   // left behind made the next model run out of memory and lose the device).
   ~XCache() {
-    join();
+    try { join(); } catch (const std::exception&) {}  // (a failed prefetch: its experts are dropped, nothing to report)
     save_state();
     if (zrt::oom_hook && active() == this) { zrt::oom_hook = nullptr; active() = nullptr; }
     zrt::sync();
@@ -457,6 +457,7 @@ struct XCache {
   std::vector<ExpertStore::Req> pf_reqs_;
   double pf_ms_ = 0;
   int pf_layer_ = -1;  // the layer a deep prefetch is filling (-1: none)
+  std::string pf_err_;  // a deep prefetch's error (the read failed): join() drops its experts and throws it
   int pf_wait_[2] = {-1, -1};  // per staging half: the layer whose copies the main list still has to wait for
   void join() {
     if (!pf_.joinable()) return;
@@ -464,7 +465,18 @@ struct XCache {
     pf_.join();
     wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     read_ms += pf_ms_;
+    const int X = pf_layer_;
     pf_layer_ = -1;
+    if (!pf_err_.empty()) {  // (X's slots hold no valid records: they become free slots)
+      const std::string e = std::move(pf_err_);
+      pf_err_.clear();
+      if (X >= 0 && pool_of[X] >= 0) {
+        Pool& P = pools[pool_of[X]];
+        for (int s = 0; s < P.used; ++s)
+          if (P.key[s] >= 0 && P.key[s] / NE == X && fresh_[P.key[s]]) where[P.key[s]] = -1, fresh_[P.key[s]] = 0, P.key[s] = -1;
+      }
+      throw std::runtime_error(e);
+    }
   }
   // Deep prefetch (prompts; ARC_XCOPY=0: off): EVERY missing expert of layer X gets its slot now and is read on a
   // thread through stage[X % 2] in rounds of S / 2 records, each round copied into the slots on a second command list
@@ -531,6 +543,7 @@ struct XCache {
     pf_ = std::thread([this, todo = std::move(todo), h, cc, rec, X, ev] {
       const auto t0 = std::chrono::steady_clock::now();
       std::vector<ExpertStore::Req> reqs;
+      try {
       // rounds of S / 2 records through the two parts of the half, alternately: a round is read while the copy
       // engine copies the previous one out of the other part (events 2 / 3: that part's copies are done)
       const size_t R = std::max(1, S / 2);
@@ -550,6 +563,11 @@ struct XCache {
       }
       ZE_CHECK(zeCommandListAppendBarrier(cc, ev, 0, nullptr));  // (signalled once every copy above is done)
       ZE_CHECK(zeCommandListHostSynchronize(cc, UINT64_MAX));
+      } catch (const std::exception& e) {  // (the main list must not wait for the event forever; join() throws)
+        pf_err_ = std::string("expert prefetch: ") + e.what();
+        zeCommandListHostSynchronize(cc, UINT64_MAX);
+        zeEventHostSignal(ev);
+      }
       pf_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     });
   }
@@ -673,8 +691,7 @@ struct XCache {
           while (skip(s, -1)) s = P.prev[s];
         }
         unlink(P, s);
-        where[P.key[s]] = -1;
-        fresh_[P.key[s]] = 0;
+        if (P.key[s] >= 0) where[P.key[s]] = -1, fresh_[P.key[s]] = 0;
       }
       slot[i] = s;
     }

@@ -181,6 +181,13 @@ once from the main model's hidden state, then the main model checks them in a si
 with `--dflash DIR`. The model's MTP block is still used: at each step the server picks DFlash2 while many of its
 drafts are accepted, otherwise MTP. Results (greedy, answers identical to running without a drafter):
 
+A model with a DFlash2 drafter is also listed (Pi's `/model`, `pi-arc --pick`) with one drafter only:
+`<id>-nodf` drafts with the MTP block only, `<id>-df` with DFlash2 only (the MTP block is not loaded, which leaves a
+little more GPU memory for the expert cache), e.g. `35b`, `35b-nodf`, `35b-df`; picking one in Pi switches the
+server like another model does. On the command line: `--draft auto|mtp|dflash` (server and `runz`). The MTP block
+alone suits prose in languages other than English and long contexts (35B at 262K, Indonesian: 23.4 tokens/s vs 19.2
+with both), DFlash2 alone code.
+
 | Model, kind of text | No drafts | MTP alone | DFlash2 + MTP |
 |---|---|---|---|
 | Qwen3.8 27B, Python code | 4.91 tokens/s | 15.5 | 18.1 |

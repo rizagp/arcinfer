@@ -1611,6 +1611,9 @@ struct ModelInfo {
   // vision), -vision (vision, no MTP) and -std (neither). base: the file's id; tags: "MTP + vision", ...
   bool supported = false, vision = false, mtp = false;
   bool audio = false;  // the image projector also holds a Gemma 4 audio encoder (loaded with it: vision variants only)
+  // arcinferzero, a file with a DFlash2 drafter: 0 both drafters, picked per step (the file's id); 1 the MTP block
+  // only (-nodf); 2 DFlash2 only, the MTP block not loaded (-df)
+  int draft = 0;
   std::string base, tags;
 };
 // Two spellings of one model file (separators, case, a path given on the command line vs one found by the scan).
@@ -1626,6 +1629,9 @@ static bool same_file(const std::string& a, const std::string& b) {
 }
 // (defined below) the auto context of a model file with / without its MTP block and image encoders
 static int auto_ctx_tokens(const std::string& model, bool mtp, bool vision);
+#ifdef ARC_ZERO
+static std::string find_dflash(const std::string& model);  // (defined below) a DFlash2 drafter for the file
+#endif
 
 // the Hugging Face cache (HF_HUB_CACHE, HF_HOME\hub or %USERPROFILE%\.cache\huggingface\hub)
 static std::string hf_hub_dir() {
@@ -1850,6 +1856,21 @@ static std::vector<ModelInfo> scan_models() {
       e.tags = v.mtp && v.vision ? "MTP + vision" : v.mtp ? "MTP" : v.vision ? "vision" : "standard";
       all.push_back(e);
     }
+#ifdef ARC_ZERO
+    // a file with a DFlash2 drafter: its main variant also with one drafter only (to pick in Pi's /model)
+    if (m.supported && all.back().base == m.alias && all[all.size() - vs.size()].mtp && !find_dflash(m.path).empty()) {
+      const ModelInfo main = all[all.size() - vs.size()];
+      for (int d = 1; d <= 2; ++d) {
+        ModelInfo e = main;
+        e.draft = d;
+        const char* suf = d == 1 ? "-nodf" : "-df";
+        e.alias = main.alias + suf;
+        if (!main.shortcut.empty()) e.shortcut = main.shortcut + suf;
+        e.tags = main.tags + (d == 1 ? " (MTP block only)" : " (DFlash2 only)");
+        all.push_back(e);
+      }
+    }
+#endif
   }
   return all;
 }
@@ -1932,12 +1953,13 @@ static std::string ctx_key(const std::string& model, const EngineOptions& eo) {
   return p + "|" + std::to_string(fs::file_size(model, ec)) + "|" + std::to_string(eo.chunk) +
 #ifdef ARC_ZERO
          "|z" + std::to_string((int)(eo.windows_reserve_gb * 10)) + (eo.stream_experts ? "s" : "n") +
-         (eo.dflash.empty() ? std::string() : "|dflash") + (eo.v4 ? "|v4" : "") + "|" +  // (DFlash2 drafter: its weights and buffers; 4-bit V)
+         (eo.dflash.empty() ? std::string() : eo.mtp_block ? "|dflash" : "|dflash-only") + (eo.v4 ? "|v4" : "") + "|" +  // (DFlash2 drafter: its weights and buffers; 4-bit V)
 #endif
          (eo.min_chunk ? "/" + std::to_string(eo.min_chunk) : std::string()) + "|" + (eo.mtp ? "mtp" : "-") + "|" + (eo.attn_int8 ? "i8" : "f32") + "|" + std::to_string(device_global_mem()) +
-         "|m12";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
+         "|m13";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
                  // for 27B, m6: MoE prompt GEMM staging, m7: MoE buffers shared, m8: MoE MTP 1 draft, Q3_K experts, m9: memory parts in the cache,
-                 // m12: streamed MoE reserves 128K of context before the expert cache); bump on changes
+                 // m12: streamed MoE reserves 128K of context before the expert cache, m13: streamed MoE chunk 8192);
+                 // bump on changes
 }
 // "ctx\tresident" lines (older lines without the second field are computed again)
 // The largest context that fits, whether decoded weights stay resident, and how the GPU memory was counted (bytes):
@@ -2122,9 +2144,12 @@ static int list_models() {
       if (!dflash.count(m.path)) dflash[m.path] = find_dflash(m.path);
       dfl = dflash[m.path];
     }
+    if (m.draft == 1) dfl.clear();
     j.set("dflash", !dfl.empty());
     j.set("dflash_path", dfl);
+    j.set("draft", m.draft == 1 ? "mtp" : m.draft == 2 ? "dflash" : "auto");
     if (m.mtp) eo.dflash = dfl;
+    eo.mtp_block = m.draft != 2;
 #endif
     AutoCtx a;  // computed now (dry load) if not known yet; per variant (MTP block, encoders' memory)
     a.ctx = 0;
@@ -2134,7 +2159,7 @@ static int list_models() {
         a = auto_ctx(m.path, eo, false, enc);
 #ifdef ARC_ZERO
         // (the drafter only where it leaves kDflashMinCtx tokens of context: the server drops it there too)
-        if (!eo.dflash.empty() && a.ctx < kDflashMinCtx) {
+        if (!eo.dflash.empty() && eo.mtp_block && a.ctx < kDflashMinCtx) {
           eo.dflash.clear();
           a = auto_ctx(m.path, eo, false, enc);
           j.set("dflash", false);
@@ -2160,8 +2185,8 @@ static int list_models() {
           }
       }
 #ifdef ARC_ZERO
-      // (the engine's default: streamed experts 4096, Flash Next 2048; 35B 8K prompt: 620 tok/s at 2048, 750 at 4096)
-      int chunk = m.arch == "qwen4exp" ? 2048 : a.resident ? 512 : 4096;
+      // (the engine's default: streamed experts 8192, Flash Next 2048, resident decoded weights 512)
+      int chunk = m.arch == "qwen4exp" ? 2048 : moe ? 8192 : a.resident ? 512 : 4096;  // (streamed MoE first, as the engine)
 #else
       int chunk = moe ? 2048 : a.resident ? 512 : 4096;
 #endif
@@ -2233,6 +2258,12 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
     dfl_auto = !eo.dflash.empty();
     if (!eo.dflash.empty()) fprintf(stderr, "DFlash2 drafter found: %s (--no-dflash: MTP block only)\n", eo.dflash.c_str());
   }
+  if (eo.mtp && !eo.mtp_block && eo.dflash.empty()) {
+    fprintf(stderr, "--draft dflash: no DFlash2 drafter for this model, the MTP block drafts\n");
+    eo.mtp_block = true;
+  }
+  if (eo.mtp && !eo.dflash.empty())
+    fprintf(stderr, "drafting: %s\n", eo.mtp_block ? "DFlash2 and the MTP block, picked per step" : "DFlash2 only (no MTP block)");
 #endif
   // Gemma 4 with an image projector: an image's tokens attend to each other both ways, so one image is one forward
   // step; the steps must hold the largest image (resident E4B weights otherwise step through prompts in 512s)
@@ -2254,7 +2285,7 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
     if (enc) fprintf(stderr, "--ctx auto: %.2f GiB kept for the image / audio encoders\n", enc / 1073741824.0);
     AutoCtx a = auto_ctx(model, eo, so.budget_given, enc);
 #ifdef ARC_ZERO
-    if (dfl_auto && a.ctx < kDflashMinCtx) {  // (a drafter that leaves little context: the MTP block only)
+    if (dfl_auto && eo.mtp_block && a.ctx < kDflashMinCtx) {  // (a drafter that leaves little context: the MTP block only)
       fprintf(stderr, "DFlash2 drafter not used: it would leave %d tokens of context (--dflash DIR: use it anyway)\n", a.ctx);
       eo.dflash.clear();
       a = auto_ctx(model, eo, so.budget_given, enc);
@@ -2426,6 +2457,13 @@ int main(int argc, char** argv) {
 #ifdef ARC_ZERO
     else if (a == "--dflash") { so.eo.dflash = next(); so.eo.mtp = true; }
     else if (a == "--no-dflash") { so.eo.dflash.clear(); so.dflash_auto = false; }
+    else if (a == "--draft") {  // (the drafter of the -nodf / -df variants)
+      const std::string d = next();
+      if (d == "mtp") so.eo.dflash.clear(), so.dflash_auto = false, so.eo.mtp_block = true;
+      else if (d == "dflash") so.dflash_auto = true, so.eo.mtp_block = false;
+      else if (d == "auto") so.dflash_auto = true, so.eo.mtp_block = true;
+      else throw std::runtime_error("--draft: auto, mtp or dflash");
+    }
 #endif
     else if (a == "--mmproj") so.mmproj = next();
     else if (a == "--no-mmproj") so.mmproj = "-";
@@ -2453,7 +2491,8 @@ int main(int argc, char** argv) {
             "  -c, --ctx N|auto      context in tokens (default 40960); auto: the largest that fits the GPU memory with\n"
             "                        ~1 GiB left for other apps, at most the trained context (remembered in\n"
             "                        %%LOCALAPPDATA%%\\arcinfer\\ctx-auto.txt)\n"
-            "  --chunk N             prompt tokens per step (default 4096; MoE 2048; 512 when decoded weights stay resident)\n"
+            "  --chunk N             prompt tokens per step (default 4096; MoE 2048; arcinferzero streamed MoE 8192,\n"
+            "                        Flash Next 2048; 512 when decoded weights stay resident)\n"
             "  --mtp                 speculative decoding with the model's MTP block or Gemma assistant drafter\n"
             "  --mtp-drafts N        drafts per step, 1..3, arcinferzero Qwen 1..7 (default 3 for Qwen 27B-class, 1 for\n"
             "                        MoE, else 2)\n"
@@ -2462,6 +2501,9 @@ int main(int argc, char** argv) {
             "                        7 drafts per step); default with --mtp: a *DFlash2* drafter for the model in the\n"
             "                        Hugging Face cache or the extra model folders, if there is one\n"
             "  --no-dflash           no DFlash2 drafter (--mtp: the model's MTP block only)\n"
+            "  --draft auto|mtp|dflash  with --mtp and a DFlash2 drafter: both, picked per step (auto, default), the MTP\n"
+            "                        block only (= --no-dflash), or DFlash2 only (the MTP block is not loaded: more\n"
+            "                        expert cache); the catalog's -nodf / -df variants\n"
 #endif
             "  --think-budget N      default reasoning budget in tokens (requests can override it)\n"
             "  --preserve-thinking   earlier turns keep their reasoning (Qwen3.6 template option; requests can override it\n"
@@ -2483,7 +2525,7 @@ int main(int argc, char** argv) {
             "                        the original GGUF can be moved away (e.g. to a USB disk)\n"
             "  --no-stream           experts on the GPU as in arcinfer (no SSD streaming)\n"
             "  --v4                  + a 4-bit copy of V for generation (Qwen, experimental): faster long answers deep in\n"
-            "                        long contexts, ~25 % more attention-cache memory\n"
+            "                        long contexts, ~25 %% more attention-cache memory\n"
 #endif
             "  --attn-f32            f32 attention (tests)\n"
             "  --kernels DIR         OpenCL kernel folder;  --webui DIR  web UI folder\n"
@@ -2785,6 +2827,11 @@ int main(int argc, char** argv) {
           ServeOpts s2 = so;
           s2.ctx_auto = true;  // the --ctx given at start was for the first model
           s2.eo.mtp = m->mtp;  // the variant's settings: MTP block / drafter, image projector
+#ifdef ARC_ZERO
+          s2.dflash_auto = m->draft != 1;  // (-nodf: the MTP block only; -df: DFlash2 only)
+          s2.eo.mtp_block = m->draft != 2;
+          if (m->draft == 1) s2.eo.dflash.clear();
+#endif
           s2.mmproj = m->vision ? "" : "-";
 #ifdef ARC_ZERO
           // (a --dflash drafter is for the first model, and only with MTP; other models find their own)
@@ -2802,6 +2849,11 @@ int main(int argc, char** argv) {
             for (const ModelInfo& pm : catalog)  // (the previous variant's settings)
               if (pm.alias == prev_alias) {
                 s3.eo.mtp = pm.mtp;
+#ifdef ARC_ZERO
+                s3.dflash_auto = pm.draft != 1;
+                s3.eo.mtp_block = pm.draft != 2;
+                if (pm.draft == 1) s3.eo.dflash.clear();
+#endif
                 s3.mmproj = pm.vision ? "" : "-";
               }
 #ifdef ARC_ZERO

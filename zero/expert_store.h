@@ -97,7 +97,8 @@ struct ExpertStore {
     h_ = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                      FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED, nullptr);
     if (h_ == INVALID_HANDLE_VALUE) throw std::runtime_error("cannot open " + path);
-    for (auto& s : slots_) s.ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    for (auto& s : slots_)
+      if (!(s.ev = CreateEventW(nullptr, TRUE, FALSE, nullptr))) throw std::runtime_error("cannot create the read events");
   }
 
   // ---- reads: up to kQD unbuffered reads in flight. dst must be 4 KB aligned (host USM is). set: which of the two
@@ -129,6 +130,8 @@ struct ExpertStore {
       int map[kQD], n = 0;
       for (int s = 0; s < kQD; ++s) if (slots[s].busy) evs[n] = slots[s].ev, map[n++] = s;
       const DWORD w = WaitForMultipleObjects((DWORD)n, evs, FALSE, INFINITE);
+      if (w >= WAIT_OBJECT_0 + (DWORD)n)
+        throw std::runtime_error("expert read: wait failed (" + std::to_string(GetLastError()) + ")");
       const int s = map[w - WAIT_OBJECT_0];
       DWORD got = 0;
       if (!GetOverlappedResult(h_, &slots[s].ov, &got, FALSE)) throw std::runtime_error("expert read failed");

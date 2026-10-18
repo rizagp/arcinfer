@@ -74,6 +74,8 @@ struct EngineOptions {
   std::string mtp_model;      // Gemma 4: assistant drafter GGUF (empty: an mtp-*.gguf next to the model, if any)
   std::string dflash;         // DFlash2 block drafter (a z-lab DFlash2 folder or its model.safetensors): with mtp, it
                               // drafts instead of the MTP block (Qwen3.8 27B)
+  bool mtp_block = true;      // with dflash: false = the MTP block is not loaded, DFlash2 drafts every step (--draft
+                              // dflash); true = both, picked per step by how many DFlash2 drafts were taken
   std::string kernel_dir = "zero/kernels";  // (arcinferzero: its own copy, with the -DXCACHE kernels)
   bool dry = false;  // only add up the GPU memory a load takes (no allocations, uploads or kernels): --ctx auto
   // arcinferzero expert streaming (standard-type MoE GGUFs): routed experts read from the SSD into an LRU cache on
@@ -121,6 +123,10 @@ class Engine {
     // (measured on arcinferzero, server answers at temperature 0, 2026-10-16: 35B 1 -> 3 drafts 23.9 -> 26.1 tok/s,
     //  4B 2 -> 3 22.9 -> 24.8; 9B 2 and 3 alike (15.8 / 15.6); 27B 3 = 5 = 7; Gemma's drafter unchanged at 2)
     if (!opt.dflash.empty()) opt.mtp = true;
+    if (!opt.mtp_block && opt.dflash.empty()) {  // (no drafter to draft instead)
+      if (opt.mtp) fprintf(stderr, "arcinferzero: --draft dflash without a DFlash2 drafter: the MTP block drafts\n");
+      opt.mtp_block = true;
+    }
     if (opt.mtp_drafts <= 0) opt.mtp_drafts = !opt.dflash.empty() ? 7 : mtp_block_drafts();
     auto t0 = std::chrono::steady_clock::now();
     plan_weights();
@@ -128,9 +134,11 @@ class Engine {
     if (f_.has("arcinferzero.package") && !stream_)  // (a package keeps its experts only in the expert file)
       throw std::runtime_error("this is an arcinferzero package: it runs with expert streaming only (no --no-stream)");
     if (stream_ && !opt.dry) open_experts();
-    // (streamed experts: 4096-token chunks, each chunk reads a layer's missing experts once)
+    // (streamed experts: 8192-token chunks, each chunk reads a layer's missing experts once and decodes them once;
+    // Qwen3.6 35B at ctx 262K, chunk 2048 / 4096 / 8192: expert cache 83 / 81 / 77 %, 32K prompt 485 / 533 / 604
+    // tok/s, 128K prompt 284 / 306 / 324, generation at 128K 13.0 / 12.8 / 12.6 tok/s)
     // (Flash Next: 2048, its residual is 4 streams wide)
-    max_chunk = o.chunk > 0 ? o.chunk : stream_ ? (hp.hc ? 2048 : 4096) : hp.moe ? 2048 : (w8_resident ? 512 : 4096);
+    max_chunk = o.chunk > 0 ? o.chunk : stream_ ? (hp.hc ? 2048 : 8192) : hp.moe ? 2048 : (w8_resident ? 512 : 4096);
     max_chunk = (std::max(max_chunk, o.min_chunk) + 127) / 128 * 128;
     if (!opt.dry) build_kernels();
     load_weights();
@@ -360,7 +368,8 @@ class Engine {
     char hex[17];
     snprintf(hex, sizeof hex, "%016llx",
              (unsigned long long)ClRt::fnv1a(gemm_src_ + "\x01" + ops_src_ + "\x01" + dec_src_ + "\x01" + moe_src_ + "\x01" + f_.path +
-                                             "|" + std::to_string(opt.mtp) + "|" + opt.dflash + "|" + std::to_string(opt.mtp_drafts) +
+                                             "|" + std::to_string(opt.mtp) + "|" + opt.dflash + (opt.mtp_block ? "" : "|nomtp") +
+                                             "|" + std::to_string(opt.mtp_drafts) +
                                              "|" + std::to_string(max_chunk) + (opt.v4 ? "|v4" : "") + "|" + cl_.device_id));
     const std::string marker = dir.empty() ? std::string() : dir + "\\warm-" + hex;
     if (!marker.empty() && std::filesystem::exists(marker)) {
@@ -1331,7 +1340,7 @@ class Engine {
     return e;
   }
   static int gemm_tm() {
-    static const int tm = getenv("ARC_GEMM_TM") ? atoi(getenv("ARC_GEMM_TM")) : 16;
+    static const int tm = getenv("ARC_GEMM_TM") ? std::max(1, atoi(getenv("ARC_GEMM_TM"))) : 16;
     return tm;
   }
   cl_kernel gemm_kernel(int qtype, bool act32) {
@@ -1349,7 +1358,7 @@ class Engine {
     auto p = [&](const char* n) { return kernel("ops", "", n); };
     k_rmsnorm_ = p("rmsnorm_quant");
     k_swiglu_ = p("swiglu_quant");
-    if (getenv("ARC_CT")) conv_ct_ = atoi(getenv("ARC_CT"));
+    if (getenv("ARC_CT")) conv_ct_ = std::max(1, atoi(getenv("ARC_CT")));
     {
       const char* g = getenv("ARC_CONV_GRF");
       const bool big = g != nullptr && std::string(g) == "256";
@@ -1667,7 +1676,7 @@ class Engine {
     const std::string mp = "blk." + std::to_string(hp.n_layer) + ".";
     const size_t g_mtp = gpu_bytes;
     struct MtpBytes { Engine& e; size_t g0; ~MtpBytes() { e.mem_mtp_ += e.gpu_bytes - g0; } } mtp_bytes{*this, g_mtp};
-    if (opt.mtp && f_.find(mp + "nextn.eh_proj.weight")) {
+    if (opt.mtp && opt.mtp_block && f_.find(mp + "nextn.eh_proj.weight")) {
       has_mtp = mtp_block_ = true;
       mtp_.il = hp.n_layer;
       mtp_.attn_norm = load_f32(mp + "attn_norm.weight");
@@ -2609,7 +2618,7 @@ class Engine {
     int M = Mp, N = w.N, K = w.K;
     // Long reductions are split into ~17-superblock pieces (the activation slab of a token-row group then stays in
     // L3); later pieces accumulate into C. Token rows are swept together per weight slice (rgroup).
-    static const int rg_env = getenv("ARC_GEMM_RG") ? atoi(getenv("ARC_GEMM_RG")) : 4;
+    static const int rg_env = getenv("ARC_GEMM_RG") ? std::max(1, atoi(getenv("ARC_GEMM_RG"))) : 4;
     static const int wgy_max = getenv("ARC_GEMM_WGY") ? atoi(getenv("ARC_GEMM_WGY")) : 8;
     const int tm = gemm_tm();
     // (the grid covers whole 16-column groups and tm-token tiles: other shapes would leave rows or columns out)
@@ -3003,7 +3012,7 @@ class Engine {
     }();
     const std::string dec_grf = dec_small ? std::string() : std::string("-cl-intel-256-GRF-per-thread ");
     static const int dec_sg = getenv("ARC_ATTN_DEC_SG") ? atoi(getenv("ARC_ATTN_DEC_SG")) : 512;
-    static const int dec_smax = getenv("ARC_ATTN_DEC_SMAX") ? atoi(getenv("ARC_ATTN_DEC_SMAX")) : 256;  // (keys per split, most)
+    static const int dec_smax = getenv("ARC_ATTN_DEC_SMAX") ? std::max(1, atoi(getenv("ARC_ATTN_DEC_SMAX"))) : 256;  // (keys per split, most)
     auto opts = [&](int tpw) {
       return dec_grf + "-DHD=" + std::to_string(hd) + " -DHPG=" + std::to_string(hpg) +
              " -DHS=" + std::to_string(hs) + " -DTPW=" + std::to_string(tpw) + sb_opt(hd) + v4_opt();
@@ -3036,7 +3045,7 @@ class Engine {
         const int hg = hpg % 4 == 0 && qwen_ds != 1 ? 4 : 2, n = hg == 4 || opt.v4 ? 1 : std::min(left, 2), tr = n, nsub = 4;
         const int sgs = hpg / hg * nsub, lsz = 16 * sgs;
         const int lo = win ? std::max(0, pos0 + r0 - win + 1) : 0, plast = pos0 + r0 + n - 1;
-        static const int qs_len = getenv("ARC_QWEN_DS_S") ? atoi(getenv("ARC_QWEN_DS_S")) : 256;  // (experiment)
+        static const int qs_len = getenv("ARC_QWEN_DS_S") ? std::max(1, atoi(getenv("ARC_QWEN_DS_S"))) : 256;  // (experiment)
         const int S = qs_len, kstart = lo / S * S, ns = (plast - kstart) / S + 1;
         int p0 = pos0 + r0, nv = n, q0 = r0, SS = S, ks = kstart, nss = ns;
         cl_kernel k = kernel("ops", opts(1) + " -DHG=" + std::to_string(hg) + " -DNSUB=" + std::to_string(nsub) +
@@ -3527,7 +3536,7 @@ class Engine {
       matmul("gemm_up_sh", L.up_sh, Mp, big_, 2 * Fs, Fs, 0, true);
     }
     // routing, then the slots grouped by expert and their tiles
-    static const int tm_std = getenv("ARC_MOE_TM") ? atoi(getenv("ARC_MOE_TM")) : 16;  // (standard experts: slots per decoded weight; 2048-token prompt: TM 8 416, 16 473, 32 423, 64 187 tok/s)
+    static const int tm_std = getenv("ARC_MOE_TM") ? std::max(1, atoi(getenv("ARC_MOE_TM"))) : 16;  // (standard experts: slots per decoded weight; 2048-token prompt: TM 8 416, 16 473, 32 423, 64 187 tok/s)
     const int tm = T == 1 ? 1 : hp.moe_std ? tm_std : 16, n = T * NU;
     const std::string defs = "-cl-intel-256-GRF-per-thread -DNE=" + std::to_string(hp.n_expert) +
                              " -DNU=" + std::to_string(NU) + " -DTM=" + std::to_string(tm) +
