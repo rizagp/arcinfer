@@ -2389,12 +2389,20 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
   srv.default_preserve_ = so.preserve_thinking;
   if (so.preserve_thinking && !srv.can_preserve_)
     fprintf(stderr, "--preserve-thinking: this model's chat template has no such option (Qwen3.6 has it; Qwen3.8 always keeps the reasoning)\n");
-  if (so.prefix_cache && eo.attn_int8) {  // %LOCALAPPDATA%\arcinfer\prefix\<model>-<size>
+  // (saved states only load into the same layout: no MTP block (-std), DFlash2 without the MTP block (-df) and the
+  // 4-bit V copy (--v4) each keep their own folders next to the plain one)
+  std::string layout;
+  if (!eo.mtp) layout += "-std";
+#ifdef ARC_ZERO
+  if (eo.mtp && !eo.dflash.empty() && !eo.mtp_block) layout += "-nomtp";
+  if (eo.v4) layout += "-v4";
+#endif
+  if (so.prefix_cache && eo.attn_int8) {  // %LOCALAPPDATA%\arcinfer\prefix\<model>-<size>[<layout>]
     std::error_code ec;
     const std::filesystem::path mp(model);
     const char* la = getenv("LOCALAPPDATA");
     srv.open_prefix_cache(std::string(la ? la : ".") + ARC_DATA "prefix/" + mp.stem().string() + "-" +
-                          std::to_string(std::filesystem::file_size(mp, ec)), so.prefix_gb);
+                          std::to_string(std::filesystem::file_size(mp, ec)) + layout, so.prefix_gb);
   }
   if (so.sess_gb > 0 && eo.attn_int8) {
     // saved conversations of this model file: %LOCALAPPDATA%\arcinfer\sessions\<model>-<size>
@@ -2405,7 +2413,8 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
       const char* la = getenv("LOCALAPPDATA");
       dir = std::string(la ? la : ".") + ARC_DATA "sessions";
     }
-    srv.open_sessions(dir + "/" + mp.stem().string() + "-" + std::to_string(std::filesystem::file_size(mp, ec)), so.sess_gb);
+    srv.open_sessions(dir + "/" + mp.stem().string() + "-" + std::to_string(std::filesystem::file_size(mp, ec)) + layout,
+                      so.sess_gb);
   }
   fprintf(stderr, "serving %s as \"%s\"\n", model.c_str(), alias.c_str());
   return L;
