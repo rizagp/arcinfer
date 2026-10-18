@@ -403,10 +403,15 @@ inline void kv4_fake(float* v, int B) {
     const float t = intel_sub_group_shuffle_xor(m, o);
     if (fabs(t) > fabs(m) || (fabs(t) == fabs(m) && t > m)) m = t;
   }
-#ifdef KV4SYM  // (16 symmetric levels (n - 7.5) * amax / 7.5, n = 0..15: an unsigned scale, the form a P x V kernel can use)
+#if defined(KV4SYM)  // (16 symmetric levels (n - 7.5) * amax / 7.5, n = 0..15: an unsigned scale, the form a P x V kernel can use)
   const float d = fabs(m) / 7.5f, id = d > 0.0f ? 1.0f / d : 0.0f;
 #pragma unroll
   for (int i = 0; i < 16; ++i) v[i] = ((float)clamp((int)floor(v[i] * id + 8.0f), 0, 15) - 7.5f) * d;
+#elif defined(KV4ZD)  // (unsigned scale amax / KV4ZD with an exact zero: (n - 8) * d, n = 0..15; 7: the range is
+                      //  [-8/7, 1] amax, 8: [-1, 7/8] amax, the top clipped)
+  const float d = fabs(m) / (float)KV4ZD, id = d > 0.0f ? 1.0f / d : 0.0f;
+#pragma unroll
+  for (int i = 0; i < 16; ++i) v[i] = (float)(clamp((int)floor(v[i] * id + 8.5f), 0, 15) - 8) * d;
 #else
   const float d = m / -8.0f, id = d != 0.0f ? 1.0f / d : 0.0f;
 #pragma unroll

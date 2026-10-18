@@ -115,6 +115,8 @@ class Engine {
     if (getenv("ARC_V4") && atoi(getenv("ARC_V4")) > 0) opt.v4 = true;
     if (opt.v4 && (hp.gemma || !opt.attn_int8))
       throw std::runtime_error("the 4-bit V cache (--v4) is for Qwen models with int8 attention");
+    if (opt.v4 && kv4_opts().find("-DKV4V") != std::string::npos)
+      throw std::runtime_error("ARC_KV4 simulates a 4-bit V inside the int8 cache: not together with --v4 (K only: ARC_KV4=K32)");
     // (MoE, Qwen3.6 35B: 1 and 2 drafts equally fast, 20.2 vs 20.3 tok/s; 1 keeps one DeltaNet state copy less)
     // (measured on arcinferzero, server answers at temperature 0, 2026-10-16: 35B 1 -> 3 drafts 23.9 -> 26.1 tok/s,
     //  4B 2 -> 3 22.9 -> 24.8; 9B 2 and 3 alike (15.8 / 15.6); 27B 3 = 5 = 7; Gemma's drafter unchanged at 2)
@@ -470,9 +472,13 @@ class Engine {
     return n;
   }
   // KV cache bytes of the MTP block's attention layer (allocated with the block)
+  // Qwen KV bytes per position and kv head: K int8 + V int8 (4-bit V: half) + their scales (4-bit V: one per 64 dims)
+  size_t kv_pos_bytes() const {
+    return opt.v4 ? (size_t)hp.head_dim + hp.head_dim / 2 + 4 + 4 * (hp.head_dim / 64) : 2 * (size_t)hp.head_dim + 8;
+  }
   size_t mtp_kv_bytes(int c) const {
     c = (c + 15) / 16 * 16;
-    return mtp_block_ ? (size_t)hp.n_head_kv * c * (2 * (size_t)hp.head_dim + 8) : 0;
+    return mtp_block_ ? (size_t)hp.n_head_kv * c * kv_pos_bytes() : 0;
   }
   // GPU memory by part for a context of c tokens (as loaded, this engine's ctx; a dry load gives the same numbers):
   // weights (incl. DeltaNet states), MTP block / drafter (with its state copies, without its KV), working buffers,
@@ -501,9 +507,7 @@ class Engine {
     } else {
       int nl = mtp_block_ ? 1 : 0;
       for (const Layer& L : layers_) nl += !hp.recurrent(L.il);
-      // (per position and kv head: K int8 + V int8 (4-bit: half) + their scales (4-bit V: one per 64 dims))
-      const size_t per = opt.v4 ? (size_t)hp.head_dim + hp.head_dim / 2 + 4 + 4 * (hp.head_dim / 64) : 2 * (size_t)hp.head_dim + 8;
-      n += (size_t)nl * hp.n_head_kv * c * per;
+      n += (size_t)nl * hp.n_head_kv * c * kv_pos_bytes();
       n += (size_t)hp.n_qsa * qsa_blocks(c) * hp.qsa_dim * 4;  // QSA pooled keys
     }
     return n;
@@ -1250,6 +1254,9 @@ class Engine {
       i = j;
       if (i < s.size() && s[i] == 'S') {  // ("V64S": 16 symmetric levels with an unsigned scale instead of q4_0's)
         out += " -DKV4SYM";
+        ++i;
+      } else if (i < s.size() && (s[i] == 'Z' || s[i] == 'E')) {  // ("V64Z" / "V64E": (n - 8) * amax / 7 or / 8)
+        out += s[i] == 'Z' ? " -DKV4ZD=7" : " -DKV4ZD=8";
         ++i;
       }
     }

@@ -2482,6 +2482,7 @@ int main(int argc, char** argv) {
             "                        weights + an expert file under %%LOCALAPPDATA%%\\arcinfer\\zero\\models; afterwards\n"
             "                        the original GGUF can be moved away (e.g. to a USB disk)\n"
             "  --no-stream           experts on the GPU as in arcinfer (no SSD streaming)\n"
+            "  --v4                  4-bit V cache (Qwen; K stays int8): half the V bytes for long contexts, experimental\n"
 #endif
             "  --attn-f32            f32 attention (tests)\n"
             "  --kernels DIR         OpenCL kernel folder;  --webui DIR  web UI folder\n"
