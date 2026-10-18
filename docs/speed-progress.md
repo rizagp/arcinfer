@@ -135,6 +135,25 @@ first row of each model is the cost of int8 itself: f16 K/V (`--attn-f32`) again
   per-key scale is the simple kernel change (nibbles, an 8 x sum(P) correction per tile) but doubles the error of
   q4_0's per-32 scales; per-64 scales need the SB > 1 path of every attention kernel.
 
+### 4-bit V cache, implemented (`--v4`, experimental, off by default)
+
+Per key and 64-dim block a scale amax / 7.5 and 16 levels (n - 7.5) (the scale folds into P like the int8 one;
+q4_0's signed scale cannot). 35B UD-IQ4_XS, against the int8 cache:
+
+| | int8 | `--v4` |
+|---|---|---|
+| 8K perplexity, KL vs int8 | 2.6718 | 2.6749, 0.0245 (27B: 2.1928 -> 2.1934, 0.0041) |
+| 125K prompt | 321 tok/s | 241 |
+| Generation after 125K (median step) | 72.8 ms | 66.6 (14.7 tok/s), expert cache 90 -> 92 % |
+| 250K prompt | 193 tok/s | 135 |
+| Generation after 250K (median step) | 92.5 ms | 86.1, expert cache 81 -> 85 % |
+| 32K prompt: attention / attn_prep | 15.4 / 0.31 s | 24.9 / 0.33 s |
+
+Generation at depth gains 7-8 % (memory-bound attention reads half the V bytes); prompts lose 25-30 % because the
+prompt attention is ALU-bound and with per-64 scales P is re-quantized four times per 16-key tile instead of once
+(the atomics that write the nibbles cost nothing measurable). Greedy answers with MTP and DFlash2 are identical to
+plain decoding under `--v4`; the default path is bit-identical to before.
+
 ## 2026-10-17: speculative decoding, MoE prompts, Flash Next
 
 | Change | Before | After |
