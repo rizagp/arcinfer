@@ -21,7 +21,7 @@ $ErrorActionPreference = "Stop"
 $shortcuts = @("27b", "35b", "35b-s", "35b-m", "35b-mtp", "9b", "4b", "g12", "e4b")
 # (a shortcut with a variant suffix: 27b-std, 9b-vision, 35b-mtp-std, g12-mtp, ...)
 function Test-Shortcut([string]$s) { $s = $s.ToLower(); return ($shortcuts | Where-Object { $s -match "^$([regex]::Escape($_))(-mtp|-vision|-std)?$" }).Count -gt 0 }
-$model = ""; $pick = $false; $thinking = "low"; $noMtp = $false; $ctx = ""; $chunk = 0; $sessGb = $null; $vision = ""; $zero = $true; $noStream = $false; $preserve = $false
+$model = ""; $pick = $false; $thinking = "low"; $noMtp = $false; $ctx = ""; $chunk = 0; $sessGb = $null; $vision = ""; $zero = $true; $noStream = $false; $preserve = $false; $v4 = $false
 $piArgs = New-Object System.Collections.Generic.List[string]
 for ($i = 0; $i -lt $args.Count; $i++) {
   $a = [string]$args[$i]
@@ -172,6 +172,8 @@ SERVER DIRECTLY (bin\server.exe; arc-server passes these for you; details: bin\s
   --no-swap                      keep the loaded model (requests for another model are not switched to)
   --host <addr>                  listen address (default 127.0.0.1)
   --attn-f32                     f32 attention (tests)   --budget <GB>       keep decoded weights resident up to GB
+  --v4                           4-bit V copy for generation (arcinferzero, Qwen): faster long answers at long
+                                 contexts, ~25 % more attention-cache memory (experimental)
   --webui <dir>                  web UI folder           --kernels <dir>     OpenCL kernel folder
   --list-models                  the models arc-server's list shows, as JSON
   --help, -h                     every option with its default
@@ -211,6 +213,7 @@ FILES
   elseif ($a -in "--opencl", "-OpenCL") { $zero = $false }
   elseif ($a -in "--preserve-thinking", "-PreserveThinking") { $preserve = $true }
   elseif ($a -in "--no-stream", "-NoStream") { $zero = $true; $noStream = $true }
+  elseif ($a -in "--v4", "-V4") { $zero = $true; $v4 = $true }  # (4-bit V copy for generation at long contexts)
   else { $piArgs.Add($a) }
 }
 # Which model: the one the server is running, else the one started last, else ask (--pick: always ask).
@@ -233,7 +236,7 @@ if (-not $model -and -not $pick) {
 }
 $sessArg = @{}; if ($null -ne $sessGb) { $sessArg.SessionCacheGb = $sessGb }  # (not given: the server's default, 8 GB)
 if ($preserve) { $sessArg.PreserveThinking = $true }  # (only when given: a plain start keeps the running server)
-& (Join-Path $PSScriptRoot "arc-server.ps1") start -Model $model -Ctx $ctx -Chunk $chunk @sessArg -NoMtp:$noMtp -Vision $vision -Zero:$zero -OpenCL:(-not $zero) -NoStream:$noStream
+& (Join-Path $PSScriptRoot "arc-server.ps1") start -Model $model -Ctx $ctx -Chunk $chunk @sessArg -NoMtp:$noMtp -Vision $vision -Zero:$zero -OpenCL:(-not $zero) -NoStream:$noStream -V4:$v4
 if (-not $?) { exit 1 }
 
 # (arc-server start has brought Pi's model list up to date: every model on disk, each with its own context)

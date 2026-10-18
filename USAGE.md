@@ -191,13 +191,22 @@ drafts are accepted, otherwise MTP. Results (greedy, answers identical to runnin
 This drafter was trained mostly on English text and code, so for Indonesian it adds almost no speed (MTP does most
 of the work).
 
+**4-bit V copy for long answers at long contexts (`--v4`, arcinferzero, Qwen models, experimental).**
+`arc-server start -Model 35b -V4` (or `serverz.exe ... --v4`) keeps the normal int8 attention cache for reading
+prompts and adds a 4-bit copy of its V half that generation reads. Prompts stay as fast as without it; generation
+deep in a long context is ~7 % faster (35B after a 125K-token prompt: 13.5 -> 14.3 tokens/s), because each new token
+reads half the V bytes. It costs memory instead of saving it: the attention cache grows by ~25 %, so the expert
+cache of the MoE models gets a little smaller (35B at 131K: 90 -> 87 % of the experts). The answers change slightly
+(4-bit values; 35B: perplexity +0.4 %), MTP and DFlash2 still give the same text as plain decoding. Below ~64K
+tokens of context it brings nothing; leave it off unless long answers at very long contexts are the main use.
+
 **Qwen3.8 Flash Next (arcinferzero only).** A MoE model with 512 experts fetched from the SSD (like the 35B). Run
 `serverz.exe` with `-m` pointing to the first file (`...-IQ3_S-00001-of-00002.gguf`); the second file must be in the
 same folder. The first start writes a 56 GB expert file to `%LOCALAPPDATA%\arcinfer\zero\` (~9.5 minutes); later
-starts take ~13–25 s. First numbers: writing ~4 tokens/s, short prompts are still slow while the expert cache is
-not filled yet (cache 7.9 GiB = 12 % of all experts). The difference from the CPU reference is small (KL 0.0014 on
-a short chat prompt). This model has no MTP block and cannot read images; long context (QSA attention) has not
-been tested yet.
+starts take ~13–25 s. It writes ~6–7 tokens/s at any context up to 131K (the expert cache holds about a fifth of
+the experts); prompts: ~150 tokens/s at 8–32K, ~120 at 125K. The difference from the CPU reference is small (KL
+0.0014 on a short chat prompt). This model has no MTP block and cannot read images. Its sparse long-context
+attention (QSA) works up to the full 262,144 tokens (measured 18 Oct, docs/speed-progress.md).
 
 Stop the server (`arc-server stop`) before using the laptop for other heavy GPU work (games, video editing), or
 before moving or rebuilding the arcinfer folder.
@@ -265,7 +274,8 @@ Windows and other apps, or the model's training limit. The context adjusts itsel
 | Model | Default context |
 |---|---|
 | Qwen3.8 27B | ~41K tokens with images + MTP (larger without images: `27b-mtp`, or without both: `27b-std`) |
-| Qwen3.6 35B-A3B | 40,960 automatically with images + MTP + DFlash2; up to 262,144 with `--ctx` (slower generation) |
+| Qwen3.6 35B-A3B | 131,072 automatically (images + MTP + DFlash2, ~80 % of the experts cached); up to 262,144 with `--ctx` (smaller expert cache) |
+| Qwen3.8 Flash Next | 131,072 automatically; up to 262,144 with `--ctx` |
 | Qwen3.5 9B / 4B | 262,144 tokens (full) |
 | Gemma 4 12B | 262,144 tokens (full) |
 | Gemma 4 E4B | 131,072 tokens (full) |
