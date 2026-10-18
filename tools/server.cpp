@@ -1758,6 +1758,8 @@ static std::vector<ModelInfo> scan_models() {
       // a UD-Q3_K_M or GSQ file also downloaded, the first one found keeps the shortcut)
       {"Qwen3.6-35B-A3B-UD-IQ4_XS.gguf", {"qwen3.6-35b-a3b-mtp", "35b"}},
       {"Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf", {"qwen3.8-flash-next-gsq-rco", "flash"}},
+      // (its arcinferzero package keeps the id and the shortcut; with both on disk the GGUF's entry comes first)
+      {"Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S.gguf", {"qwen3.8-flash-next-gsq-rco", "flash"}},
       {"Qwen3.5-9B-UD-Q4_K_XL.gguf", {"qwen3.5-9b", "9b"}},
       {"Qwen3.5-4B-UD-Q4_K_XL.gguf", {"qwen3.5-4b", "4b"}},
       {"gemma-4-12b-it-qat-q4_0.gguf", {"gemma4-12b", "g12"}},

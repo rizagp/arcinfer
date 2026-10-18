@@ -62,6 +62,7 @@ struct ExpertStore {
     const std::string dir = std::string(la ? la : ".") + "\\arcinfer\\zero";
     fs::create_directories(dir, ec);
     path = dir + "\\" + name + "-" + std::string(hex).substr(0, 8) + ".experts";
+    const std::string def_path = path;  // (where the engine keeps this GGUF's expert file)
     if (!fixed_path.empty()) path = fixed_path;
     if (package) path = (fs::path(gguf_path).parent_path() / f.get_str("arcinferzero.experts_file")).string();
 
@@ -88,6 +89,21 @@ struct ExpertStore {
     }
     file_bytes = off;
 
+    // a package being made from a GGUF whose expert file the engine already wrote: that file moves into the package
+    // (a rename on the same drive) instead of being written a second time (Flash Next: 52 GiB), with its .lru state
+    if (!fixed_path.empty() && !package && !fs::exists(fixed_path, ec) && fs::exists(def_path, ec)) {
+      path = def_path;
+      if (valid(fp)) {
+        fs::rename(def_path, fixed_path, ec);
+        if (!ec) {
+          const std::string lru = def_path.substr(0, def_path.size() - 8) + ".lru";
+          std::error_code ec2;
+          if (fs::exists(lru, ec2)) fs::rename(lru, fixed_path.substr(0, fixed_path.size() - 8) + ".lru", ec2);
+          fprintf(stderr, "arcinferzero: the expert file %s moved into the package\n", def_path.c_str());
+        }
+      }
+      path = fixed_path;
+    }
     if (!valid(fp, package)) {
       if (package)
         throw std::runtime_error("the package's expert file is missing or does not match: " + path +
