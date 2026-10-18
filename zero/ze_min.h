@@ -29,6 +29,7 @@ typedef uint32_t ze_structure_type_t;
 // structure types (ze_structure_type_t)
 #define ZE_STYPE_DEVICE_PROPERTIES 0x3u
 #define ZE_STYPE_DEVICE_MEMORY_PROPERTIES 0x7u
+#define ZE_STYPE_COMMAND_QUEUE_GROUP_PROPERTIES 0x6u
 #define ZE_STYPE_CONTEXT_DESC 0xdu
 #define ZE_STYPE_COMMAND_QUEUE_DESC 0xeu
 #define ZE_STYPE_EVENT_POOL_DESC 0x10u
@@ -57,6 +58,15 @@ struct ze_device_memory_properties_t {
   uint64_t totalSize;
   char name[256];
 };
+struct ze_command_queue_group_properties_t {
+  ze_structure_type_t stype;
+  void* pNext;
+  uint32_t flags;  // 1: compute, 2: copy
+  size_t maxMemoryFillPatternSize;
+  uint32_t numQueues;
+};
+#define ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE 0x1u
+#define ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COPY 0x2u
 struct ze_context_desc_t { ze_structure_type_t stype; const void* pNext; uint32_t flags; };
 struct ze_command_queue_desc_t {
   ze_structure_type_t stype;
@@ -95,6 +105,8 @@ struct ze_kernel_timestamp_result_t { ze_kernel_timestamp_data_t global, context
   X(ze_result_t, zeDeviceGet, (ze_driver_handle_t, uint32_t*, ze_device_handle_t*))                              \
   X(ze_result_t, zeDeviceGetProperties, (ze_device_handle_t, ze_device_properties_t*))                           \
   X(ze_result_t, zeDeviceGetMemoryProperties, (ze_device_handle_t, uint32_t*, ze_device_memory_properties_t*))    \
+  X(ze_result_t, zeDeviceGetCommandQueueGroupProperties,                                                         \
+    (ze_device_handle_t, uint32_t*, ze_command_queue_group_properties_t*))                                       \
   X(ze_result_t, zeContextCreate, (ze_driver_handle_t, const ze_context_desc_t*, ze_context_handle_t*))          \
   X(ze_result_t, zeContextDestroy, (ze_context_handle_t))                                                        \
   X(ze_result_t, zeCommandListCreateImmediate,                                                                   \

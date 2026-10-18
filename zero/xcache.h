@@ -173,6 +173,7 @@ struct XCache {
   uint64_t cache_bytes = 0, stage_bytes = 0;
   // statistics (generation / verification lookups; prompt lookups separately)
   uint64_t hits = 0, misses = 0, p_hits = 0, p_reads = 0, pf_reads = 0, rounds = 0;
+  std::vector<uint8_t> fresh_;  // key -> read by a deep prefetch, not used since (see ensure)
   double read_ms = 0, wait_ms = 0;
 
   // Gives the cache's GPU and host memory back (the server switches models in one process: a 35B cache of 8.5 GiB
@@ -272,6 +273,7 @@ struct XCache {
     S = std::max(16, stage_records);
     pool_of.assign(NL, -1);
     where.assign((size_t)NL * NE, -1);
+    fresh_.assign((size_t)NL * NE, 0);
     // (+ one row: an expert id of NE, which the routing kernel leaves when a row's logits are NaN, reads the next
     // row's entry; every entry always holds a valid address, see set_cache)
     xaddr = (uint64_t*)zrt::host_alloc((size_t)(NL + 1) * NE * 8);
@@ -454,15 +456,110 @@ struct XCache {
   std::thread pf_;
   std::vector<ExpertStore::Req> pf_reqs_;
   double pf_ms_ = 0;
+  int pf_layer_ = -1;  // the layer a deep prefetch is filling (-1: none)
+  int pf_wait_[2] = {-1, -1};  // per staging half: the layer whose copies the main list still has to wait for
   void join() {
     if (!pf_.joinable()) return;
     const auto t0 = std::chrono::steady_clock::now();
     pf_.join();
     wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     read_ms += pf_ms_;
+    pf_layer_ = -1;
+  }
+  // Deep prefetch (prompts; ARC_XCOPY=0: off): EVERY missing expert of layer X gets its slot now and is read on a
+  // thread through stage[X % 2] in rounds of S / 2 records, each round copied into the slots on a second command list
+  // (zrt::copy_list, the copy engine) while the GPU runs the current layer's kernels; ensure(X) waits for it, then
+  // every expert of X is a hit. Safe without locks: the thread only reads the file and appends copies, the slots and
+  // the LRU lists are set here on the caller's thread; the victims never hold an expert of the current layer (its
+  // kernels are the only ones that can still run: ensure() of the current layer came after a blocking read of its
+  // routing) or of X; ensure() of the current layer's next chunks while it runs skips X's slots and its own hits when
+  // it needs victims (else it waits for the prefetch). The slots go to the back of the list (as the prompt's misses,
+  // see ensure), and the half X % 2 is not the current layer's.
+  // Flash Next (23 % of its experts cached), prompt in 2048-token chunks: 4096 tokens 107 -> 166 tok/s, 9000 tokens
+  // 116.9 -> 144.5 tok/s, logits bit for bit the same.
+  static bool deep_on() {
+    static const bool d = !(getenv("ARC_XCOPY") && atoi(getenv("ARC_XCOPY")) == 0);
+    return d;
+  }
+  void prefetch_deep(int X) {
+    if (pf_.joinable()) {
+      if (pf_layer_ == X) return;  // (layer-major prompts: started for an earlier chunk)
+      join();
+    }
+    if (X < 0 || X >= NL || pool_of[X] < 0) return;
+    Pool& P = pools[pool_of[X]];
+    const int cur = last_l;
+    // (with the current layer in the same pool, X keeps to P.n - NE slots: the current layer's next chunks need up
+    // to NE of their own, else they wait for this prefetch and take its experts back out)
+    int room = P.n;
+    if (cur >= 0 && pool_of[cur] == pool_of[X]) {
+      room = P.n - NE;
+      for (int e = 0; e < NE; ++e) room -= where[(size_t)X * NE + e] >= 0;
+    }
+    std::vector<std::pair<int, char*>> todo;  // (expert, slot address)
+    for (int e = 0; e < NE && (int)todo.size() < room; ++e) {
+      const size_t key = (size_t)X * NE + e;
+      if (where[key] >= 0) continue;
+      int sl;
+      if (P.used < P.n) {
+        sl = P.used++;
+      } else {
+        sl = P.tail;
+        while (sl >= 0 && P.key[sl] >= 0 && (P.key[sl] / NE == cur || P.key[sl] / NE == X)) sl = P.prev[sl];
+        if (sl < 0) break;  // (no slot outside the two layers: the rest is read by ensure)
+        unlink(P, sl);
+        if (P.key[sl] >= 0) where[P.key[sl]] = -1, fresh_[P.key[sl]] = 0;
+      }
+      P.key[sl] = (int)key;
+      where[key] = sl;
+      push_back(P, sl);  // (as the prompt's misses in ensure: see there)
+      xaddr[key] = (uint64_t)P.addr[sl];
+      fresh_[key] = 1;
+      todo.push_back({e, P.addr[sl]});
+    }
+    if (todo.empty()) return;
+    pf_reads += todo.size();
+    const int h = X % 2;
+    stage_layer[h] = -1;
+    pf_layer_ = X;
+    ze_command_list_handle_t cc = zrt::copy_list();
+    // (the event of this half: reused two layers later, when the main list has passed its wait; see ensure)
+    ze_event_handle_t ev = zrt::copy_event(h);
+    ZE_CHECK(zeEventHostReset(ev));
+    pf_wait_[h] = X;
+    const uint64_t rec = P.rec;
+    pf_ = std::thread([this, todo = std::move(todo), h, cc, rec, X, ev] {
+      const auto t0 = std::chrono::steady_clock::now();
+      std::vector<ExpertStore::Req> reqs;
+      // rounds of S / 2 records through the two parts of the half, alternately: a round is read while the copy
+      // engine copies the previous one out of the other part (events 2 / 3: that part's copies are done)
+      const size_t R = std::max(1, S / 2);
+      for (size_t b0 = 0, r = 0; b0 < todo.size(); b0 += R, ++r) {
+        const int p = (int)(r & 1);
+        ze_event_handle_t pe = zrt::copy_event(2 + p);
+        if (r >= 2) ZE_CHECK(zeEventHostSynchronize(pe, UINT64_MAX));
+        ZE_CHECK(zeEventHostReset(pe));
+        char* base = stage[h] + (size_t)p * R * stage_rec;
+        const size_t b1 = std::min(todo.size(), b0 + R);
+        reqs.clear();
+        for (size_t j = b0; j < b1; ++j) reqs.push_back({X, todo[j].first, base + (j - b0) * stage_rec});
+        st.read(reqs, 1);
+        for (size_t j = b0; j < b1; ++j)
+          ZE_CHECK(zeCommandListAppendMemoryCopy(cc, todo[j].second, base + (j - b0) * stage_rec, rec, nullptr, 0, nullptr));
+        ZE_CHECK(zeCommandListAppendBarrier(cc, pe, 0, nullptr));
+      }
+      ZE_CHECK(zeCommandListAppendBarrier(cc, ev, 0, nullptr));  // (signalled once every copy above is done)
+      ZE_CHECK(zeCommandListHostSynchronize(cc, UINT64_MAX));
+      pf_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    });
   }
   // (the staging half of X is free: the copies out of it were queued before the sync of the current layer)
-  void prefetch(int X) {
+  // tokens: how many go through X before the layer after it. A deep prefetch reads every missing expert of X, so it
+  // waits for enough of them (ARC_XDEEP_MIN, 2048) that nearly all get used: 808 tokens (8080 routes over 512
+  // experts) left about a quarter of the experts it read unused.
+  void prefetch(int X, int tokens) {
+    static const int deep_min = getenv("ARC_XDEEP_MIN") ? atoi(getenv("ARC_XDEEP_MIN")) : 2048;
+    if (deep_on() && last_l >= 0 && tokens >= deep_min) { prefetch_deep(X); return; }
     join();
     if (X < 0 || X >= NL || pool_of[X] < 0) return;
     const int h = X % 2;
@@ -522,7 +619,14 @@ struct XCache {
     return true;
   }
   void ensure(int l, const int* ids, size_t n, bool prompt, bool dummy_rest) {
-    join();
+    // (a deep prefetch of another layer keeps running, unless it uses this layer's staging half)
+    if (pf_layer_ < 0 || pf_layer_ == l || pf_layer_ % 2 == l % 2) join();
+    const int busy = pf_.joinable() ? pf_layer_ : -1;
+    if (pf_wait_[l % 2] == l) {  // (this layer's experts came through the copy list: the kernels wait for its event)
+      ze_event_handle_t ev = zrt::copy_event(l % 2);
+      ZE_CHECK(zeCommandListAppendBarrier(zrt::cl, nullptr, 1, &ev));
+      pf_wait_[l % 2] = -1;
+    }
     Pool& P = pools[pool_of[l]];
     uint64_t* xa = xaddr + (size_t)l * NE;
     const int h = l % 2;
@@ -530,7 +634,10 @@ struct XCache {
     static thread_local std::vector<int> miss;
     seen.assign(NE, 0);
     miss.clear();
-    // hits first (to the front: the victims below never include an expert this layer uses)
+    // hits first, to the front (the victims below skip this call's experts anyway); a prompt's experts that a deep
+    // prefetch read stay at the back, as its misses go there: a prompt walks the layers in turn, and an LRU list that
+    // takes every new expert to the front then loses the next layers' experts each time (Qwen3.6 35B, 97 % cached:
+    // 7637 records read for a 9000-token prompt instead of 846)
     for (size_t i = 0; i < n; ++i) {
       const int e = ids[i];
       if (e < 0 || e >= NE || seen[e]) continue;
@@ -538,8 +645,10 @@ struct XCache {
       const int s = where[(size_t)l * NE + e];
       if (s < 0) { miss.push_back(e); continue; }
       if (prompt) ++p_hits; else ++hits;
+      uint8_t& fr = fresh_[(size_t)l * NE + e];
       unlink(P, s);
-      push_front(P, s);
+      if (prompt && fr) push_back(P, s); else push_front(P, s);
+      fr = 0;
       xa[e] = (uint64_t)P.addr[s];
     }
     if (prompt) p_reads += miss.size(); else misses += miss.size();
@@ -550,9 +659,22 @@ struct XCache {
       if (P.used < P.n) {
         s = P.used++;
       } else {
+        // (skipping the experts being filled walks toward the front of the list, where this call's hits are: those
+        // stay too; with neither left the deep prefetch is waited for and its experts can go)
+        auto skip = [&](int t, int b) {
+          return t >= 0 && P.key[t] >= 0 &&
+                 ((b >= 0 && P.key[t] / NE == b) || (P.key[t] / NE == l && seen[P.key[t] % NE]));
+        };
         s = P.tail;
+        while (skip(s, busy)) s = P.prev[s];
+        if (s < 0) {
+          join();
+          s = P.tail;
+          while (skip(s, -1)) s = P.prev[s];
+        }
         unlink(P, s);
         where[P.key[s]] = -1;
+        fresh_[P.key[s]] = 0;
       }
       slot[i] = s;
     }
@@ -628,7 +750,24 @@ struct XCache {
     if (dummy_rest) {
       const uint64_t any = (uint64_t)P.addr[0];
       for (int e = 0; e < NE; ++e) if (!seen[e]) xa[e] = any;
-    }    last_l = l;
+    }
+    static const bool verify = getenv("ARC_XVERIFY") != nullptr;  // (debug: every used slot against the file)
+    if (verify) {
+      zrt::sync();
+      static char* a = (char*)zrt::host_alloc(stage_rec);
+      static char* b = (char*)zrt::host_alloc(stage_rec);
+      int bad = 0, first_bad = -1;
+      for (int e = 0; e < NE; ++e) {
+        if (!seen[e]) continue;
+        ZE_CHECK(zeCommandListAppendMemoryCopy(zrt::cl, a, (void*)xa[e], lrec[l], nullptr, 0, nullptr));
+        zrt::sync();
+        st.read({{l, e, b}});
+        if (memcmp(a, b, lrec[l])) { ++bad; if (first_bad < 0) first_bad = e; }
+      }
+      if (bad) fprintf(stderr, "XVERIFY layer %d (%s): %d slots differ from the file (first expert %d)\n", l,
+                       prompt ? "prompt" : "generation", bad, first_bad);
+    }
+    last_l = l;
     last_seen = seen;
     if (std::chrono::steady_clock::now() - saved_at > std::chrono::seconds(60)) save_state();
   }

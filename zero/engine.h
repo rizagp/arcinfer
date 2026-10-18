@@ -235,6 +235,8 @@ class Engine {
   // in x_all_ (x_ points at the current chunk's view).
   const std::vector<float>& forward_layer_major(const int* tokens, int n) {
     const int pos0 = pos, nch = (n + max_chunk - 1) / max_chunk;
+    struct SegN { int& v; ~SegN() { v = 0; } } seg_n{seg_n_};  // (the experts' deep prefetch, see stream_layer)
+    seg_n_ = n;
     cl_mem x_saved = x_;
     auto chunk_T = [&](int c) { return std::min(max_chunk, n - c * max_chunk); };
     auto chunk_Mp = [&](int c) {
@@ -1754,6 +1756,7 @@ class Engine {
   // (host time of streamed MoE, printed by expert_stats: the routing read (waits for the GPU), ensure (expert reads
   //  and copies while the GPU waits), and Flash Next's PLE rows)
   double hst_sync_ms_ = 0, hst_ensure_ms_ = 0, hst_ple_ms_ = 0;
+  int seg_n_ = 0;  // tokens of the layer-major segment being processed (0: none)
   using hclk = std::chrono::steady_clock;
   static double hms(hclk::time_point a) { return std::chrono::duration<double, std::milli>(hclk::now() - a).count(); }
   void stream_layer(Layer& L, int T, bool gemm, const int* tl1 = nullptr) {
@@ -1817,7 +1820,8 @@ class Engine {
     // works on this one (not across the chunk's end: the next chunk's layer 0 has this layer's parity at times)
     static const int pf_min = getenv("ARC_XPF_MIN") ? atoi(getenv("ARC_XPF_MIN")) : 128;
     const int next = L.il + 1;
-    if (T >= pf_min && (next < hp.n_layer || (next == hp.n_layer && has_mtp))) xc_->prefetch(next);
+    // (the tokens that go through the next layer before the layer after it: a layer-major segment's, else the chunk's)
+    if (T >= pf_min && (next < hp.n_layer || (next == hp.n_layer && has_mtp))) xc_->prefetch(next, seg_n_ ? seg_n_ : T);
   }
  public:
   // expert cache statistics (empty without streaming)
@@ -2612,7 +2616,9 @@ class Engine {
     if (Mp % tm || N % 16 || K % 256)
       throw std::runtime_error(std::string("gemm ") + name + ": shape " + std::to_string(Mp) + " x " + std::to_string(N) + " x " +
                                std::to_string(K) + " is not a multiple of " + std::to_string(tm) + " x 16 x 256");
-    const int nsb = K / 256, splits = K > 8192 ? (nsb + 16) / 17 : 1, rgroup = rg_env;
+    // (ARC_GEMM_SPLIT: superblocks per split-K piece, default 17; 0: no split-K)
+    static const int sk_sb = getenv("ARC_GEMM_SPLIT") ? std::max(0, atoi(getenv("ARC_GEMM_SPLIT"))) : 17;
+    const int nsb = K / 256, splits = K > 8192 && sk_sb > 0 ? (nsb + sk_sb - 1) / sk_sb : 1, rgroup = rg_env;
     int wgy = 1;
     while (wgy < wgy_max && (Mp / tm) % (wgy * 2) == 0) wgy *= 2;
     size_t gws[2] = {(size_t)N * (Mp / tm / wgy), (size_t)wgy}, lws[2] = {16, (size_t)wgy};

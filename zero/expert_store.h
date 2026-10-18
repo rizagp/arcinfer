@@ -6,6 +6,7 @@
 // The file is made from the GGUF when missing or when it does not match the GGUF (size, time, name: the fingerprint),
 // and reused otherwise; it can be deleted at any time.
 #pragma once
+#include <atomic>
 #include "../src/gguf.h"
 #include "../src/quants.h"
 #include <chrono>
@@ -99,16 +100,18 @@ struct ExpertStore {
     for (auto& s : slots_) s.ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   }
 
-  // ---- reads: up to kQD unbuffered reads in flight. dst must be 4 KB aligned (host USM is).
+  // ---- reads: up to kQD unbuffered reads in flight. dst must be 4 KB aligned (host USM is). set: which of the two
+  // sets of read slots (0: the caller's thread, 1: the expert cache's prefetch thread; two threads may read at once)
   struct Req { int layer, expert; void* dst; };
-  void read(const std::vector<Req>& reqs) {
+  void read(const std::vector<Req>& reqs, int set = 0) {
+    Slot* slots = slots_ + (set ? kQD : 0);
     size_t next = 0, done = 0;
     int busy = 0;
     auto issue = [&](int s) {
       const Req& r = reqs[next++];
       const LayerInfo& L = layers[r.layer];
       const uint64_t o = L.off + (uint64_t)r.expert * L.rec;
-      Slot& sl = slots_[s];
+      Slot& sl = slots[s];
       ZeroMemory(&sl.ov, sizeof sl.ov);
       sl.ov.Offset = (DWORD)o;
       sl.ov.OffsetHigh = (DWORD)(o >> 32);
@@ -124,24 +127,24 @@ struct ExpertStore {
     while (done < reqs.size()) {
       HANDLE evs[kQD];
       int map[kQD], n = 0;
-      for (int s = 0; s < kQD; ++s) if (slots_[s].busy) evs[n] = slots_[s].ev, map[n++] = s;
+      for (int s = 0; s < kQD; ++s) if (slots[s].busy) evs[n] = slots[s].ev, map[n++] = s;
       const DWORD w = WaitForMultipleObjects((DWORD)n, evs, FALSE, INFINITE);
       const int s = map[w - WAIT_OBJECT_0];
       DWORD got = 0;
-      if (!GetOverlappedResult(h_, &slots_[s].ov, &got, FALSE)) throw std::runtime_error("expert read failed");
-      slots_[s].busy = false;
+      if (!GetOverlappedResult(h_, &slots[s].ov, &got, FALSE)) throw std::runtime_error("expert read failed");
+      slots[s].busy = false;
       --busy;
       ++done;
       if (next < reqs.size()) issue(s);
     }
     reads += reqs.size();
   }
-  uint64_t reads = 0, bytes_read = 0;
+  std::atomic<uint64_t> reads{0}, bytes_read{0};
 
  private:
   static constexpr int kQD = 16;
   struct Slot { OVERLAPPED ov{}; HANDLE ev = nullptr; bool busy = false; };
-  Slot slots_[kQD];
+  Slot slots_[2 * kQD];
   HANDLE h_ = INVALID_HANDLE_VALUE;
 
   struct Header {

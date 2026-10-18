@@ -84,6 +84,47 @@ inline uint64_t device_bytes = 0;  // device USM allocated by the engine
 inline char* stage = nullptr;      // host USM bounce buffer for reads / writes
 inline size_t stage_n = 0;
 inline void sync() { ZE_CHECK(zeCommandListHostSynchronize(cl, UINT64_MAX)); }
+// A second immediate command list for copies that run while `cl` executes kernels (the expert cache's prompt
+// prefetch, xcache.h): on a copy engine when the device has one, else on another queue of the compute group.
+inline ze_command_list_handle_t cl_copy = nullptr;
+inline const char* cl_copy_kind = "";
+inline ze_command_list_handle_t copy_list() {
+  if (cl_copy) return cl_copy;
+  uint32_t ng = 0;
+  ZE_CHECK(zeDeviceGetCommandQueueGroupProperties(dev, &ng, nullptr));
+  std::vector<ze_command_queue_group_properties_t> gp(ng);
+  for (auto& g : gp) g.stype = ZE_STYPE_COMMAND_QUEUE_GROUP_PROPERTIES;
+  ZE_CHECK(zeDeviceGetCommandQueueGroupProperties(dev, &ng, gp.data()));
+  int ord = -1, idx = 0;
+  for (uint32_t i = 0; i < ng && ord < 0; ++i)  // a copy-only group
+    if ((gp[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COPY) && !(gp[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE))
+      ord = (int)i, cl_copy_kind = "copy engine";
+  for (uint32_t i = 0; i < ng && ord < 0; ++i)  // else the compute group, its second queue when it has one
+    if (gp[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE)
+      ord = (int)i, idx = gp[i].numQueues > 1 ? 1 : 0, cl_copy_kind = idx ? "second compute queue" : "compute queue";
+  if (ord < 0) ord = 0;
+  ze_command_queue_desc_t qd{ZE_STYPE_COMMAND_QUEUE_DESC, nullptr, (uint32_t)ord, (uint32_t)idx, 2 /* in order */,
+                             2 /* asynchronous */, 0};
+  ZE_CHECK(zeCommandListCreateImmediate(ctx, dev, &qd, &cl_copy));
+  fprintf(stderr, "arcinferzero: expert copies on a %s (queue group %d, queue %d)\n", cl_copy_kind, ord, idx);
+  return cl_copy;
+}
+// Events the copy list signals after a batch of copies: 0 and 1 (used alternately) the main list waits on before
+// kernels read the copied memory (the wait, device scope, has the compute side invalidate its caches, which a host
+// synchronization alone does not promise); 2 and 3 the copy thread waits on before it reuses a part of its staging.
+inline ze_event_handle_t copy_ev[4] = {};
+inline ze_event_handle_t copy_event(int i) {
+  if (!copy_ev[0]) {
+    ze_event_pool_desc_t pd{ZE_STYPE_EVENT_POOL_DESC, nullptr, 0x1 /* host visible */, 4};
+    ze_event_pool_handle_t pool = nullptr;
+    ZE_CHECK(zeEventPoolCreate(ctx, &pd, 1, &dev, &pool));
+    for (uint32_t k = 0; k < 4; ++k) {
+      ze_event_desc_t ed{ZE_STYPE_EVENT_DESC, nullptr, k, 0x4 /* signal: host scope */, 0x2 /* wait: device scope */};
+      ZE_CHECK(zeEventCreate(pool, &ed, &copy_ev[k]));
+    }
+  }
+  return copy_ev[i & 3];
+}
 // kernel timestamps for profiling (engine.profile: clEnqueueNDRangeKernel asked for an event): events come from pools
 // of 4096 host-visible timestamp events and go back to a free list on clReleaseEvent
 inline std::vector<ze_event_handle_t> ev_free;
