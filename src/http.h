@@ -211,6 +211,7 @@ class HttpServer {
         while (true) {
           size_t le;
           while ((le = buf.find("\r\n")) == std::string::npos) {
+            if (buf.size() > 4096) return reply_close(c, 400, "chunk size line too long");
             const int n = recv(c, tmp, sizeof tmp, 0);
             if (n <= 0) { closesocket(c); return; }
             buf.append(tmp, n);
@@ -218,6 +219,17 @@ class HttpServer {
           size_t len = 0;
           if (!parse_size(buf.substr(0, le), 16, len)) return reply_close(c, 400, "malformed chunk size");
           if (len > kMaxBody || rq.body.size() + len > kMaxBody) return reply_close(c, 413, "request body too large");
+          if (len == 0) {  // the last chunk: optional trailer lines (ignored), then an empty line
+            size_t te;
+            while ((te = buf.find("\r\n\r\n", le)) == std::string::npos) {
+              if (buf.size() > le + 65536) return reply_close(c, 400, "chunk trailers too long");
+              const int n = recv(c, tmp, sizeof tmp, 0);
+              if (n <= 0) { closesocket(c); return; }
+              buf.append(tmp, n);
+            }
+            buf.erase(0, te + 4);
+            break;
+          }
           while (buf.size() < le + 2 + len + 2) {
             const int n = recv(c, tmp, sizeof tmp, 0);
             if (n <= 0) { closesocket(c); return; }
@@ -225,7 +237,6 @@ class HttpServer {
           }
           rq.body.append(buf, le + 2, len);
           buf.erase(0, le + 2 + len + 2);
-          if (len == 0) break;
         }
       } else {
         size_t len = 0;

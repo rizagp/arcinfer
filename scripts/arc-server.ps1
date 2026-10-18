@@ -220,7 +220,8 @@ Options for start / restart:
   -ImageMinTokens / -ImageMaxTokens <N>  tokens per image (defaults: Qwen 256..2048, Gemma 4 12B 1120..2048)
   -BudgetGb <GB>                 keep decoded weights resident up to GB (default: chosen with the context)
   -AttnF32                       f32 attention (tests)
-  -V4                            4-bit V cache (arcinferzero, Qwen; experimental): half the V bytes for long contexts
+  -V4                            + a 4-bit copy of V for generation (arcinferzero, Qwen; experimental): faster long
+                                 answers deep in long contexts, ~25 % more attention-cache memory
   -PreserveThinking              earlier turns keep their reasoning (Qwen3.6 35B; Qwen3.8 27B always does)
   -NoPrefixCache                 do not keep system prompts on disk;  -PrefixCacheGb <N>  their disk space (8)
   -NoSwap                        the server keeps its model (requests for another model do not switch)

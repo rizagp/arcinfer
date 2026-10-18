@@ -2482,7 +2482,8 @@ int main(int argc, char** argv) {
             "                        weights + an expert file under %%LOCALAPPDATA%%\\arcinfer\\zero\\models; afterwards\n"
             "                        the original GGUF can be moved away (e.g. to a USB disk)\n"
             "  --no-stream           experts on the GPU as in arcinfer (no SSD streaming)\n"
-            "  --v4                  4-bit V cache (Qwen; K stays int8): half the V bytes for long contexts, experimental\n"
+            "  --v4                  + a 4-bit copy of V for generation (Qwen, experimental): faster long answers deep in\n"
+            "                        long contexts, ~25 % more attention-cache memory\n"
 #endif
             "  --attn-f32            f32 attention (tests)\n"
             "  --kernels DIR         OpenCL kernel folder;  --webui DIR  web UI folder\n"
@@ -2824,6 +2825,9 @@ int main(int argc, char** argv) {
     return 1;
   }
   fprintf(stderr, "listening on http://%s:%d  (OpenAI API at /v1, web UI at /)\n", host.c_str(), port);
+  if (host != "127.0.0.1" && host != "localhost" && host != "::1")  // (review 6.2: there is no authentication)
+    fprintf(stderr, "warning: listening on %s: anyone who can reach this address can use the model (no API key)\n",
+            host.c_str());
   http.run();
   return 0;
 }

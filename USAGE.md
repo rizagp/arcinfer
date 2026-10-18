@@ -200,6 +200,9 @@ cache of the MoE models gets a little smaller (35B at 131K: 90 -> 87 % of the ex
 (4-bit values; 35B: perplexity +0.4 %), MTP and DFlash2 still give the same text as plain decoding. Below ~64K
 tokens of context it brings nothing; leave it off unless long answers at very long contexts are the main use.
 
+**One answer at a time.** The server runs one request on the GPU at a time; other requests wait for it (several
+Pi windows or clients share one model and take turns).
+
 **Qwen3.8 Flash Next (arcinferzero only).** A MoE model with 512 experts fetched from the SSD (like the 35B). Run
 `serverz.exe` with `-m` pointing to the first file (`...-IQ3_S-00001-of-00002.gguf`); the second file must be in the
 same folder. The first start writes a 56 GB expert file to `%LOCALAPPDATA%\arcinfer\zero\` (~9.5 minutes); later

@@ -163,7 +163,7 @@ SERVER DIRECTLY (bin\server.exe; arc-server passes these for you; details: bin\s
   -m, --model <model.gguf>       model file              --port <N>          port (default 8080)
   -c, --ctx <N|auto>             context (default 40960) --chunk <N>         prompt chunk size
   --alias <name>                 model id in the API     --mtp               speculative decoding
-  --mtp-drafts <N>               drafts per step (27B: 3, MoE: 1, else 2)  --think-budget <N>  close reasoning after N tokens
+  --mtp-drafts <N>               drafts per step (arcinferzero: 27B 7, 35B 5, 4B 3, else 2)  --think-budget <N>  close reasoning after N tokens
                                                                              (arc-server: 8192)
   --mmproj <file> / --no-mmproj  image projector (Gemma 4 12B; found next to the model by default)
   --session-cache-gb <N>         disk session cache      --session-dir <dir> where it is kept
