@@ -126,7 +126,10 @@ inline Result make_package(const std::string& source, int n_layer_hint = 0) {
 
   // ---- 1. the experts, through the expert store (written next to the package)
   const std::string arch = src.get_str("general.architecture");
-  const int n_layer = n_layer_hint > 0 ? n_layer_hint : (int)src.get_int(arch + ".block_count", 0);
+  // (the engine's layer count: the MTP / nextn blocks are not counted, the extra entry below holds them; with
+  //  block_count the 35B's expert file listed one layer more than the engine expects and was refused)
+  const int n_layer = n_layer_hint > 0 ? n_layer_hint
+                                       : (int)src.get_int(arch + ".block_count", 0) - (int)src.get_int(arch + ".nextn_predict_layers", 0);
   const int n_exp = (int)src.get_int(arch + ".expert_count", 0);
   if (n_exp <= 0) throw std::runtime_error("not a MoE model (no " + arch + ".expert_count)");
   // (the same layer list as the engine's: blocks 0..n_layer, the last one the MTP / nextn block when there is one)

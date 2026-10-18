@@ -1831,6 +1831,10 @@ static std::vector<ModelInfo> scan_models() {
     }
     out.push_back(m);
   }
+#ifdef ARC_ZERO
+  // (a package next to the GGUF it was made from: the GGUF keeps the id and the shortcut until it is deleted)
+  std::stable_partition(out.begin(), out.end(), [](const ModelInfo& m) { return m.name.rfind("arcinferzero/", 0) != 0; });
+#endif
   // every downloaded file selectable on its own: a repeated id gets -2, -3, ..., a repeated shortcut is dropped
   for (size_t i = 0; i < out.size(); ++i) {
     const std::string base = out[i].alias;
