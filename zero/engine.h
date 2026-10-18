@@ -1237,6 +1237,23 @@ class Engine {
   std::string v4_opt() const { return opt.v4 && !hp.gemma ? " -DV4" : ""; }
   cl_mem vq_dec(const Layer& L) const { return opt.v4 && L.vq4 ? L.vq4 : L.vq; }
   cl_mem vsc_dec(const Layer& L) const { return opt.v4 && L.vsc4 ? L.vsc4 : L.vsc; }
+  // --v4: the first keys (ARC_V4_SINK, default 128) and each row's most recent ones (ARC_V4_RECENT, default 4096) are
+  // read from the int8 V: attention puts most of its weight there, and they are a few % of a long context (131K: 3 %).
+  // 35B, 8K generation path, KL vs int8: 0 / 0 0.023, 128 / 1024 0.019, 128 / 2048 0.012, 128 / 4096 0.008
+  static int v4_sink() {
+    static const int v = getenv("ARC_V4_SINK") ? std::max(0, atoi(getenv("ARC_V4_SINK"))) : 128;
+    return v;
+  }
+  static int v4_recent() {
+    static const int v = getenv("ARC_V4_RECENT") ? std::max(0, atoi(getenv("ARC_V4_RECENT"))) : 4096;
+    return v;
+  }
+  // the extra arguments of attn_decode / attn_dsplit under --v4 (from argument `at`), for the row at position p
+  void v4_dec_args(cl_kernel k, int at, const Layer& L, int p) {
+    if (!opt.v4) return;
+    int lo = v4_sink(), hi = p + 1 - v4_recent();
+    set_args(k, at, L.vq, L.vsc, lo, hi);
+  }
   // Experiment, not a feature: ARC_KV4 = "K32V32", "V32", "K64" ... (block sizes 16-256) simulates a 4-bit K and / or V
   // cache inside the int8 one (ops.cl kv4_fake), to measure its accuracy. Anything else is refused.
   static std::string kv4_opts() {
@@ -1258,6 +1275,9 @@ class Engine {
         ++i;
       } else if (i < s.size() && (s[i] == 'Z' || s[i] == 'E')) {  // ("V64Z" / "V64E": (n - 8) * amax / 7 or / 8)
         out += s[i] == 'Z' ? " -DKV4ZD=7" : " -DKV4ZD=8";
+        ++i;
+      } else if (i < s.size() && s[i] == 'O') {  // ("V64O": (n - 8) * d, d chosen per block by squared error)
+        out += " -DKV4OPT";
         ++i;
       }
     }
@@ -2994,7 +3014,7 @@ class Engine {
         return e ? atoi(e) : -1;
       }();
       if (!drafter && !hp.gemma && hd == 256 && hpg % 2 == 0 && (qwen_ds == 1 || (qwen_ds < 0 && hpg >= 8))) {
-        const int hg = hpg % 4 == 0 && qwen_ds != 1 ? 4 : 2, n = hg == 4 ? 1 : std::min(left, 2), tr = n, nsub = 4;
+        const int hg = hpg % 4 == 0 && qwen_ds != 1 ? 4 : 2, n = hg == 4 || opt.v4 ? 1 : std::min(left, 2), tr = n, nsub = 4;
         const int sgs = hpg / hg * nsub, lsz = 16 * sgs;
         const int lo = win ? std::max(0, pos0 + r0 - win + 1) : 0, plast = pos0 + r0 + n - 1;
         static const int qs_len = getenv("ARC_QWEN_DS_S") ? atoi(getenv("ARC_QWEN_DS_S")) : 256;  // (experiment)
@@ -3003,6 +3023,7 @@ class Engine {
         cl_kernel k = kernel("ops", opts(1) + " -DHG=" + std::to_string(hg) + " -DNSUB=" + std::to_string(nsub) +
                                         " -DTR=" + std::to_string(tr) + " -DROWVMT", "attn_dsplit");
         set_args(k, 0, qi_, qsc_, L.kq, L.ksc, vq_dec(L), vsc_dec(L), cp, nn, p0, nv, apart_, w, ks, SS, nss, q0);
+        v4_dec_args(k, 16, L, p0);
         size_t gws[2] = {(size_t)ns * lsz, (size_t)nkv}, lws[2] = {(size_t)lsz, 1};
         run(name, k, 2, gws, lws);
         for (int m = 0; m < n; ++m) {
@@ -3043,15 +3064,15 @@ class Engine {
       // (Qwen3.6 35B, 2 kv heads: a single token takes attn_decode (16 * nsp < 128), and attn_split over 2 rows split
       // the keys differently, so MTP output drifted from plain decoding after ~40 tokens of a 2K prompt; its
       // verification rows go through attn_decode one by one. The dense Qwen models pass the identity test as they are.)
-      if (!hp.moe || 16 * nsp >= 128 || drafter)
+      if ((!hp.moe || 16 * nsp >= 128 || drafter) && !opt.v4)  // (--v4: rows one by one, see v4_dec_args)
         while (tpw < T - r0 && tpw < 4 && 16 * nsp * tpw * 2 <= 512) tpw *= 2;  // apart_ holds 4 rows of partials
       const int n = std::min(tpw, T - r0);
-      if (16 * nsp * tpw >= 128) {
+      if (16 * nsp * tpw >= 128 && !opt.v4) {
         const int lsz = 16 * nsp * tpw, plast = pos0 + r0 + n - 1, lo = win ? std::max(0, pos0 + r0 - win + 1) : 0;
         int S, kstart, ns, p0 = pos0 + r0, nv = n, q0 = r0;
         pick_split(lo, plast, lsz / 16, dec_smax, dec_sg, S, kstart, ns);
-        cl_kernel k = kernel("ops", opts(tpw), "attn_split");
-        set_args(k, 0, qi_, qsc_, L.kq, L.ksc, vq_dec(L), vsc_dec(L), cp, nn, p0, nv, apart_, w, kstart, S, ns, q0);
+        cl_kernel k = kernel("ops", opts(tpw), "attn_split");  // (int8 V only: not taken with --v4)
+        set_args(k, 0, qi_, qsc_, L.kq, L.ksc, L.vq, L.vsc, cp, nn, p0, nv, apart_, w, kstart, S, ns, q0);
         size_t gws[2] = {(size_t)ns * lsz, (size_t)nkv}, lws[2] = {(size_t)lsz, 1};
         run(name, k, 2, gws, lws);
         for (int m = 0; m < n; ++m) {
@@ -3067,6 +3088,7 @@ class Engine {
           int S, kstart, ns, pp = p, row = t, prow = 0;
           pick_split(lo, p, nsp, dec_smax, dec_sg, S, kstart, ns);
           set_args(kd, 0, qi_, qsc_, L.kq, L.ksc, vq_dec(L), vsc_dec(L), cp, nn, pp, apart_, row, w, kstart, S);
+          v4_dec_args(kd, 14, L, p);
           size_t gws[2] = {(size_t)ns * 16, (size_t)(nkv * nsp)}, lws[2] = {16, (size_t)nsp};
           run(name, kd, 2, gws, lws);
           set_args(k_attn_comb_, 0, apart_, ns, nn, o_, row, hdd, prow);
@@ -3364,6 +3386,7 @@ class Engine {
       while (S > 32 && (p / S + 1) * nkv * nsp < 512) S /= 2;
       int kstart = 0, ns = p / S + 1, pp = p, row = t, prow = 0;
       set_args(kd, 0, qi_, qsc_, L.kq, L.ksc, vq_dec(L), vsc_dec(L), cp, nn, pp, apart_, row, w, kstart, S, qsa_mask_, qmw);
+      v4_dec_args(kd, 16, L, p);
       size_t gws[2] = {(size_t)ns * 16, (size_t)(nkv * nsp)}, lws[2] = {16, (size_t)nsp};
       run("attention", kd, 2, gws, lws);
       set_args(k_attn_comb_, 0, apart_, ns, nn, o_, row, hdd, prow);

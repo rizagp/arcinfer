@@ -101,7 +101,7 @@ static int run_main(int argc, char** argv) {
   }
   std::string model = argv[1], tokens_arg, kl_ref, ppl_file, ppl_dump, text_prompt, dump_ids;
   std::string ppl_kl_save, ppl_kl;
-  int ppl_ctx = 512, ppl_chunks = 0;
+  int ppl_ctx = 512, ppl_chunks = 0, ppl_score_last = 0, ppl_score_step = 0;
   int n_gen = 16, chunk = 0, ctx = 0, bench_pp = 0, feed_step = 0;
   EngineOptions eo;
   bool prof = false, show = false, prof_gen = false, kl_decode = false;
@@ -143,6 +143,8 @@ static int run_main(int argc, char** argv) {
     else if (a == "--perplexity") ppl_file = argv[++i];
     else if (a == "--ppl-dump") ppl_dump = argv[++i];
     else if (a == "--ppl-kl-save") ppl_kl_save = argv[++i];
+    else if (a == "--ppl-score-last") ppl_score_last = atoi(argv[++i]);
+    else if (a == "--ppl-score-step") ppl_score_step = atoi(argv[++i]);
     else if (a == "--ppl-kl") ppl_kl = argv[++i];
     else if (a == "--ppl-ctx") ppl_ctx = atoi(argv[++i]);
     else if (a == "--ppl-chunks") ppl_chunks = atoi(argv[++i]);
@@ -208,12 +210,15 @@ static int run_main(int argc, char** argv) {
       if (add_bos && vocab.bos >= 0) chunk_toks[0] = vocab.bos;
       const int* tk = chunk_toks.data();
       eng.reset();
-      // (fed in pieces of the chunk size: logits_at reads rows of the last piece only)
+      // (fed in pieces of the chunk size: logits_at reads rows of the last piece only. --ppl-score-last N: only the
+      //  last N positions are scored; --ppl-score-step S: those are fed S tokens at a time (S <= 8: the generation
+      //  kernels), the rest in prompt chunks)
       const int piece = std::max(1, chunk);
-      for (int o = 0; o < ppl_ctx; o += piece) {
-        const int n = std::min(piece, ppl_ctx - o);
+      const int from = ppl_score_last > 0 ? std::max(1, ppl_ctx - 1 - ppl_score_last) : ppl_ctx / 2;
+      for (int o = 0; o < ppl_ctx;) {
+        const int n = o < from ? std::min(piece, from - o) : std::min(ppl_score_step > 0 ? ppl_score_step : piece, ppl_ctx - o);
         eng.forward(tk + o, n);
-        for (int j = std::max(o, ppl_ctx / 2); j < std::min(o + n, ppl_ctx - 1); ++j) {
+        for (int j = std::max(o, from); j < std::min(o + n, ppl_ctx - 1); ++j) {
           const auto& lg = eng.logits_at(j - o);
           const double mx = *std::max_element(lg.begin(), lg.end());
           double z = 0;
@@ -252,6 +257,7 @@ static int run_main(int argc, char** argv) {
             }
           }
         }
+        o += n;
       }
       if (klr) printf("[%d] %.4f  KL %.5f  same top %.2f %%\n", ch + 1, std::exp(nll / count), kl_sum / count, 100.0 * same_top / count);
       else printf("[%d] %.4f\n", ch + 1, std::exp(nll / count));

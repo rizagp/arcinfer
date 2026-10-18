@@ -159,6 +159,23 @@ dims 0.0292 (q4_0 per 32: 0.016).
 At ctx 262,144 (35B): the 250K prompt 193 -> 190.8 tok/s, generation after it 92.5 -> 84.9 ms per step (10.6 ->
 11.5 tok/s), expert cache 81 -> 76 %: the smaller cache does not cancel the gain.
 
+**int8 windows (since 18 Oct evening).** Generation reads the first 128 keys (sink) and each row's last 4096 keys
+(recent window) from the int8 V and only the rest from the 4-bit copy (`ARC_V4_SINK`, `ARC_V4_RECENT`; runtime
+only, the cache layout is the same). 35B generation path, KL vs int8:
+
+| sink / recent | 8K | 32K |
+|---|---|---|
+| 0 / 0 | 0.0232 | 0.0124 |
+| 128 / 1024 | 0.0188 | – |
+| 128 / 2048 | 0.0119 | – |
+| **128 / 4096 (default)** | **0.0080** (perplexity 2.8691, int8 2.8805) | **0.0053** (2.3516, int8 2.3491) |
+
+At 125K the windows are 3 % of the keys; the measured step was 70.7 ms (int8 72.8, without windows 67.5), within the
+run-to-run spread, not separated further (the tests were stopped: `--v4` stays an option). Per-tile scale search
+(squared-error optimal, `ARC_KV4=V64O`) was worse: 0.0221 vs 0.0172 for amax / 7 (outliers matter more than the mean
+error). Under `--v4` the verification rows of the dense models run one by one (each has its own recent window):
+27B MTP code 15.6 -> 14.6 tok/s.
+
 Greedy answers with MTP and DFlash2 are identical to plain decoding under `--v4`; tool calls, prefix reuse and the
 session cache (saved, server restarted, loaded again: the same follow-up answer; an int8 server refuses those
 files) work through the server; the default path is bit-identical to before. Not measured: Flash Next's

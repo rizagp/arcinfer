@@ -407,6 +407,33 @@ inline void kv4_fake(float* v, int B) {
   const float d = fabs(m) / 7.5f, id = d > 0.0f ? 1.0f / d : 0.0f;
 #pragma unroll
   for (int i = 0; i < 16; ++i) v[i] = ((float)clamp((int)floor(v[i] * id + 8.0f), 0, 15) - 7.5f) * d;
+#elif defined(KV4OPT)  // ((n - 8) * d with the scale chosen per block: the smallest that covers the block, d0 =
+                       //  max(max / 7, -min / 8), or 0.95 / 0.9 / 0.85 of it (a little clipping), whichever gives the
+                       //  smallest squared error over the block)
+  float pmax = 0.0f, nmax = 0.0f;
+#pragma unroll
+  for (int i = 0; i < 16; ++i) { pmax = fmax(pmax, v[i]); nmax = fmax(nmax, -v[i]); }
+  for (int o = 1; o < B / 16; o <<= 1) {
+    pmax = fmax(pmax, intel_sub_group_shuffle_xor(pmax, o));
+    nmax = fmax(nmax, intel_sub_group_shuffle_xor(nmax, o));
+  }
+  const float d0 = fmax(pmax / 7.0f, nmax / 8.0f);
+  float best = INFINITY, bd = d0;
+#pragma unroll
+  for (int c = 0; c < 4; ++c) {
+    const float d = d0 * (1.0f - 0.05f * (float)c), id = d > 0.0f ? 1.0f / d : 0.0f;
+    float e = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+      const float r = (float)(clamp((int)floor(v[i] * id + 8.5f), 0, 15) - 8) * d - v[i];
+      e = fma(r, r, e);
+    }
+    for (int o = 1; o < B / 16; o <<= 1) e += intel_sub_group_shuffle_xor(e, o);
+    if (e < best) { best = e; bd = d; }
+  }
+  const float d = bd, id = d > 0.0f ? 1.0f / d : 0.0f;
+#pragma unroll
+  for (int i = 0; i < 16; ++i) v[i] = (float)(clamp((int)floor(v[i] * id + 8.5f), 0, 15) - 8) * d;
 #elif defined(KV4ZD)  // (unsigned scale amax / KV4ZD with an exact zero: (n - 8) * d, n = 0..15; 7: the range is
                       //  [-8/7, 1] amax, 8: [-1, 7/8] amax, the top clipped)
   const float d = fabs(m) / (float)KV4ZD, id = d > 0.0f ? 1.0f / d : 0.0f;
@@ -422,8 +449,13 @@ inline void kv4_fake(float* v, int B) {
 
 #ifdef V4
 #define V4_PREP_ARGS , __global uint* vq4, __global float* vsc4
+// generation kernels: vq / vsc are the 4-bit copy; the tiles of keys below v4_lo (the first keys, which attention
+// keeps returning to) or from v4_hi on (this row's most recent keys) are read from the int8 V (vq8 / vsc8)
+#define V4_DEC_ARGS , __global const uint4* vq8, __global const float* vsc8, int v4_lo, int v4_hi
+#define V4_TILE_INT8(t0) ((t0) < v4_lo || (t0) + 15 >= v4_hi)
 #else
 #define V4_PREP_ARGS
+#define V4_DEC_ARGS
 #endif
 // Full-attention prep: per-head RMSNorm of q and k, NeoX RoPE on the first n_rot dims, q scaled by kq_scale.
 // qkv row: [q|gate interleaved per head (nh*512) | k (nkv*256) | v (nkv*256)], row stride ldq.
@@ -893,47 +925,17 @@ __kernel void attn_q8(__global const char* qi, __global const float* qsc, __glob
   const int last_hi = (nc_hi >= 0 && first <= nc_hi && last >= nc_lo) ? max(last, nc_hi) : last;
   const int b_first = win > 0 ? max(0, first - win + 1) / 16 : 0, b_last = last_hi / 16;
 #define NL (2 * BLK_U / (16 * NSP * TPW))
-#ifdef V4  // (a 4-bit V block is BLK_U / 2 uints: K loads NLK uints per work-item, V NLV, the tile keeps its layout)
-#define NLK (BLK_U / (16 * NSP * TPW))
-#define NLV ((BLK_U / 2 + 16 * NSP * TPW - 1) / (16 * NSP * TPW))
-#define V4_TILE_LOAD(bi)                                                                 \
-  {                                                                                      \
-    _Pragma("unroll") for (int j = 0; j < NLK; ++j) rk[j] = kq[(bi) * BLK_U + lid + j * lsz]; \
-    _Pragma("unroll") for (int j = 0; j < NLV; ++j) {                                    \
-      const int e = lid + j * lsz;                                                       \
-      rk[NLK + j] = e < BLK_U / 2 ? vqu[(bi) * (BLK_U / 2) + e] : 0u;                    \
-    }                                                                                    \
-  }
-#define V4_TILE_STORE(tb)                                                                \
-  {                                                                                      \
-    _Pragma("unroll") for (int j = 0; j < NLK; ++j) tb[lid + j * lsz] = rk[j];           \
-    _Pragma("unroll") for (int j = 0; j < NLV; ++j) {                                    \
-      const int e = lid + j * lsz;                                                       \
-      if (e < BLK_U / 2) tb[BLK_U + e] = rk[NLK + j];                                    \
-    }                                                                                    \
-  }
-#endif
   __global const uint* vqu = (__global const uint*)vq;
-#ifdef V4
-  uint rk[NLK + NLV];
-  V4_TILE_LOAD(blk0 + b_first % nbc)
-#else
   uint rk[NL];
   {
     const size_t nb = (blk0 + b_first % nbc) * BLK_U;
 #pragma unroll
     for (int j = 0; j < NL; ++j) rk[j] = j < NL / 2 ? kq[nb + lid + j * lsz] : vqu[nb + lid + (j - NL / 2) * lsz];
   }
-#endif
   for (int b = b_first; b <= b_last; ++b) {
     const int t0 = b * 16;
     __local uint* tb = tile[b % TILE_BUFS];
     if (TILE_BUFS == 1 && b > b_first) barrier(CLK_LOCAL_MEM_FENCE);  // everyone is done with the previous tile
-#ifdef V4
-    V4_TILE_STORE(tb)
-    barrier(CLK_LOCAL_MEM_FENCE);
-    if (b < b_last) V4_TILE_LOAD(blk0 + (b + 1) % nbc)
-#else
 #pragma unroll
     for (int j = 0; j < NL; ++j) tb[lid + j * lsz] = rk[j];
     barrier(CLK_LOCAL_MEM_FENCE);
@@ -943,15 +945,9 @@ __kernel void attn_q8(__global const char* qi, __global const float* qsc, __glob
 #pragma unroll
       for (int j = 0; j < NL; ++j) rk[j] = j < NL / 2 ? kq[nb + lid + j * lsz] : vqu[nb + lid + (j - NL / 2) * lsz];
     }
-#endif
     if (!active || t0 > hi || t0 + 15 < lo) continue;
     __local const uint* Kt = tb;
-#ifdef V4
-    __local const uint2* Vt = (__local const uint2*)(tb + BLK_U);
-    const size_t vob = ((size_t)g * nbc + (size_t)(b % nbc)) * VSB * 16 + lane;
-#else
     __local const uint4* Vt = (__local const uint4*)(tb + BLK_U);
-#endif
     const size_t sob = ((size_t)g * nbc + (size_t)(b % nbc)) * SB * 16 + lane;  // this tile's scales
     const int key = t0 + lane;
 #ifdef QSA
@@ -982,11 +978,7 @@ __kernel void attn_q8(__global const char* qi, __global const float* qsc, __glob
     for (int r = 0; r < HS; ++r) { pk[r] = valid ? sacc[r] * 0.01f + 0.5f : 0.0f; pb[r] = 1.0f; lp[r] += pk[r]; }
 #endif
 #ifndef ABL_NOPV
-#ifdef V4
-    PV4_TILE(Vt, vob, valid)
-#else
     PV_TILE(Vt, sob, valid)
-#endif
 #else
 #pragma unroll
     for (int r = 0; r < HS; ++r) o[r][0] += pk[r] * as_float(Vt[lane].x) * 1e-30f;
@@ -1260,26 +1252,16 @@ __kernel void attn_split(__global const char* qi, __global const float* qsc, __g
   const int lo_all = max(s0, win > 0 ? pos0 - win + 1 : 0), hi_all = min(s1, pos0 + M_valid - 1);
   const int b_first = max(lo_all, 0) / 16, b_last = hi_all / 16;
   __global const uint* vqu = (__global const uint*)vq;
-#ifdef V4
-  uint rk[NLK + NLV];
-  if (b_first <= b_last) V4_TILE_LOAD(blk0 + b_first % nbc)
-#else
   uint rk[NL];
   if (b_first <= b_last) {
     const size_t nb = (blk0 + b_first % nbc) * BLK_U;
 #pragma unroll
     for (int j = 0; j < NL; ++j) rk[j] = j < NL / 2 ? kq[nb + lid + j * lsz] : vqu[nb + lid + (j - NL / 2) * lsz];
   }
-#endif
   for (int b = b_first; b <= b_last; ++b) {
     const int t0 = b * 16;
     __local uint* tb = tile[b % TILE_BUFS];
     if (TILE_BUFS == 1 && b > b_first) barrier(CLK_LOCAL_MEM_FENCE);  // everyone is done with the previous tile
-#ifdef V4
-    V4_TILE_STORE(tb)
-    barrier(CLK_LOCAL_MEM_FENCE);
-    if (b < b_last) V4_TILE_LOAD(blk0 + (b + 1) % nbc)
-#else
 #pragma unroll
     for (int j = 0; j < NL; ++j) tb[lid + j * lsz] = rk[j];
     barrier(CLK_LOCAL_MEM_FENCE);
@@ -1289,15 +1271,9 @@ __kernel void attn_split(__global const char* qi, __global const float* qsc, __g
 #pragma unroll
       for (int j = 0; j < NL; ++j) rk[j] = j < NL / 2 ? kq[nb + lid + j * lsz] : vqu[nb + lid + (j - NL / 2) * lsz];
     }
-#endif
     if (!active || t0 > hi || t0 + 15 < lo) continue;
     __local const uint* Kt = tb;
-#ifdef V4
-    __local const uint2* Vt = (__local const uint2*)(tb + BLK_U);
-    const size_t vob = ((size_t)g * nbc + (size_t)(b % nbc)) * VSB * 16 + lane;
-#else
     __local const uint4* Vt = (__local const uint4*)(tb + BLK_U);
-#endif
     const size_t sob = ((size_t)g * nbc + (size_t)(b % nbc)) * SB * 16 + lane;  // this tile's scales
     const int key = t0 + lane;
     const bool valid = key <= hi && key >= lo;
@@ -1307,11 +1283,7 @@ __kernel void attn_split(__global const char* qi, __global const float* qsc, __g
       const float sv = valid ? sacc[r] : -INFINITY;
       SOFTMAX_TILE(r, sv, valid)
     }
-#ifdef V4
-    PV4_TILE(Vt, vob, valid)
-#else
-    PV_TILE(Vt, sob, valid)
-#endif
+    PV_TILE(Vt, sob, valid)  // (int8 V: attn_split is not used with --v4, see attn_decode_rows)
   }
   if (active) {
 #pragma unroll
@@ -1335,7 +1307,8 @@ __kernel void attn_split(__global const char* qi, __global const float* qsc, __g
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void attn_decode(__global const char* qi, __global const float* qsc, __global const uint* kq,
                           __global const float* ksc, __global const uint4* vq, __global const float* vsc, int cap,
-                          int nh, int pos, __global float* part, int qrow, int win, int kstart, int slen QSA_ARGS) {
+                          int nh, int pos, __global float* part, int qrow, int win, int kstart, int slen QSA_ARGS
+                          V4_DEC_ARGS) {
   const int lane = get_sub_group_local_id(), split = get_global_id(0) / SG;
   const int g = get_global_id(1) / NSP, h0 = g * HPG + (get_global_id(1) % NSP) * HS;
   const int lo = win > 0 ? max(0, pos - win + 1) : 0;
@@ -1378,8 +1351,14 @@ __kernel void attn_decode(__global const char* qi, __global const float* qsc, __
       SOFTMAX_TILE(r, sv, valid)
     }
 #ifdef V4
-    __global const uint2* vt = (__global const uint2*)vq + b * HD;
-    PV4_TILE(vt, b * VSB * 16 + lane, valid)
+    if (V4_TILE_INT8(t0)) {
+      __global const float* vsc = vsc8;  // (PV_PACK reads `vsc`)
+      __global const uint4* vt = vq8 + b * HD;
+      PV_TILE(vt, sob, valid)
+    } else {
+      __global const uint2* vt = (__global const uint2*)vq + b * HD;
+      PV4_TILE(vt, b * VSB * 16 + lane, valid)
+    }
 #else
     __global const uint4* vt = vq + b * HD;
     PV_TILE(vt, sob, valid)
@@ -1417,7 +1396,7 @@ __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void attn_dsplit(__global const char* qi, __global const float* qsc, __global const uint* kq,
                           __global const float* ksc, __global const uint4* vq, __global const float* vsc, int cap,
                           int nh, int pos0, int M_valid, __global float* part, int win, int kstart, int slen,
-                          int nsplit, int qrow0) {
+                          int nsplit, int qrow0 V4_DEC_ARGS) {
   __local float sp[2][NHG][NSUB][RH][SG];
   const int lane = get_sub_group_local_id(), sg = get_sub_group_id(), hgi = sg / NSUB, dj = sg % NSUB;
   const int g = get_group_id(1), split = get_group_id(0), h0 = g * HPG + hgi * HG;
@@ -1502,10 +1481,12 @@ __kernel void attn_dsplit(__global const char* qi, __global const float* qsc, __
     }
     // P * V for this sub-group's dims (P re-quantized per 64-dim block with SB > 1, as PV_PACK); keys outside every
     // row's range have pk = 0
-#ifdef V4  // (4-bit V: P re-quantized per 64-dim block against that block's scales, see PV4_TILE)
+#ifdef V4  // (4-bit V: P re-quantized per 64-dim block against that block's scales, see PV4_TILE; int8 tiles: below)
+    const bool t8 = V4_TILE_INT8(t0);
     __global const uint2* vt = (__global const uint2*)vq + b * HD;
-#define DS_VSC(c) vsc[b * VSB * 16 + lane + (c) * 16]
-#define DS_REPACK 1
+    __global const uint4* vt8 = vq8 + b * HD;
+#define DS_VSC(c) (t8 ? vsc8[sob + (SB == 1 ? 0 : (c) * 16)] : vsc[b * VSB * 16 + lane + (c) * 16])
+#define DS_REPACK (!t8)
 #else
     __global const uint4* vt = vq + b * HD;
 #define DS_VSC(c) vsc[sob + (SB == 1 ? 0 : (c) * 16)]
@@ -1545,15 +1526,20 @@ __kernel void attn_dsplit(__global const char* qi, __global const float* qsc, __
 #ifdef V4
 #pragma unroll
         for (int x = 0; x < RH; ++x)
-          psum[x] = PDOT(pw[x].x, 0x01010101u) + PDOT(pw[x].y, 0x01010101u) + PDOT(pw[x].z, 0x01010101u) +
-                    PDOT(pw[x].w, 0x01010101u);
+          psum[x] = t8 ? 0 : PDOT(pw[x].x, 0x01010101u) + PDOT(pw[x].y, 0x01010101u) + PDOT(pw[x].z, 0x01010101u) +
+                             PDOT(pw[x].w, 0x01010101u);
 #endif
       }
 #pragma unroll
       for (int ii = 0; ii < 4; ++ii) {
 #ifdef V4
-        const uint2 w2 = vt[64 * c + 16 * ii + lane];
-        const uint4 v = (uint4)(w2.x & V4M, (w2.x >> 4) & V4M, w2.y & V4M, (w2.y >> 4) & V4M);
+        uint4 v;
+        if (t8) {
+          v = vt8[64 * c + 16 * ii + lane];
+        } else {
+          const uint2 w2 = vt[64 * c + 16 * ii + lane];
+          v = (uint4)(w2.x & V4M, (w2.x >> 4) & V4M, w2.y & V4M, (w2.y >> 4) & V4M);
+        }
 #else
         const uint4 v = vt[64 * c + 16 * ii + lane];
 #endif
