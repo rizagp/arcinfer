@@ -1832,8 +1832,20 @@ static std::vector<ModelInfo> scan_models() {
     out.push_back(m);
   }
 #ifdef ARC_ZERO
-  // (a package next to the GGUF it was made from: the GGUF keeps the id and the shortcut until it is deleted)
-  std::stable_partition(out.begin(), out.end(), [](const ModelInfo& m) { return m.name.rfind("arcinferzero/", 0) != 0; });
+  // which copy of a model keeps its id and shortcut: the Hugging Face cache first (a package next to the GGUF it was
+  // made from waits until that GGUF is deleted), then packages, then the extra folders (a backup GGUF on another
+  // drive must not take the id from a package: its expert file moved into the package, so it would be written again)
+  {
+    std::error_code e2;
+    const std::string hub = lower_ascii(fs::weakly_canonical(hf_hub_dir(), e2).string());
+    auto rank = [&](const ModelInfo& m) {
+      if (m.name.rfind("arcinferzero/", 0) == 0) return 1;
+      std::error_code e3;
+      const std::string p = lower_ascii(fs::weakly_canonical(m.path, e3).string());
+      return !hub.empty() && p.rfind(hub, 0) == 0 ? 0 : 2;
+    };
+    std::stable_sort(out.begin(), out.end(), [&](const ModelInfo& a, const ModelInfo& b) { return rank(a) < rank(b); });
+  }
 #endif
   // every downloaded file selectable on its own: a repeated id gets -2, -3, ..., a repeated shortcut is dropped
   for (size_t i = 0; i < out.size(); ++i) {
