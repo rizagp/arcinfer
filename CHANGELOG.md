@@ -8,6 +8,11 @@
   Requests in different slots take turns step by step by GPU time used, so two Pi sessions answer at the same time;
   a short question during another slot's 46K-token prompt: 49 -> 9.6 s. Logits bit-identical alone and interleaved
   (`runz --slots-check`: 27B, 35B with MTP and DFlash2, Flash Next with QSA); one slot unchanged.
+- **Batched decoding over slots** (Qwen dense and MoE): requests generating at the same time run their next tokens
+  and drafts in one engine pass (`Engine::forward_batch` / `verify_batch`; every slot drafts in its own state, each
+  settles its own drafts). Two answers at once: 27B 7.3 -> 10.5 tok/s together (prose), 11.6 -> 15.4 (code); 35B
+  20.2 -> 24.7, 29.0 -> 30.7. Logits bit-identical to each slot alone; `runz --bench-batch N` times it (27B, no
+  drafts: 2 / 3 / 4 slots 1.78 / 2.43 / 3.04x).
 
 - `ARC_HC_F32` (arcinferzero, Flash Next prompts; opt-in): the hyper-connection mixers of prompt chunks with more
   precision. `4` takes the up projection's input as two int8 passes (values, then their rounding residual): KL

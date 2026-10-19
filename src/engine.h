@@ -127,6 +127,7 @@ class Engine {
   void bind(int) {}
   size_t slot_bytes(int) const { return 0; }
   void reset_drafter_choice() {}
+  int batch_rows() const { return 1; }
 
   void reset() {
     pos = 0;

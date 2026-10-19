@@ -409,7 +409,7 @@ class Server {
       if (c.empty() && empty < 0) empty = k;
       if (lru < 0 || slots_[k].used < slots_[lru].used) lru = k;
     }
-    const int k = cont >= 0 ? cont : empty >= 0 ? empty : lru;
+    const int k = cont >= 0 ? cont : empty >= 0 ? empty : lru;  // (see below)
     double vmin = -1;
     for (const auto& x : slots_)
       if (x.busy && (vmin < 0 || x.vtime < vmin)) vmin = x.vtime;
@@ -419,6 +419,103 @@ class Server {
     slots_[k].used = ++slot_clock_;
     use_slot(k);
     return k;
+  }
+  // ---- batched generation steps (--slots, Qwen models on arcinferzero: QUEUE 20.4). A request at a generation step
+  // (its next token, with drafts or without) while other requests are generating waits for one of them to reach its
+  // own step: that one runs both in one engine pass (Engine::forward_batch / verify_batch: every slot drafts in its
+  // own state, one pass verifies all rows) and hands back the rows; each request then samples and settles its drafts
+  // as before. The weights are read once for both: 27B two slots 1.45x (drafts) / 1.8x (none) the tokens per second.
+  struct GenStep {
+    int slot = 0, tok = 0, max_drafts = 0;  // max_drafts 0: one token without drafts
+    bool done = false, alone = false;       // done: run by another request; alone: run it yourself
+    bool dflash = false, batched = false;
+    std::vector<int> drafts;
+    std::vector<float> rows;  // logits of the token and of each draft
+  };
+  std::vector<GenStep*> gen_wait_;  // steps waiting for another request to run them
+  int gen_active_ = 0;              // requests in their generation loop
+  std::condition_variable gen_cv_;
+  // one step of the bound slot's request: alone, or with waiting steps of other slots
+  void run_steps(std::vector<GenStep*> st) {
+    const int V = eng_.hp.n_vocab;
+    if (st.size() == 1) {
+      GenStep& g = *st[0];
+      if (g.max_drafts > 0) {
+        g.drafts = eng_.mtp_draft(g.tok, g.max_drafts);
+#ifdef ARC_ZERO
+        g.dflash = eng_.last_draft_dflash();
+#endif
+        const auto& lv = eng_.verify(g.tok, g.drafts);
+        g.rows.assign(lv.begin(), lv.begin() + (1 + g.drafts.size()) * V);
+      } else {
+        g.rows = eng_.forward(&g.tok, 1);
+      }
+      g.done = true;
+      return;
+    }
+#ifdef ARC_ZERO
+    std::vector<int> sl;
+    for (GenStep* g : st) sl.push_back(g->slot);
+    if (st[0]->max_drafts > 0) {
+      const int nd = eng_.batch_rows() / (int)st.size() - 1;  // (the rows of every slot within one pass)
+      std::vector<std::vector<int>> rows;
+      for (GenStep* g : st) {
+        eng_.bind(g->slot);
+        g->drafts = eng_.mtp_draft(g->tok, std::min(g->max_drafts, nd));
+        g->dflash = eng_.last_draft_dflash();
+        rows.push_back({g->tok});
+        rows.back().insert(rows.back().end(), g->drafts.begin(), g->drafts.end());
+      }
+      eng_.bind(cur_slot_);
+      const std::vector<float>& lv = eng_.verify_batch(sl, rows);
+      size_t r0 = 0;
+      for (size_t b = 0; b < st.size(); ++b) {
+        st[b]->rows.assign(lv.begin() + r0 * V, lv.begin() + (r0 + rows[b].size()) * V);
+        r0 += rows[b].size();
+      }
+    } else {
+      std::vector<int> tk;
+      for (GenStep* g : st) tk.push_back(g->tok);
+      const std::vector<float>& lv = eng_.forward_batch(sl, tk);
+      for (size_t b = 0; b < st.size(); ++b) st[b]->rows.assign(lv.begin() + b * V, lv.begin() + (b + 1) * V);
+    }
+    for (GenStep* g : st) g->done = g->batched = true;
+#endif
+  }
+  // the step `me` of the request in slot `slot` (the engine lock held, the slot bound; bound again on return)
+  void gen_step(std::unique_lock<std::mutex>& lk, GenStep& me, int slot) {
+    bool can = slots_.size() > 1;
+#ifdef ARC_ZERO
+    static const bool off = getenv("ARC_NO_BATCH") && atoi(getenv("ARC_NO_BATCH")) != 0;  // (A/B: turns only)
+    can = can && !off && eng_.batch_ok() && (me.max_drafts == 0 || eng_.batch_rows() >= 4);
+#else
+    can = false;
+#endif
+    for (;;) {
+      if (!can) break;
+      if (!gen_wait_.empty()) {  // lead: this step and the waiting ones of the same kind that fit one pass
+        std::vector<GenStep*> st{&me};
+        const size_t most = me.max_drafts > 0 ? (size_t)eng_.batch_rows() / 2 : (size_t)eng_.batch_rows();
+        for (GenStep* g : gen_wait_) {
+          if ((g->max_drafts > 0) == (me.max_drafts > 0) && st.size() < most) st.push_back(g);
+          else g->alone = true;
+        }
+        gen_wait_.clear();
+        run_steps(st);
+        gen_cv_.notify_all();
+        return;
+      }
+      if (gen_active_ - (int)gen_wait_.size() <= 1) break;  // nobody else will reach a step: alone
+      gen_wait_.push_back(&me);
+      gen_cv_.wait(lk, [&] { return me.done || me.alone || gen_active_ - (int)gen_wait_.size() <= 0; });
+      gen_wait_.erase(std::remove(gen_wait_.begin(), gen_wait_.end(), &me), gen_wait_.end());
+      use_slot(slot);
+      eng_.cancel = nullptr;  // (a prompt step of another request may have set its own)
+      if (me.done) return;
+      if (me.alone) break;
+      // (every generating request waits: the next one leads)
+    }
+    run_steps({&me});
   }
   std::atomic<uint64_t> counter_{0};
  public:
@@ -561,6 +658,7 @@ class Server {
     std::lock_guard<std::mutex> lock(mu_);
     bool any = false;
     for (int k = 0; k < (int)slots_.size(); ++k) {  // (--slots: each slot's; a request takes its own back with use_slot)
+      if (slots_.size() > 1 && slots_[k].busy) continue;  // (a running request's: mid-answer)
       use_slot(k);
       if (!sess_cap_ || cur_saved_ || cached_.size() < 1024) continue;
       save_current();
@@ -1449,6 +1547,15 @@ class Server {
     int dr_steps[2] = {0, 0}, dr_drafts[2] = {0, 0}, dr_acc[2] = {0, 0}, dr_cur = 0;
     size_t call_from = std::string::npos;  // where the open tool call's text starts (after <|tool_call>)
     int n_tool_tok = 0, n_tool_fixed = 0;   // tokens drawn inside tool calls; of them, a refused first choice
+    int n_batched = 0;  // (--slots: steps run in one pass with other requests')
+    ++gen_active_;
+    struct GenLeave {  // (requests waiting for this one to lead their steps run them themselves)
+      Server& s;
+      ~GenLeave() {
+        --s.gen_active_;
+        s.gen_cv_.notify_all();
+      }
+    } gen_leave{*this};
     for (int i = 0; i < max_tokens; ++i) {
       int t;
       if (!forced.empty()) {
@@ -1556,22 +1663,24 @@ class Server {
       }
       take_turns(lock, my_slot);  // (--slots; the drafts are settled here)
       eng_.cancel = nullptr;      // (another request's prompt may have set its own)
-      if (spec && (int)cached_.size() + 4 < eng_.ctx && i + 1 < max_tokens) {
-        drafts = eng_.mtp_draft(t, std::min(eng_.opt.mtp_drafts, max_tokens - i - 1));
-        const auto& lv = eng_.verify(t, drafts);
-        cached_.push_back(t);
-        vrows.assign(lv.begin(), lv.begin() + (1 + drafts.size()) * V);
+      GenStep st;
+      st.slot = my_slot;
+      st.tok = t;
+      st.max_drafts = spec && (int)cached_.size() + 4 < eng_.ctx && i + 1 < max_tokens ? std::min(eng_.opt.mtp_drafts, max_tokens - i - 1) : 0;
+      gen_step(lock, st, my_slot);
+      n_batched += st.batched ? 1 : 0;
+      cached_.push_back(t);
+      if (st.max_drafts > 0) {
+        drafts = std::move(st.drafts);
+        vrows = std::move(st.rows);
         logits.assign(vrows.begin(), vrows.begin() + V);
         acc = 0;
         n_drafts += (int)drafts.size();
-#ifdef ARC_ZERO
-        dr_cur = eng_.last_draft_dflash() ? 1 : 0;
-#endif
+        dr_cur = st.dflash ? 1 : 0;
         ++dr_steps[dr_cur];
         dr_drafts[dr_cur] += (int)drafts.size();
       } else {
-        logits = eng_.forward(&t, 1);
-        cached_.push_back(t);
+        logits = std::move(st.rows);
       }
     }
     if (!drafts.empty()) eng_.verify_done((int)acc);  // the loop ended before all drafts were decided
@@ -1638,6 +1747,7 @@ class Server {
       fprintf(stderr, " | DFlash2 %d steps, %d/%d drafts accepted | MTP %d steps, %d/%d", dr_steps[1], dr_acc[1],
               dr_drafts[1], dr_steps[0], dr_acc[0], dr_drafts[0]);
     if (n_tool_fixed) fprintf(stderr, " | tool call: %d of %d tokens corrected", n_tool_fixed, n_tool_tok);
+    if (n_batched) fprintf(stderr, " | %d steps batched with other slots", n_batched);
     fprintf(stderr, "\n");
 #ifdef ARC_ZERO
     // (ARC_PROF_REQ=1: the GPU time by kernel of each request, for diagnosis; every kernel is timed, which costs time)

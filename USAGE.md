@@ -193,10 +193,11 @@ requests take turns step by step (a piece of up to 8,192 prompt tokens, or one g
 pass), sharing the GPU time evenly, so a short question is answered while the other session reads a long prompt
 (35B, a 46K-token prompt in one slot: a question sent 2 s later was answered after 9.6 s instead of after the whole
 prompt). Each slot gets the context that fits two of them (`-Ctx auto`: 27B 2 x 49,152 tokens, 35B 2 x 110,592, its
-expert cache 77 -> 67 % of the experts). The answers are the same as with one slot (greedy text identical; the
-engine's logits bit-identical alone or interleaved). Together, two answers take about as long as one after the
-other: the gain is that neither waits for the other's whole answer. Real batching (both tokens in one GPU step) is
-queued as QUEUE 20.4-20.6.
+expert cache 77 -> 67 % of the experts). When both are writing their answers, their next tokens (with their
+drafts) go through the model in one GPU pass, so the weights are read once for both: two answers at once, 27B
+7.3 -> 10.5 tokens/s together for prose, 11.6 -> 15.4 for code; 35B 20.2 -> 24.7 and 29.0 -> 30.7 (Qwen models;
+Gemma and Flash Next take turns only). The answers are the same as with one slot (greedy text identical; the
+engine's logits bit-identical alone, interleaved or batched). `ARC_NO_BATCH=1` turns the batching off (turns only).
 
 **Qwen3.8 Flash Next (arcinferzero only).** A MoE model with 512 experts fetched from the SSD (like the 35B). Run
 `serverz.exe` with `-m` pointing to the first file (`...-IQ3_S-00001-of-00002.gguf`); the second file must be in the
