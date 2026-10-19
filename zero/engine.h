@@ -18,6 +18,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 
 struct GpuWeight {
   uint32_t type = 0;  // GGUF type of the raw rows (BF16/F16/F32 matrices are requantized to Q8_0)
@@ -171,6 +172,7 @@ class Engine {
   // Frees everything on the GPU (the server switches models in one process).
   ~Engine() {
     if (cl_.queue) clFinish(cl_.queue);
+    for (auto& [m, p] : orig_ptrs_) m->ptr = p;  // (slots: each buffer object frees its own memory)
     for (auto& kv : kcache_) clReleaseKernel(kv.second);
     for (cl_program p : progs_) clReleaseProgram(p);
     for (auto it = mems_.rbegin(); it != mems_.rend(); ++it)  // sub-buffers (created later) before their parents
@@ -578,6 +580,114 @@ class Engine {
     return true;
   }
 
+  // ---------------------------------------------------------------- conversation slots (server --slots)
+  // Several conversations held at once, one step at a time: each slot has its own KV caches, DeltaNet and conv
+  // states (with Flash Next's PLE history and QSA tails inside), QSA pooled keys, the MTP block's KV cache and
+  // hidden states, DFlash2's context rings, snapshots, position and drafter choice. bind(s) points the engine's state
+  // buffers at slot s's memory without copying: the buffer objects stay the same, only their device addresses
+  // change, and kernel arguments are set at every launch. Weights, working buffers and the expert cache are shared.
+  // Bind only between steps (a verification pass settled with verify_done()).
+  int slot_count() const { return std::max(1, (int)slot_ptrs_.size()); }
+  // the drafter choice back to its start (DFlash2 first): a conversation that starts over in a slot
+  void reset_drafter_choice() {
+    dfl_ema_ = 4.0;
+    dfl_wait_ = 0;
+    dfl_gap_ = 8;
+    dfl_probe_ = false;
+  }
+  int bound_slot() const { return slot_; }
+  void add_slots(int n) {
+    if (n <= 1 || !slot_ptrs_.empty() || opt.dry) return;
+    std::set<cl_mem> seen;
+    auto add = [&](cl_mem& f) {
+      if (f && seen.insert(f).second) roles_.push_back(&f);
+    };
+    auto add_layer = [&](Layer& L) {
+      for (cl_mem* f : {&L.kq, &L.vq, &L.ksc, &L.vsc, &L.vq4, &L.vsc4, &L.conv_state, &L.S, &L.pk}) add(*f);
+      if (!opt.attn_int8) { add(L.kc); add(L.vc); }
+    };
+    for (auto& L : layers_) add_layer(L);
+    if (mtp_block_) add_layer(mtp_);
+    add(hlast_);
+    add(hpend_);
+    for (auto& D : dfl_l_) { add(D.rk); add(D.rv); }
+    // views into those buffers (the PLE history and QSA tails in a recurrent state) follow their buffer
+    for (ZMem* m : zrt::mems) {
+      if (m->owner) continue;
+      for (size_t i = 0; i < roles_.size(); ++i) {
+        const ZMem* r = *roles_[i];
+        if (m != r && m->ptr >= r->ptr && m->ptr < r->ptr + r->size) {
+          subs_.push_back({m, (int)i, (size_t)(m->ptr - r->ptr)});
+          break;
+        }
+      }
+    }
+    // the addresses the buffer objects had (put back before they are freed); S_next trades places with S
+    for (cl_mem* r : roles_) orig_ptrs_.push_back({*r, (*r)->ptr});
+    for (auto& L : layers_)
+      if (L.S_next) orig_ptrs_.push_back({L.S_next, L.S_next->ptr});
+    for (auto& v : subs_) orig_ptrs_.push_back({v.m, v.m->ptr});
+    slot_ptrs_.assign(n, {});
+    slot_host_.assign(n, SlotHost());
+    for (cl_mem* r : roles_) slot_ptrs_[0].push_back((*r)->ptr);
+    for (int s = 1; s < n; ++s)
+      for (cl_mem* r : roles_) {
+        cl_mem b = buf((*r)->size);
+        fill(b, (*r)->size);
+        slot_ptrs_[s].push_back(b->ptr);
+      }
+    clFinish(cl_.queue);
+  }
+  void bind(int s) {
+    if (s == slot_ || s < 0 || s >= (int)slot_ptrs_.size()) return;
+    if (!last_drafts_.empty()) throw std::runtime_error("bind: a verification pass is not settled");
+    clFinish(cl_.queue);  // (cancellation reads and host snapshots work on the bound buffers)
+    SlotHost& h = slot_host_[slot_];
+    h.pos = pos;
+    h.rope_shift = rope_shift;
+    h.written_hi = written_hi_;
+    h.swa_lo = swa_lo_;
+    h.pend = std::move(pend_toks_);
+    h.ple_prev[0] = ple_prev_[0];
+    h.ple_prev[1] = ple_prev_[1];
+    h.snaps = std::move(snaps_);
+    h.hsnap = std::move(hsnap_);
+    h.dfl_ema = dfl_ema_;
+    h.dfl_wait = dfl_wait_;
+    h.dfl_gap = dfl_gap_;
+    h.dfl_probe = dfl_probe_;
+    for (size_t i = 0; i < roles_.size(); ++i) slot_ptrs_[slot_][i] = (*roles_[i])->ptr;
+    slot_ = s;
+    SlotHost& g = slot_host_[s];
+    pos = g.pos;
+    rope_shift = g.rope_shift;
+    written_hi_ = g.written_hi;
+    swa_lo_ = g.swa_lo;
+    pend_toks_ = std::move(g.pend);
+    ple_prev_[0] = g.ple_prev[0];
+    ple_prev_[1] = g.ple_prev[1];
+    snaps_ = std::move(g.snaps);
+    hsnap_ = std::move(g.hsnap);
+    dfl_ema_ = g.dfl_ema;
+    dfl_wait_ = g.dfl_wait;
+    dfl_gap_ = g.dfl_gap;
+    dfl_probe_ = g.dfl_probe;
+    for (size_t i = 0; i < roles_.size(); ++i) (*roles_[i])->ptr = slot_ptrs_[s][i];
+    for (auto& v : subs_) v.m->ptr = (*roles_[v.role])->ptr + v.off;
+    attn_in_ready_ = ffn_in_ready_ = false;
+    rt_pos_[0] = rt_pos_[1] = -1;
+  }
+  // GPU bytes of one more slot with a context of c tokens: the KV caches (and QSA pooled keys), the recurrent states,
+  // the MTP block's hidden states, DFlash2's rings, the snapshots
+  size_t slot_bytes(int c) const {
+    size_t n = ctx_bytes(c) - ctx_buf_bytes(c);
+    for (const Layer& L : layers_)
+      if (hp.recurrent(L.il)) n += state_bytes() + conv_bytes();
+    if (has_mtp) n += (size_t)(1 + max_drafts()) * hp.n_embd * 4;
+    n += dfl_l_.size() * 2 * (size_t)dfl_R_ * dfl_nkv_ * 128 * 4;
+    return n + snapshot_bytes();
+  }
+
   // ---------------------------------------------------------------- saved conversations (the server's session cache)
   // Everything a conversation leaves in the engine after `pos` positions: the K/V blocks and scales of every layer
   // that owns a KV cache (full-attention layers: positions [0, pos); sliding-window layers only from n_swa positions
@@ -745,6 +855,24 @@ class Engine {
     std::vector<uint8_t> h;
   };
   HostSnap hsnap_;
+  // ---- conversation slots (see bind): the state buffers' fields, each slot's device addresses for them, the views
+  // inside them, the addresses the buffer objects were created with, the host state of the slots not bound
+  struct SlotHost {
+    int pos = 0, rope_shift = 0, written_hi = 0, swa_lo = 0, ple_prev[2] = {-1, -1};
+    std::vector<int> pend;
+    std::vector<Snap> snaps;
+    HostSnap hsnap;
+    double dfl_ema = 4.0;
+    int dfl_wait = 0, dfl_gap = 8;
+    bool dfl_probe = false;
+  };
+  struct SlotView { ZMem* m; int role; size_t off; };
+  std::vector<cl_mem*> roles_;
+  std::vector<std::vector<char*>> slot_ptrs_;
+  std::vector<SlotView> subs_;
+  std::vector<std::pair<ZMem*, char*>> orig_ptrs_;
+  std::vector<SlotHost> slot_host_;
+  int slot_ = 0;
   // ---- cancellation (see cancel)
   std::vector<std::vector<uint8_t>> blk_;  // DeltaNet states at the start of the current block
   bool cancelled() {

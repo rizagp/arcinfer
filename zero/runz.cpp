@@ -95,6 +95,8 @@ static int run_main(int argc, char** argv) {
             "accuracy:\n"
             "  --kl-ref F            KL of the next-token distributions against an f32 reference (tools\\ref_forward)\n"
             "  --kl-decode           with --kl-ref: through the token-by-token generation path\n"
+            "  --slots-check         two conversations (the prompt's halves) alone, then held at once in slots 0 and 1\n"
+            "                        with their steps interleaved: every logit must be bit for bit the same (--mtp: drafts)\n"
             "  --perplexity F        perplexity of a text file (llama-perplexity method: second half of each chunk scored)\n"
             "  --ppl-ctx N           chunk length (default 512)   --ppl-chunks N   chunks to score (default all)\n"
             "  --ppl-dump F          write the chunks' token ids to F (for ref_forward)\n"
@@ -110,7 +112,7 @@ static int run_main(int argc, char** argv) {
   int ppl_ctx = 512, ppl_chunks = 0, ppl_score_last = 0, ppl_score_step = 0;
   int n_gen = 16, chunk = 0, ctx = 0, bench_pp = 0, feed_step = 0;
   EngineOptions eo;
-  bool prof = false, show = false, prof_gen = false, kl_decode = false;
+  bool prof = false, show = false, prof_gen = false, kl_decode = false, slots_check = false;
   std::string dump_logits;  // every generation step's logits (f32), to compare two builds / settings bitwise
   for (int i = 2; i < argc; ++i) {
     std::string a = argv[i];
@@ -151,6 +153,7 @@ static int run_main(int argc, char** argv) {
     else if (a == "--mtp-drafts") eo.mtp_drafts = atoi(argv[++i]);
     else if (a == "--mtp-min-p") eo.mtp_min_p = (float)atof(argv[++i]);
     else if (a == "--kl-ref") kl_ref = argv[++i];
+    else if (a == "--slots-check") slots_check = true;
     else if (a == "--kl-decode") kl_decode = true;  // with --kl-ref of every position: feed the prompt token by token
     else if (a == "--perplexity") ppl_file = argv[++i];
     else if (a == "--ppl-dump") ppl_dump = argv[++i];
@@ -186,6 +189,82 @@ static int run_main(int argc, char** argv) {
   printf("loaded: %d layers, n_embd %d, vocab %d | GPU buffers %.2f GiB | W8 %s | chunk %d | ctx %d | load %.0f ms\n",
          eng.hp.n_layer, eng.hp.n_embd, eng.hp.n_vocab, eng.gpu_bytes / 1073741824.0,
          eng.w8_resident ? "resident" : "just-in-time", eng.max_chunk, eng.ctx, eng.load_ms);
+
+  if (slots_check) {
+    // conversation A = the first half of the prompt, B = the second half; each prompt fed in two calls, then n_gen
+    // greedy tokens (with drafts when the engine drafts). Alone: one after the other in slot 0; together: A in slot 0,
+    // B in slot 1, every call alternating. The FNV hash of every logits row read is compared.
+    if (toks.size() < 8) { fprintf(stderr, "--slots-check needs a prompt of at least 8 tokens\n"); return 1; }
+    eng.add_slots(2);
+    const int V = eng.hp.n_vocab;
+    auto fnv = [](const float* p, size_t n) {
+      uint64_t h = 1469598103934665603ull;
+      const uint8_t* b = (const uint8_t*)p;
+      for (size_t i = 0; i < n * 4; ++i) h = (h ^ b[i]) * 1099511628211ull;
+      return h;
+    };
+    auto argmax = [&](const float* p) { return (int)(std::max_element(p, p + V) - p); };
+    struct Conv {
+      std::vector<int> P, out;
+      std::vector<uint64_t> h;
+      std::vector<float> lg;
+      int stage = 0;
+    };
+    // one call of a conversation: prompt part 1, prompt part 2, then a generation step (a verification pass with drafts)
+    auto step = [&](Conv& c) {
+      const int half = (int)c.P.size() / 2;
+      if (c.stage == 0) {
+        eng.reset();
+        eng.reset_drafter_choice();
+        c.lg = eng.forward(c.P.data(), half);
+        c.h.push_back(fnv(c.lg.data(), V));
+      } else if (c.stage == 1) {
+        c.lg = eng.forward(c.P.data() + half, (int)c.P.size() - half);
+        c.h.push_back(fnv(c.lg.data(), V));
+      } else {
+        const int t = argmax(c.lg.data());
+        c.out.push_back(t);
+        if (eng.has_mtp) {
+          const std::vector<int> d = eng.mtp_draft(t, eng.opt.mtp_drafts);
+          const std::vector<float>& lv = eng.verify(t, d);
+          size_t acc = 0;
+          while (acc < d.size() && argmax(&lv[acc * V]) == d[acc]) ++acc;
+          for (size_t k = 0; k <= acc; ++k) c.h.push_back(fnv(&lv[k * V], V));
+          eng.verify_done((int)acc);
+          c.out.insert(c.out.end(), d.begin(), d.begin() + acc);
+          c.lg.assign(lv.begin() + acc * V, lv.begin() + (acc + 1) * V);
+        } else {
+          c.lg = eng.forward(&t, 1);
+          c.h.push_back(fnv(c.lg.data(), V));
+        }
+      }
+      ++c.stage;
+    };
+    auto done = [&](const Conv& c) { return c.stage >= 2 && (int)c.out.size() >= n_gen; };
+    const int mid = (int)toks.size() / 2;
+    Conv a1, b1, a2, b2;
+    a1.P = a2.P = std::vector<int>(toks.begin(), toks.begin() + mid);
+    b1.P = b2.P = std::vector<int>(toks.begin() + mid, toks.end());
+    for (Conv* c : {&a1, &b1})
+      while (!done(*c)) step(*c);
+    while (!done(a2) || !done(b2)) {
+      if (!done(a2)) { eng.bind(0); step(a2); }
+      if (!done(b2)) { eng.bind(1); step(b2); }
+    }
+    eng.bind(0);
+    bool ok = true;
+    for (auto [x, y, name] : {std::tuple{&a1, &a2, "A"}, std::tuple{&b1, &b2, "B"}}) {
+      size_t same = 0;
+      while (same < x->h.size() && same < y->h.size() && x->h[same] == y->h[same]) ++same;
+      const bool eq = same == x->h.size() && same == y->h.size() && x->out == y->out;
+      ok = ok && eq;
+      printf("conversation %s: %zu prompt tokens, %zu generated, %zu logits rows: %s", name, x->P.size(), x->out.size(),
+             x->h.size(), eq ? "bit-identical\n" : "DIFFERENT");
+      if (!eq) printf(" (first difference at row %zu of %zu / %zu)\n", same, x->h.size(), y->h.size());
+    }
+    printf("slots check: %s\n", ok ? "passed" : "FAILED");
+    return ok ? 0 : 2;
+  }
 
   if (!ppl_file.empty()) {
     // Perplexity like llama-perplexity: split the tokenized text into ppl_ctx chunks, evaluate each from an
