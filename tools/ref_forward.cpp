@@ -7,9 +7,82 @@
 #include <cstdio>
 #include <sstream>
 #include <algorithm>
+#include <filesystem>
+#include <map>
+#include <mutex>
 
 static GgufFile* F;
 static std::string A;
+
+// An arcinferzero package (zero/gguf_pack.h) holds its routed experts in the expert file next to it, in the GPU raw
+// form of zero/expert_store.h (per expert one record: gate, up, down; each superblock as src/quants.h gpu_raw_sb
+// writes it, rows of small-block types padded to a multiple of 256). The matrices of one layer are turned back into
+// GGUF blocks once and kept until the next layer.
+struct PackExperts {
+  struct Layer { uint32_t type[3]; uint64_t part[3], rec, off; };
+  FILE* f = nullptr;
+  std::vector<Layer> layers;
+  int cur_layer = -1;
+  std::map<std::pair<int, int>, std::vector<uint8_t>> mats;  // (expert, matrix) -> GGUF blocks, N rows of K
+  std::mutex mu;  // (the MoE loop runs tokens on several threads; a map node stays put while others are added)
+};
+static PackExperts* PX = nullptr;
+static void open_package(const std::string& gguf) {
+  if (!F->has("arcinferzero.package")) return;
+  const std::string path = (std::filesystem::path(gguf).parent_path() / F->get_str("arcinferzero.experts_file")).string();
+  PX = new PackExperts;
+  PX->f = fopen(path.c_str(), "rb");
+  if (!PX->f) { fprintf(stderr, "cannot open %s\n", path.c_str()); exit(1); }
+  struct { uint32_t magic, version; uint64_t fp, layers, experts, bytes; } h{};
+  if (fread(&h, sizeof h, 1, PX->f) != 1 || h.magic != 0x58435241u) { fprintf(stderr, "not an expert file: %s\n", path.c_str()); exit(1); }
+  PX->layers.resize(h.layers);
+  if (fread(PX->layers.data(), sizeof(PackExperts::Layer), h.layers, PX->f) != h.layers) { fprintf(stderr, "short expert file header\n"); exit(1); }
+  fprintf(stderr, "ref_forward: experts from the package's expert file %s\n", path.c_str());
+}
+// one superblock from its GPU raw form back to GGUF bytes (the inverse of gpu_raw_sb)
+static void gguf_sb(uint32_t type, const uint8_t* src, uint8_t* dst) {
+  const size_t bb = gguf_sb_bytes(type);
+  if (type == GGML_Q4_0 || type == GGML_Q8_0 || type == GGML_IQ4_NL || type == GGML_Q2_0) {
+    const int qb = type == GGML_Q8_0 ? 32 : 16, nb = type == GGML_Q2_0 ? 4 : 8;
+    for (int b = 0; b < nb; ++b) {
+      memcpy(dst + (2 + qb) * b, src + 2 * b, 2);
+      memcpy(dst + (2 + qb) * b + 2, src + 2 * nb + qb * b, qb);
+    }
+    return;
+  }
+  if (gpu_d_last(type)) {
+    memcpy(dst, src + bb - 2, 2);
+    memcpy(dst + 2, src, bb - 2);
+    return;
+  }
+  memcpy(dst, src, bb);
+}
+// matrix m (0 gate, 1 up, 2 down) of expert e in layer il: N rows of K values as GGUF blocks (row bytes K / blk * bytes)
+static const std::vector<uint8_t>& pack_matrix(int il, int m, int e, int N, int K) {
+  std::lock_guard<std::mutex> lock(PX->mu);
+  if (PX->cur_layer != il) { PX->mats.clear(); PX->cur_layer = il; }
+  auto it = PX->mats.find({e, m});
+  if (it != PX->mats.end()) return it->second;
+  const PackExperts::Layer& L = PX->layers.at(il);
+  const uint32_t ty = L.type[m];
+  const size_t bb = gguf_sb_bytes(ty), bp = raw_padded_sb_bytes(ty);
+  const int Kp = padded_k(K);
+  const size_t nsb = (size_t)Kp / 256, raw_row = nsb * bp;
+  int blk = 0, bytes = 0;
+  ggml_block_info(ty, blk, bytes);
+  const size_t row = (size_t)K / blk * bytes;  // (the GGUF row: the first K values of the padded one)
+  uint64_t off = L.off + (uint64_t)e * L.rec;
+  for (int i = 0; i < m; ++i) off += L.part[i];
+  std::vector<uint8_t> raw(raw_row * N);
+  _fseeki64(PX->f, (long long)off, SEEK_SET);
+  if (fread(raw.data(), 1, raw.size(), PX->f) != raw.size()) { fprintf(stderr, "short read in the expert file\n"); exit(1); }
+  std::vector<uint8_t> out(row * N), sb(bb * nsb);
+  for (int n = 0; n < N; ++n) {
+    for (size_t b = 0; b < nsb; ++b) gguf_sb(ty, raw.data() + n * raw_row + b * bp, sb.data() + b * bb);
+    memcpy(out.data() + n * row, sb.data(), row);
+  }
+  return PX->mats[{e, m}] = std::move(out);
+}
 
 static int hp(const std::string& k, int def = -1) { return (int)F->get_int(A + "." + k, def); }
 
@@ -79,8 +152,27 @@ static float bf16f(uint16_t h) {
 // y[N] = W_e x for routed expert e of a tools/convert_gsq.py tensor pair (2-bit codes in the GPU layout of
 // kernels/moe.cl, bf16 scale per 128 inputs), decoded independently of the GPU kernels.
 // Standard GGUF expert tensors ([n_expert][N][K] of any type with a dequantizer): row by row.
-static void expert_mv(const std::string& name, int e, int N, int K, const float* x, float* y) {
+static void expert_mv(const std::string& name, int e, int N, int K, const float* x0, float* y) {
   const GgufTensor& q = F->get(name + ".weight");
+  // (REF_Q: the expert inputs rounded as arcinfer rounds them, like matmul's)
+  const std::vector<float> xq = fake_quant(name, std::vector<float>(x0, x0 + K), K);
+  const float* x = xq.data();
+  if (!q.data && PX) {  // (a package: the expert file)
+    const int il = std::stoi(name.substr(4, name.find('.', 4) - 4));
+    const int m = name.find("gate") != std::string::npos ? 0 : name.find("_up_") != std::string::npos ? 1 : 2;
+    const std::vector<uint8_t>& w8 = pack_matrix(il, m, e, N, K);
+    int blk = 0, bytes = 0;
+    ggml_block_info(q.type, blk, bytes);
+    const size_t rb = (size_t)K / blk * bytes;
+    std::vector<float> w(K);
+    for (int n = 0; n < N; ++n) {
+      dequant_row(q.type, w8.data() + (size_t)n * rb, K, w.data());
+      double acc = 0;
+      for (int k = 0; k < K; ++k) acc += (double)w[k] * x[k];
+      y[n] = (float)acc;
+    }
+    return;
+  }
   if (!F->find(name + ".scale")) {
     const size_t rb = q.nbytes / ((size_t)q.dims[2] * N);
     std::vector<float> w(K);
@@ -663,6 +755,7 @@ int main(int argc, char** argv) {
   GgufFile f(argv[1]);
   F = &f;
   A = f.get_str("general.architecture");
+  open_package(argv[1]);
   std::vector<int> toks;
   { std::stringstream ss(argv[2]); std::string s; while (std::getline(ss, s, ',')) toks.push_back(std::stoi(s)); }
   const int T = (int)toks.size();
