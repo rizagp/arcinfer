@@ -416,12 +416,17 @@ static int run_main(int argc, char** argv) {
       } else if (ref.size() == V * toks.size() && (int)toks.size() <= eng.max_chunk) {
         const std::vector<float> last(lg.begin(), lg.end());  // logits_at() overwrites the shared logits buffer
         double sum = 0, mx = 0;
+        int agree = 0;  // (positions whose top token is the reference's)
         for (size_t r = 0; r < toks.size(); ++r) {
-          const double k = kl_of(eng.logits_at((int)r), ref.data() + r * V);
+          const std::vector<float>& l = eng.logits_at((int)r);
+          const float* rr = ref.data() + r * V;
+          const double k = kl_of(l, rr);
           sum += k;
           mx = std::max(mx, k);
+          agree += std::max_element(l.begin(), l.end()) - l.begin() == std::max_element(rr, rr + V) - rr;
         }
-        printf("\nKL(ref || arcinfer) = %.5f (mean over %zu positions, max %.5f)", sum / toks.size(), toks.size(), mx);
+        printf("\nKL(ref || arcinfer) = %.5f (mean over %zu positions, max %.5f), top token agrees %d / %zu",
+               sum / toks.size(), toks.size(), mx, agree, toks.size());
         std::copy(last.begin(), last.end(), const_cast<float*>(lg.data()));
       }
     }

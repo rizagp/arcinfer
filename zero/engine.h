@@ -3160,15 +3160,49 @@ class Engine {
       size_t gws[2] = {256, (size_t)Mp}, lws[2] = {256, 1};
       run("hc_norm", k, 2, gws, lws);
     }
-    matmul("hc_down", down, Mp, hc_lo_, LD, 0, 0, act32);
-    {
-      cl_kernel k = kernel("ops", "", "hc_lo_quant");
-      int lr = LR, ld = LD, kp = KP, hc = HC, mm = Mp, tt = T, a32 = act32;
-      set_args(k, 0, hc_lo_, lr, ld, kp, hc, mm, tt, aq_, asc_, absum_, a32);
-      size_t gws[2] = {(size_t)16 * KP / 256, (size_t)Mp}, lws[2] = {16, 1};
-      run("hc_lo", k, 2, gws, lws);
+    // (ARC_HC_F32=1: the prompt chunk's mixers with f32 activations as single tokens have them, hc_gemm_f32; Flash Next
+    //  is sensitive there: the f32 reference with int8 mixer inputs drifts by KL 0.06 on its own)
+    // (1: both projections, 2: the down projection only, 3: the up projection only)
+    // (4: the up projection's input as two int8 passes, the values then their rounding residual, accumulated)
+    static const int f32_mode = getenv("ARC_HC_F32") ? atoi(getenv("ARC_HC_F32")) : 0;
+    static bool hc_logged = false;
+    if (f32_mode && !hc_logged) {
+      hc_logged = true;
+      static const char* names[] = {"int8", "f32 down + up", "f32 down", "f32 up", "two-pass int8 up"};
+      fprintf(stderr, "HC mixers of prompt chunks: %s (ARC_HC_F32=%d)\n", f32_mode >= 0 && f32_mode <= 4 ? names[f32_mode] : "int8", f32_mode);
     }
-    matmul("hc_up", up, Mp, hc_gate_, W, 0, 0, act32);
+    const bool f32_down = f32_mode == 1 || f32_mode == 2, f32_up = f32_mode == 1 || f32_mode == 3;
+    auto gemm_f32 = [&](cl_mem in, int ld_in, int K, int lo_in, const GpuWeight& w, int N, cl_mem C, int ldc) {
+      cl_kernel k = kernel("ops", "", "hc_gemm_f32");
+      int ldi = ld_in, kk = K, li = lo_in, lr = LR, hc = HC, nn = N, lc = ldc, mm = Mp;
+      set_args(k, 0, in, ldi, kk, li, lr, hc, w.raw, nn, C, lc, mm);
+      size_t gws[2] = {(size_t)256 * ((N + 255) / 256), (size_t)(Mp + 15) / 16}, lws[2] = {256, 1};
+      run("hc_gemm_f32", k, 2, gws, lws);
+    };
+    if (f32_down)
+      gemm_f32(hc_xn_, HC * E, HC * E, 0, down, LD, hc_lo_, LD);
+    else
+      matmul("hc_down", down, Mp, hc_lo_, LD, 0, 0, act32);
+    if (f32_up) {
+      gemm_f32(hc_lo_, LD, KP, 1, up, W, hc_gate_, W);
+    } else {
+      {
+        cl_kernel k = kernel("ops", "", "hc_lo_quant");
+        int lr = LR, ld = LD, kp = KP, hc = HC, mm = Mp, tt = T, a32 = act32;
+        set_args(k, 0, hc_lo_, lr, ld, kp, hc, mm, tt, aq_, asc_, absum_, a32);
+        size_t gws[2] = {(size_t)16 * KP / 256, (size_t)Mp}, lws[2] = {16, 1};
+        run("hc_lo", k, 2, gws, lws);
+      }
+      matmul("hc_up", up, Mp, hc_gate_, W, 0, 0, act32);
+      if (f32_mode == 4) {
+        cl_kernel k = kernel("ops", "", "hc_lo_quant_res");
+        int lr = LR, ld = LD, kp = KP, hc = HC, mm = Mp, tt = T, a32 = act32;
+        set_args(k, 0, hc_lo_, lr, ld, kp, hc, mm, tt, aq_, asc_, absum_, a32);
+        size_t gws[2] = {(size_t)16 * KP / 256, (size_t)Mp}, lws[2] = {16, 1};
+        run("hc_lo", k, 2, gws, lws);
+        matmul("hc_up", up, Mp, hc_gate_, W, 0, 1, act32);
+      }
+    }
     {
       cl_kernel k = kernel("ops", "", "hc_gate_mean_quant");
       int e = E, hc = HC, mm = Mp, tt = T, a32 = act32;

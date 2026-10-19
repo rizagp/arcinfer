@@ -2781,6 +2781,30 @@ __kernel void hc_lo_quant(__global const float* lo, int LR, int LD, int KP, int 
   quant_store16(v, s, m, M, KP, aq, asc, absum, act32);
 }
 
+// The rounding residual of hc_lo_quant (same values and scales: v - q * amax / 127), quantized for a second up pass
+// that accumulates (ARC_HC_F32=4: two-pass int8 up input). grid (16 * KP / 256, M), local (16, 1).
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void hc_lo_quant_res(__global const float* lo, int LR, int LD, int KP, int HC, int M, int M_valid,
+                              __global char* aq, __global float* asc, __global ushort* absum, int act32) {
+  const int m = get_global_id(1), s = get_group_id(0), lane = get_sub_group_local_id();
+  const float inv_hc = 1.0f / (float)HC;
+  float v[16];
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    const int k = s * 256 + 16 * lane + i;
+    v[i] = m < M_valid && k < LR ? silu(lo[(size_t)m * LD + k] * inv_hc) : 0.0f;
+  }
+  float amax = 0.0f;
+#pragma unroll
+  for (int i = 0; i < 16; ++i) amax = fmax(amax, fabs(v[i]));
+  if (act32) amax = fmax(amax, intel_sub_group_shuffle_xor(amax, 1));
+  else amax = sub_group_reduce_max(amax);
+  const float inv = amax > 0.0f ? 127.0f / amax : 0.0f, d = amax / 127.0f;
+#pragma unroll
+  for (int i = 0; i < 16; ++i) v[i] -= (float)convert_int_rte(v[i] * inv) * d;
+  quant_store16(v, s, m, M, KP, aq, asc, absum, act32);
+}
+
 // The block input: mixed = mean over the streams of xn * sigmoid(gate) ([M][E], f32 and quantized for the block's
 // projections, K = E). grid (256, M), local (256, 1).
 __attribute__((intel_reqd_sub_group_size(SG)))
@@ -2805,6 +2829,59 @@ __kernel void hc_gate_mean_quant(__global const float* xn, __global const float*
     vstore16(acc * inv_hc, 0, mixed + (size_t)m * E + base);
     quant_store16(v, s, m, M, E, aq, asc, absum, act32);
   }
+}
+
+// The mixers of a prompt chunk with f32 activations (ARC_HC_F32; single tokens always take f32: hc_down1 / hc_up1):
+// C[m][n] = W[n] . x_m for the Q8 superblock rows of hc_down / hc_up (272 bytes per 256 values: 8 f16 scales, one
+// per 32 values, then the 256 int8 values in order; q8sb_dot reads them through the HC_XT order of its inputs). A lane per output column n, a
+// work-group 256 columns x HCF_TM rows: the rows' 256 inputs of a superblock go through local memory once per
+// work-group. lo_in: the inputs are silu(lo / HC) of the low-rank values (k < LR of rows of stride ld_in, zero up to
+// K), else x rows of stride ld_in. grid (256 * ceil(N / 256), ceil(M / HCF_TM)), local (256, 1).
+#ifndef HCF_TM
+#define HCF_TM 16
+#endif
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void hc_gemm_f32(__global const float* x, int ld_in, int K, int lo_in, int LR, int HC,
+                          __global const uchar* wq, int N, __global float* C, int ldc, int M) {
+  __local float xs[HCF_TM * 256];
+  const int li = get_local_id(0), n = get_global_id(0), m0 = get_group_id(1) * HCF_TM, nsb = K / 256;
+  const float inv_hc = 1.0f / (float)HC;
+  float acc[HCF_TM];
+#pragma unroll
+  for (int t = 0; t < HCF_TM; ++t) acc[t] = 0.0f;
+  for (int sb = 0; sb < nsb; ++sb) {
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int i = li; i < HCF_TM * 256; i += 256) {
+      const int t = i / 256, k = sb * 256 + i % 256, m = m0 + t;
+      float v = 0.0f;
+      if (m < M) {
+        if (lo_in) v = k < LR ? silu(x[(size_t)m * ld_in + k] * inv_hc) : 0.0f;
+        else v = x[(size_t)m * ld_in + k];
+      }
+      xs[i] = v;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (n < N) {
+      __global const uchar* p = wq + ((size_t)n * nsb + sb) * 272;
+      for (int l = 0; l < 16; ++l) {
+        if (lo_in && sb * 256 + 16 * l >= LR) break;  // (the up projection's zero padding past LR)
+        const float d = vload_half(l / 2, (__global const half*)p);
+        const uint4 q = vload4(0, (__global const uint*)(p + 16 + 16 * l));
+        const uint w4[4] = {q.x, q.y, q.z, q.w};
+#pragma unroll
+        for (int j = 0; j < 16; ++j) {
+          const float w = d * (float)(char)((w4[j / 4] >> (8 * (j % 4))) & 0xFF);
+          const int k = 16 * l + j;
+#pragma unroll
+          for (int t = 0; t < HCF_TM; ++t) acc[t] += w * xs[t * 256 + k];
+        }
+      }
+    }
+  }
+  if (n < N)
+#pragma unroll
+    for (int t = 0; t < HCF_TM; ++t)
+      if (m0 + t < M) C[(size_t)(m0 + t) * ldc + n] = acc[t];
 }
 
 // res[m][c] += 2 sigmoid(inject[m][c] / HC) * out[m] for rows < M_valid (inject logits: column off of rows of stride

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-19: Flash Next accuracy knob
+
+- `ARC_HC_F32` (arcinferzero, Flash Next prompts; opt-in): the hyper-connection mixers of prompt chunks with more
+  precision. `4` takes the up projection's input as two int8 passes (values, then their rounding residual): KL
+  against the f32 reference 0.0647 -> 0.0483, top token 324 -> 331 of 363, prompts 5-7 % slower. `1` f32 for both
+  projections (KL 0.0369, about 22 % slower), `2` / `3` the down / up projection only. The default (int8) is unchanged.
+- `tools/ref_forward` reads arcinferzero packages; `runz --kl-ref` reports top-token agreement.
+
 ## 2026-10-18: SSD expert prefetch on the copy engine, 35B chunks of 8192, drafter per model, long contexts
 
 - **Deep expert prefetch** (arcinferzero, prompts of >= 2048 tokens): while the GPU runs a layer, a thread reads every
