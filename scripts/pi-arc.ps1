@@ -128,7 +128,7 @@ LAUNCHER OPTIONS
   --slots <N>, -Slots            the server holds N conversations at once (default 1): start the first Pi with
                                  --slots 2, a second Pi (another terminal, plain pi-arc) shares the server; each
                                  keeps its own KV cache and they take turns step by step. Each slot gets the
-                                 context that fits N of them (27B: 2 x 49,152 tokens, 35B: 2 x 110,592)
+                                 context that fits N of them (27B: 2 x 49,152 tokens, 35B: 2 x 65,536, g26: 2 x 32,768)
   --help, -h, -?, /?, help       the short help;  --help-all: this text
 
   A launcher option that differs from what the running server uses restarts the server (loading takes

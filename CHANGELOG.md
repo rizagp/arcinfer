@@ -15,6 +15,8 @@
   Requests in different slots take turns step by step by GPU time used, so two Pi sessions answer at the same time;
   a short question during another slot's 46K-token prompt: 49 -> 9.6 s. Logits bit-identical alone and interleaved
   (`runz --slots-check`: 27B, 35B with MTP and DFlash2, Flash Next with QSA); one slot unchanged.
+- **Batched decoding for Gemma 4** too (26B-A4B: two answers at once 19.8 -> 26.2 tok/s); `--ctx auto` with slots on
+  streamed MoE models aims at 128K in all and keeps at least 32K per slot (26B 2 x 32,768 instead of 2 x 8,192).
 - **Batched decoding over slots** (Qwen dense and MoE): requests generating at the same time run their next tokens
   and drafts in one engine pass (`Engine::forward_batch` / `verify_batch`; every slot drafts in its own state, each
   settles its own drafts). Two answers at once: 27B 7.3 -> 10.5 tok/s together (prose), 11.6 -> 15.4 (code); 35B

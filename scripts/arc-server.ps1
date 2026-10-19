@@ -220,7 +220,7 @@ Options for start / restart:
   -Slots <N>                     hold N conversations at once (arcinferzero; default 1): two Pi sessions each
                                  keep their own KV cache and states and take turns step by step (a prompt piece,
                                  a token), so neither waits for the other's whole answer. Each slot gets the
-                                 context that fits N of them (-Ctx auto; 27B: 2 x 49,152, 35B: 2 x 110,592)
+                                 context that fits N of them (-Ctx auto; 27B: 2 x 49,152, 35B: 2 x 65,536, g26 2 x 32,768)
   -NoStream                      arcinferzero (Level Zero) with every expert on the GPU, as arcinfer: no expert
                                  file, no SSD reads; MoE models then get arcinfer's (smaller) context
   -Vision on|off                 image / audio input (default on). off: the projector (mmproj) is not loaded and

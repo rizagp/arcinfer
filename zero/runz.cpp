@@ -339,7 +339,7 @@ static int run_main(int argc, char** argv) {
         }
       }
       // then the drafted steps of both slots verified in one pass (verify_batch), each settled in its slot
-      while (eng.has_mtp && !done(a3) && !done(b3)) {
+      while (eng.batch_verify_ok() && !done(a3) && !done(b3)) {
         std::vector<std::vector<int>> rows;
         for (int r = 0; r < 2; ++r) {
           Conv& c = r ? b3 : a3;

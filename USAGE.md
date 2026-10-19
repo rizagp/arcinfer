@@ -193,11 +193,12 @@ another terminal with plain `pi-arc` and it shares that server. The GPU still ru
 requests take turns step by step (a piece of up to 8,192 prompt tokens, or one generated token / verification
 pass), sharing the GPU time evenly, so a short question is answered while the other session reads a long prompt
 (35B, a 46K-token prompt in one slot: a question sent 2 s later was answered after 9.6 s instead of after the whole
-prompt). Each slot gets the context that fits two of them (`-Ctx auto`: 27B 2 x 49,152 tokens, 35B 2 x 110,592, its
-expert cache 77 -> 67 % of the experts). When both are writing their answers, their next tokens (with their
+prompt). Each slot gets the context that fits two of them (`-Ctx auto`: 27B 2 x 49,152 tokens; streamed MoE models
+aim at 128K in all and keep at least 32K per slot: 35B 2 x 65,536, its expert cache 76 -> 73 % of the experts, Gemma 4
+26B-A4B 2 x 32,768, 72 -> 65 %). When both are writing their answers, their next tokens (with their
 drafts) go through the model in one GPU pass, so the weights are read once for both: two answers at once, 27B
-7.3 -> 10.5 tokens/s together for prose, 11.6 -> 15.4 for code; 35B 20.2 -> 24.7 and 29.0 -> 30.7 (Qwen models;
-Gemma and Flash Next take turns only). The answers are the same as with one slot (greedy text identical; the
+7.3 -> 10.5 tokens/s together for prose, 11.6 -> 15.4 for code; 35B 20.2 -> 24.7 and 29.0 -> 30.7; Gemma 4 26B-A4B
+19.8 -> 26.2 and 19.6 -> 26.5 (Flash Next takes turns only; Gemma's drafts are verified one slot at a time). The answers are the same as with one slot (greedy text identical; the
 engine's logits bit-identical alone, interleaved or batched). `ARC_NO_BATCH=1` turns the batching off (turns only).
 
 **Qwen3.8 Flash Next (arcinferzero only).** A MoE model with 512 experts fetched from the SSD (like the 35B). Run

@@ -487,7 +487,7 @@ class Server {
     bool can = slots_.size() > 1;
 #ifdef ARC_ZERO
     static const bool off = getenv("ARC_NO_BATCH") && atoi(getenv("ARC_NO_BATCH")) != 0;  // (A/B: turns only)
-    can = can && !off && eng_.batch_ok() && (me.max_drafts == 0 || eng_.batch_rows() >= 4);
+    can = can && !off && (me.max_drafts == 0 ? eng_.batch_ok() : eng_.batch_verify_ok() && eng_.batch_rows() >= 4);
 #else
     can = false;
 #endif
@@ -2234,7 +2234,7 @@ static std::string ctx_key(const std::string& model, const EngineOptions& eo) {
 #ifdef ARC_ZERO
          "|z" + std::to_string((int)(eo.windows_reserve_gb * 10)) + (eo.stream_experts ? "s" : "n") +
          (eo.dflash.empty() ? std::string() : eo.mtp_block ? "|dflash" : "|dflash-only") + (eo.v4 ? "|v4" : "") +
-         (eo.slots > 1 ? "|slots" + std::to_string(eo.slots) : std::string()) + "|" +  // (DFlash2 drafter: its weights and buffers; 4-bit V)
+         (eo.slots > 1 ? "|slots" + std::to_string(eo.slots) + "/32k" : std::string()) + "|" +  // (DFlash2 drafter: its weights and buffers; 4-bit V)
 #endif
          (eo.min_chunk ? "/" + std::to_string(eo.min_chunk) : std::string()) + "|" + (eo.mtp ? "mtp" : "-") + "|" + (eo.attn_int8 ? "i8" : "f32") + "|" + std::to_string(device_global_mem()) +
          "|m13";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts

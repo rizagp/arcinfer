@@ -160,8 +160,12 @@ class Engine {
     if (stream_ && opt.dry) {
       const double left = (double)device_mem() - 1.17 * 1073741824.0 - (double)gpu_bytes + (double)ctx_bytes(ctx) -
                           (double)snapshot_bytes() - (double)opt.stream_reserve;
-      const double room = std::max(0.75 * left, left - (double)ctx_bytes(131072) -
-                                                   (double)(std::max(opt.slots, 1) - 1) * (double)slot_bytes(131072));
+      // (--slots N: 128K of context in all, each slot 128K / N; the floor of 3/4 only as far as it leaves every slot
+      //  32K: with a plain floor Gemma 4 26B-A4B kept 8,192 tokens per slot, its sliding-window rings ~1.4 GB each.
+      //  One slot: as before)
+      const int ns = std::max(opt.slots, 1), per = (131072 / ns + 4095) / 4096 * 4096;
+      auto ctx_all = [&](int c) { return (double)ctx_bytes(c) + (double)(ns - 1) * (double)slot_bytes(c); };
+      const double room = std::max(left - ctx_all(per), std::min(0.75 * left, left - ctx_all(32768)));
       gpu_bytes += (size_t)std::max(0.0, std::min(0.9 * (double)stream_bytes_, room));
     }
     mem_load_ = gpu_bytes;
@@ -664,7 +668,8 @@ class Engine {
   // slot's MTP block KV / hidden state and DFlash2 context take their row. Returns the logits rows (row b: slot b).
   // Dense and MoE Qwen models (not Flash Next or Gemma); every slot's drafts settled; up to 1 + max(drafts, slots - 1)
   // rows. The bound slot stays bound.
-  bool batch_ok() const { return !hp.gemma && !hp.hc && opt.attn_int8 && slot_ptrs_.size() > 1; }
+  bool batch_ok() const { return !hp.hc && opt.attn_int8 && slot_ptrs_.size() > 1; }
+  bool batch_verify_ok() const { return batch_ok() && has_mtp && !gemma_mtp_; }
   const std::vector<float>& forward_batch(const std::vector<int>& slots, const std::vector<int>& toks) {
     const int B = (int)slots.size();
     if (!batch_ok() || B < 1 || B != (int)toks.size() || B > batch_rows_)
@@ -713,6 +718,13 @@ class Engine {
         CL_CHECK(clEnqueueCopyBuffer(cl_.queue, hfin_, hlast_, E4, 0, E4, 0, nullptr, nullptr));
         mtp_rows(&toks[q.row], hfin_, 1, q.pos, false);
       }
+      if (has_mtp && hlast_) {  // (as head() leaves it: the normed hidden state of the row; the drafters start there)
+        float eps = hp.eps;
+        int E = hp.n_embd, M = Mp, TT = 1, r0 = q.row, wh = 1, a32 = 1;
+        set_args(k_rmsnorm_, 0, x_, r0, out_norm_, E, M, TT, eps, aq_, asc_, absum_, hlast_, wh, a32);
+        size_t gws[2] = {256, 1}, lws[2] = {256, 1};
+        run("rmsnorm_quant", k_rmsnorm_, 2, gws, lws);
+      }
       if (dfl_) dfl_commit(0, q.row, 1, q.pos);
       slot_host_[q.slot].pos = q.pos + 1;
     }
@@ -731,7 +743,7 @@ class Engine {
     const int B = (int)slots.size();
     int R = 0;
     for (const auto& r : rows) R += (int)r.size();
-    if (!batch_ok() || gemma_mtp_ || !has_mtp || B < 1 || B != (int)rows.size() || R > batch_rows_)
+    if (!batch_verify_ok() || B < 1 || B != (int)rows.size() || R > batch_rows_)
       throw std::runtime_error("verify_batch: not for this model or too many rows");
     const int bound = slot_;
     for (int b = 0; b < B; ++b) {
@@ -3193,22 +3205,46 @@ class Engine {
       if (L.has_v) matmul("gemm_v", L.wv, Mp, big_, ldq, (nh + nkv) * hd, 0, a_in);
     }
     const std::string hdo = "-DHD=" + std::to_string(hd) + sb_opt(hd);
-    {
+    const int win = L.swa ? hp.n_swa : 0;
+    // RoPE, the K / V writes into the ring (or cache) and the q rows for the attention: rows r0 .. r0 + Tq of the pass
+    // at position p0 (a batched pass: per sequence, in its slot)
+    auto prep = [&](int r0, int Tq, int p0) {
       // (the large register file: it spilled 8.8 KB per thread; E4B 8K prompt 676 -> 685 tok/s, decode 20.4 -> 20.7;
       //  ARC_GPREP_GRF=128: the default file)
       static const bool gprep_small = getenv("ARC_GPREP_GRF") && std::string(getenv("ARC_GPREP_GRF")) == "128";
       cl_kernel k = kernel("ops", (gprep_small ? std::string() : std::string("-cl-intel-256-GRF-per-thread ")) + hdo, "attn_prep_g");
       float eps = hp.eps, base = L.swa ? hp.rope_base_swa : hp.rope_base, qscale = 1.0f;  // Gemma 4: no 1/sqrt(d)
-      int p0 = pos, hv = L.has_v ? 1 : 0, uff = L.rope_ff ? 1 : 0, cap = L.cap, nn = nh, nk = nkv, ld = ldq, TT = T;
-      cl_mem rt = rope_table(L.swa ? 0 : 1, hd, base, L.rope_ff, T);
-      set_args(k, 0, big_, ld, nn, nk, hv, L.q_norm, L.k_norm, TT, p0, eps, base, L.rope_ff ? L.rope_ff : L.q_norm, uff,
-               qscale, qi_, qsc_, L.kq, L.ksc, L.vq, L.vsc, cap, rt);
-      size_t gws[2] = {(size_t)(nh + (own_kv ? nkv : 0)) * 16, (size_t)T}, lws[2] = {16, 1};
+      int pp = p0, hv = L.has_v ? 1 : 0, uff = L.rope_ff ? 1 : 0, cap = L.cap, nn = nh, nk = nkv, ld = ldq, TT = Tq;
+      cl_mem rt = rope_table(L.swa ? 0 : 1, hd, base, L.rope_ff, Tq);
+      set_args(k, 0, from(big_, (size_t)r0 * ldq * 4), ld, nn, nk, hv, L.q_norm, L.k_norm, TT, pp, eps, base,
+               L.rope_ff ? L.rope_ff : L.q_norm, uff, qscale, qi_, qsc_, L.kq, L.ksc, L.vq, L.vsc, cap, rt);
+      size_t gws[2] = {(size_t)(nh + (own_kv ? nkv : 0)) * 16, (size_t)Tq}, lws[2] = {16, 1};
       run("attn_prep", k, 2, gws, lws);
-    }
+    };
     const std::string ao = attn_opts(hd, hpg);
-    const int win = L.swa ? hp.n_swa : 0;
-    if (T <= 8) {
+    if (!batch_.empty()) {  // a batched pass (T <= 8): each sequence's rows with its slot's caches and position
+      const cl_mem qi0 = qi_, qsc0 = qsc_, o0 = o_;
+      for (const BatchSeq& q : batch_) {
+        point_to(q.slot);
+        pos = q.pos;  // (rope_table's position)
+        qi_ = from(qi0, (size_t)q.row * nh * hd);
+        qsc_ = from(qsc0, (size_t)q.row * nh * (hd / 64) * 4);
+        o_ = from(o0, (size_t)q.row * nh * hd * 4);
+        prep(q.row, q.n, q.pos);  // (its rows of big_ in; q rows into the views above)
+        attn_decode_rows(L.swa ? "attn_swa" : "attn_global", L, L.cap, nkv, hpg, hd, q.pos, q.n, win);
+        int& wh = slot_host_[q.slot].written_hi;
+        wh = std::max(wh, q.pos + q.n);
+      }
+      qi_ = qi0;
+      qsc_ = qsc0;
+      o_ = o0;
+      pos = 0;
+    } else {
+      prep(0, T, pos);
+    }
+    if (!batch_.empty()) {
+      // (done above)
+    } else if (T <= 8) {
       attn_decode_rows(L.swa ? "attn_swa" : "attn_global", L, L.cap, nkv, hpg, hd, pos, T, win);
     } else if (!L.swa && hd == 512 && (hpg == 16 || hpg == 4) && !getenv("ARC_NO_PS")) {
       // Gemma 4 global layers: head dims split over 4 sub-groups of 4 q heads (attn_ps): attn_q8 spills there.
@@ -3231,7 +3267,7 @@ class Engine {
       size_t gws[2] = {(size_t)(T + tpw - 1) / tpw * 512, (size_t)nkv}, lws[2] = {512, 1};
       run(L.swa ? "attn_swa" : "attn_global", ka, 2, gws, lws);
     }
-    if (pos + T > written_hi_) written_hi_ = pos + T;
+    if (batch_.empty() && pos + T > written_hi_) written_hi_ = pos + T;
     const int a_out = act32_for(true);
     {
       int K = nh * hd, MM = Mp, TT = T, fused = 1, gelu = 0;  // quantize the attention output for wo
