@@ -1,6 +1,13 @@
 # Changelog
 
-## 2026-10-19: Flash Next accuracy knob
+## 2026-10-19: two conversations at once, Flash Next accuracy knob
+
+- **Conversation slots** (arcinferzero; `serverz --slots N`, `arc-server -Slots N`, `pi-arc --slots N`): the server
+  holds N conversations, each with its own KV caches, DeltaNet / conv states, QSA keys, MTP / DFlash2 state and
+  snapshots (`Engine::add_slots` / `bind`: the state buffers are re-pointed to the slot's memory, no copies).
+  Requests in different slots take turns step by step by GPU time used, so two Pi sessions answer at the same time;
+  a short question during another slot's 46K-token prompt: 49 -> 9.6 s. Logits bit-identical alone and interleaved
+  (`runz --slots-check`: 27B, 35B with MTP and DFlash2, Flash Next with QSA); one slot unchanged.
 
 - `ARC_HC_F32` (arcinferzero, Flash Next prompts; opt-in): the hyper-connection mixers of prompt chunks with more
   precision. `4` takes the up projection's input as two int8 passes (values, then their rounding residual): KL

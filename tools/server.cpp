@@ -40,6 +40,7 @@
 #include "tool_constraint.h"
 #include "sampler.h"
 #include <atomic>
+#include <condition_variable>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -172,6 +173,7 @@ class Server {
       }
     }
     if (tok_.eos >= 0) stop_ids_.push_back(tok_.eos);
+    slots_.resize(e.slot_count());
   }
 
   bool has_vision() const { return vision_ != nullptr || qvision_ != nullptr; }
@@ -242,8 +244,9 @@ class Server {
         std::lock_guard<std::mutex> lk(stats_mu_);
         Json st = Json::object();
         st.set("requests", n_req_);
-        st.set("busy", busy_.load());
+        st.set("busy", busy_.load() > 0);
         st.set("position", eng_.pos);
+        st.set("slots", (int)slots_.size());
         if (!last_timings_.is_null()) st.set("last", last_timings_);
         r.set("stats", st);
       }
@@ -298,7 +301,7 @@ class Server {
   int aud_tok_ = -1, aud_beg_ = -1, aud_end_ = -1;
   // monitoring (/props "stats"): requests served, one in progress, the last one's timings
   std::mutex stats_mu_;
-  std::atomic<bool> busy_{false};
+  std::atomic<int> busy_{0};  // requests running
   int n_req_ = 0;
   Json last_timings_;
   struct MediaEmb {
@@ -312,6 +315,111 @@ class Server {
   std::vector<int> stop_ids_;
   std::mutex mu_;
   std::vector<int> cached_;  // tokens whose state the engine currently holds (positions 0..pos)
+  // ---- conversation slots (--slots N, arcinferzero): the engine holds N conversations (Engine::bind). A request
+  // takes a slot for its whole run and the engine lock for each step (a piece of its prompt, a generated token or
+  // verification pass). Between two steps it hands the engine to a waiting request whose engine time is behind its
+  // own (take_turns), so a request's tokens do not wait behind each 8K-token piece of another's long prompt: the
+  // short steps run until they have used as much time. cached_ / cur_saved_ / last_gen_cut_ are the bound slot's.
+  struct SlotSrv {
+    std::vector<int> cached;
+    bool cur_saved = false, busy = false;
+    int last_gen_cut = 0;
+    uint64_t used = 0;
+    double vtime = 0;  // engine time of its request (ms; a new request starts kNewCredit behind the others)
+    clk::time_point since;
+  };
+  static constexpr double kNewCredit = 10000;  // ms
+  std::vector<SlotSrv> slots_;
+  int cur_slot_ = 0;
+  uint64_t slot_clock_ = 0, turns_ = 0;
+  std::condition_variable slot_cv_, turn_cv_;
+  std::atomic<int> waiting_{0};  // requests waiting for the engine lock (to start, or for their next step)
+  void use_slot(int s) {
+    if (s == cur_slot_) return;
+    SlotSrv& o = slots_[cur_slot_];
+    o.cached = std::move(cached_);
+    o.cur_saved = cur_saved_;
+    o.last_gen_cut = last_gen_cut_;
+    SlotSrv& n = slots_[s];
+    cached_ = std::move(n.cached);
+    cur_saved_ = n.cur_saved;
+    last_gen_cut_ = n.last_gen_cut;
+    eng_.bind(s);
+    cur_slot_ = s;
+  }
+  // the engine lock for a request (counted: the request holding it lets this one start)
+  std::atomic<int> starting_{0};
+  void acquire(std::unique_lock<std::mutex>& lk) {
+    ++waiting_;
+    ++starting_;
+    lk.lock();
+    --starting_;
+    --waiting_;
+    ++turns_;
+    turn_cv_.notify_all();
+  }
+  // between two steps of a request in `slot`: a request starting, or one whose engine time is behind, goes first
+  void take_turns(std::unique_lock<std::mutex>& lk, int slot) {
+    if (slots_.size() < 2 || waiting_ == 0) return;
+    SlotSrv& me = slots_[slot];
+    const clk::time_point now = clk::now();
+    me.vtime += std::chrono::duration<double, std::milli>(now - me.since).count();
+    me.since = now;
+    bool behind = starting_ > 0;
+    for (int k = 0; k < (int)slots_.size(); ++k)
+      behind = behind || (k != slot && slots_[k].busy && slots_[k].vtime < me.vtime);
+    if (!behind) return;
+    const uint64_t t = turns_;
+    ++waiting_;
+    turn_cv_.wait(lk, [&] { return turns_ != t; });
+    --waiting_;
+    ++turns_;
+    turn_cv_.notify_all();
+    me.since = clk::now();
+    use_slot(slot);
+  }
+  // end of the system prompt (the start of the second turn; Gemma's first turn follows <bos>): every conversation of
+  // a client (Pi: its system prompt and tool list, ~4K tokens) shares it
+  size_t system_end(const std::vector<int>& P) const {
+    size_t i0 = 0;
+    while (i0 < P.size() && i0 < 2 && P[i0] != im_start_) ++i0;
+    if (i0 + 1 < P.size() && P[i0] == im_start_ && tok_.piece(P[i0 + 1]) == "system")
+      for (size_t i = i0 + 1; i < P.size(); ++i)
+        if (P[i] == im_start_) return i;
+    return 0;
+  }
+  // A free slot for the request (waits while every slot is in use): the one whose conversation it continues (shares
+  // more than the system prompt), else an empty one, else the one used longest ago (its conversation goes to the
+  // session cache when the request does not continue it).
+  int claim_slot(std::unique_lock<std::mutex>& lk, const std::vector<int>& P) {
+    if (slots_.size() < 2) return 0;
+    slot_cv_.wait(lk, [&] {
+      for (const auto& x : slots_)
+        if (!x.busy) return true;
+      return false;
+    });
+    const size_t sys = system_end(P);
+    int cont = -1, empty = -1, lru = -1;
+    size_t cl = 0;
+    for (int k = 0; k < (int)slots_.size(); ++k) {
+      if (slots_[k].busy) continue;
+      const std::vector<int>& c = k == cur_slot_ ? cached_ : slots_[k].cached;
+      const size_t l = common_prefix(P, c);
+      if (l > sys + 8 && l > cl) { cont = k; cl = l; }
+      if (c.empty() && empty < 0) empty = k;
+      if (lru < 0 || slots_[k].used < slots_[lru].used) lru = k;
+    }
+    const int k = cont >= 0 ? cont : empty >= 0 ? empty : lru;
+    double vmin = -1;
+    for (const auto& x : slots_)
+      if (x.busy && (vmin < 0 || x.vtime < vmin)) vmin = x.vtime;
+    slots_[k].vtime = std::max(0.0, vmin - kNewCredit);
+    slots_[k].since = clk::now();
+    slots_[k].busy = true;
+    slots_[k].used = ++slot_clock_;
+    use_slot(k);
+    return k;
+  }
   std::atomic<uint64_t> counter_{0};
  public:
   int default_think_budget_ = -1;  // -1 = unlimited
@@ -451,9 +559,14 @@ class Server {
  public:
   bool save_held() {
     std::lock_guard<std::mutex> lock(mu_);
-    if (!sess_cap_ || cur_saved_ || cached_.size() < 1024) return false;
-    save_current();
-    return !saved_.empty() && written(saved_.back());
+    bool any = false;
+    for (int k = 0; k < (int)slots_.size(); ++k) {  // (--slots: each slot's; a request takes its own back with use_slot)
+      use_slot(k);
+      if (!sess_cap_ || cur_saved_ || cached_.size() < 1024) continue;
+      save_current();
+      any = (!saved_.empty() && written(saved_.back())) || any;
+    }
+    return any;
   }
 
  private:
@@ -473,6 +586,7 @@ class Server {
       fprintf(stderr, "session cache: cleared %zu saved conversations (%.1f GiB)\n", saved_.size(), total / 1073741824.0);
       while (!saved_.empty()) forget(saved_.size() - 1);
       cur_saved_ = false;
+      for (auto& x : slots_) x.cur_saved = false;
       total = 0;
     }
     r.set("dir", sess_dir_);
@@ -962,7 +1076,7 @@ class Server {
       if (!clips.empty() && (!audio_ || aud_tok_ < 0))
         return rs.send(400, "application/json", err("this model was loaded without an audio encoder (mmproj with audio)").dump());
       if (!urls.empty() || !clips.empty()) {
-        lock.lock();
+        acquire(lock);
         std::vector<int> P2;
         size_t ki = 0, ka = 0;
         auto fnv = [](const std::vector<uint8_t>& bytes) {
@@ -1030,9 +1144,18 @@ class Server {
     }
     if (max_tokens <= 0 || (int)P.size() + max_tokens > eng_.ctx) max_tokens = eng_.ctx - (int)P.size();
 
-    if (!lock.owns_lock()) lock.lock();
-    busy_ = true;
-    struct Idle { std::atomic<bool>& b; ~Idle() { b = false; } } idle{busy_};
+    if (!lock.owns_lock()) acquire(lock);
+    const int my_slot = claim_slot(lock, P);
+    struct SlotFree {  // (the lock is still held when this runs: declared after it)
+      Server& s;
+      int k;
+      ~SlotFree() {
+        s.slots_[k].busy = false;
+        s.slot_cv_.notify_all();
+      }
+    } slot_free{*this, my_slot};
+    ++busy_;
+    struct Idle { std::atomic<int>& b; ~Idle() { --b; } } idle{busy_};
     const std::string id = "chatcmpl-arc" + std::to_string(++counter_);
     const long long created = (long long)time(nullptr);
     if (stream) rs.sse_begin();
@@ -1041,14 +1164,7 @@ class Server {
     const auto t_prompt = clk::now();
     // end of the system prompt (the start of the second turn; Gemma's first turn follows <bos>): every conversation
     // of a client (Pi: its system prompt and tool list, ~4K tokens) shares it
-    size_t sys_cut = 0;
-    {
-      size_t i0 = 0;
-      while (i0 < P.size() && i0 < 2 && P[i0] != im_start_) ++i0;
-      if (i0 + 1 < P.size() && P[i0] == im_start_ && tok_.piece(P[i0 + 1]) == "system")
-        for (size_t i = i0 + 1; i < P.size(); ++i)
-          if (P[i] == im_start_) { sys_cut = i; break; }
-    }
+    const size_t sys_cut = system_end(P);
     switch_conversation(P);
     load_prefix(P, sys_cut, folder);
     const size_t start = prepare_prefix(P);
@@ -1086,23 +1202,34 @@ class Server {
       ~Unhook() { e.cancel = nullptr; e.progress = nullptr; }
     } unhook{eng_};
     eng_.cancel = client_gone;
+    // --slots: before each piece of the prompt, a waiting request in another slot may take a step (then the engine is
+    // bound to this slot and its callbacks set again)
+    auto prompt_turn = [&] {
+      take_turns(lock, my_slot);
+      eng_.cancel = client_gone;
+    };
     // runs P[done, upto); false when cancelled (cached_ then matches the engine again)
     auto feed_tokens = [&](size_t upto) {
       try {
         if (!eng_.w8_resident && upto > done) {
           // just-in-time weights: one call, so the engine runs the prompt layer by layer (each matrix decoded once);
-          // progress is reported per layer
-          const size_t base = done;
-          eng_.progress = [&](int d, int) { report(base + d); };
-          logits = eng_.forward(P.data() + done, (int)(upto - done));
-          eng_.progress = nullptr;
-          cached_.insert(cached_.end(), P.begin() + done, P.begin() + upto);
-          done = upto;
-          report(done);
+          // progress is reported per layer (--slots: calls of up to 8192 tokens, other slots' steps in between)
+          const size_t piece = slots_.size() > 1 ? std::max<size_t>(eng_.max_chunk, 8192) : upto - done;
+          while (done < upto) {
+            prompt_turn();
+            const size_t base = done, to = std::min(upto, done + piece);
+            eng_.progress = [&](int d, int) { report(base + d); };
+            logits = eng_.forward(P.data() + done, (int)(to - done));
+            eng_.progress = nullptr;
+            cached_.insert(cached_.end(), P.begin() + done, P.begin() + to);
+            done = to;
+            report(done);
+          }
           return true;
         }
         while (done < upto) {
           if (client_gone()) return false;
+          prompt_turn();
           const size_t n = std::min<size_t>(upto - done, eng_.max_chunk);
           logits = eng_.forward(P.data() + done, (int)n);
           cached_.insert(cached_.end(), P.begin() + done, P.begin() + done + n);
@@ -1427,6 +1554,8 @@ class Server {
         logits.assign(vrows.begin() + acc * V, vrows.begin() + (acc + 1) * V);
         continue;
       }
+      take_turns(lock, my_slot);  // (--slots; the drafts are settled here)
+      eng_.cancel = nullptr;      // (another request's prompt may have set its own)
       if (spec && (int)cached_.size() + 4 < eng_.ctx && i + 1 < max_tokens) {
         drafts = eng_.mtp_draft(t, std::min(eng_.opt.mtp_drafts, max_tokens - i - 1));
         const auto& lv = eng_.verify(t, drafts);
@@ -1990,7 +2119,8 @@ static std::string ctx_key(const std::string& model, const EngineOptions& eo) {
   return p + "|" + std::to_string(fs::file_size(model, ec)) + "|" + std::to_string(eo.chunk) +
 #ifdef ARC_ZERO
          "|z" + std::to_string((int)(eo.windows_reserve_gb * 10)) + (eo.stream_experts ? "s" : "n") +
-         (eo.dflash.empty() ? std::string() : eo.mtp_block ? "|dflash" : "|dflash-only") + (eo.v4 ? "|v4" : "") + "|" +  // (DFlash2 drafter: its weights and buffers; 4-bit V)
+         (eo.dflash.empty() ? std::string() : eo.mtp_block ? "|dflash" : "|dflash-only") + (eo.v4 ? "|v4" : "") +
+         (eo.slots > 1 ? "|slots" + std::to_string(eo.slots) : std::string()) + "|" +  // (DFlash2 drafter: its weights and buffers; 4-bit V)
 #endif
          (eo.min_chunk ? "/" + std::to_string(eo.min_chunk) : std::string()) + "|" + (eo.mtp ? "mtp" : "-") + "|" + (eo.attn_int8 ? "i8" : "f32") + "|" + std::to_string(device_global_mem()) +
          "|m13";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
@@ -2086,10 +2216,12 @@ static AutoCtx auto_ctx(const std::string& model, EngineOptions eo, bool budget_
     const double gib = 1073741824.0,
                  budget = probe.device_mem() - 0.95 * gib - 0.22 * gib - probe.snapshot_bytes() - (double)reserve;
     const double base = (double)probe.gpu_bytes - (double)probe.ctx_bytes(e2.ctx);
+    // (--slots N: N - 1 more KV caches, states and snapshots of the same context)
+    auto need = [&](int c) { return base + probe.ctx_bytes(c) + (double)(std::max(eo.slots, 1) - 1) * probe.slot_bytes(c); };
     int ctx = 0;
     for (int c = 4096; c <= trained; c += 4096)
-      if (base + probe.ctx_bytes(c) <= budget) ctx = c;
-    if (trained % 4096 && base + probe.ctx_bytes(trained) <= budget) ctx = trained;
+      if (need(c) <= budget) ctx = c;
+    if (trained % 4096 && need(trained) <= budget) ctx = trained;
     {
       const int cc = std::max(ctx, 4096);
       const Engine::MemParts mp = probe.mem_parts(cc);
@@ -2337,8 +2469,9 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
   L->eng = std::make_unique<Engine>(model, eo);
   Engine& eng = *L->eng;
   L->tok = std::make_unique<Tokenizer>(eng.gguf());
-  fprintf(stderr, "loaded in %.1f s | %d layers | ctx %d | chunk %d | GPU %.2f GiB | weights %s\n", eng.load_ms / 1000,
-          eng.hp.n_layer, eng.ctx, eng.max_chunk, eng.gpu_bytes / 1073741824.0, eng.w8_resident ? "W8 resident" : "W8 just-in-time");
+  fprintf(stderr, "loaded in %.1f s | %d layers | ctx %d%s | chunk %d | GPU %.2f GiB | weights %s\n", eng.load_ms / 1000,
+          eng.hp.n_layer, eng.ctx, eng.slot_count() > 1 ? (" in each of " + std::to_string(eng.slot_count()) + " slots").c_str() : "",
+          eng.max_chunk, eng.gpu_bytes / 1073741824.0, eng.w8_resident ? "W8 resident" : "W8 just-in-time");
 #ifdef ARC_ZERO
   {  // compile kernels before serving (all of the generation's after an update)
     const auto tw = std::chrono::steady_clock::now();
@@ -2524,6 +2657,9 @@ int main(int argc, char** argv) {
     else if (a == "--kernels") so.eo.kernel_dir = next();
     else if (a == "--session-cache-gb") so.sess_gb = std::stod(next());
     else if (a == "--session-dir") so.sess_dir = next();
+#ifdef ARC_ZERO
+    else if (a == "--slots") so.eo.slots = std::clamp(std::stoi(next()), 1, 8);
+#endif
     else if (a == "--no-swap") swap = false;
     else if (a == "--no-prefix-cache") so.prefix_cache = false;
     else if (a == "--prefix-cache-gb") so.prefix_gb = std::stod(next());
@@ -2550,6 +2686,9 @@ int main(int argc, char** argv) {
             "  --mtp                 speculative decoding with the model's MTP block or Gemma assistant drafter\n"
             "  --mtp-drafts N        drafts per step, 1..3, arcinferzero Qwen 1..7 (arcinferzero default: 7 for Qwen\n"
             "                        27B-class and with DFlash2, 5 for MoE, 3 for 4B, 2 otherwise and for Gemma)\n"
+            "  --slots N             arcinferzero: hold N conversations at once (default 1), each with its own KV cache\n"
+            "                        and states of --ctx tokens (auto: the context that fits N of them); requests in\n"
+            "                        different slots take turns step by step (a prompt piece, a generated token)\n"
 #ifdef ARC_ZERO
             "  --dflash DIR          speculative decoding with a DFlash2 block drafter instead (z-lab, Qwen3.8 27B;\n"
             "                        7 drafts per step); default with --mtp: a *DFlash2* drafter for the model in the\n"

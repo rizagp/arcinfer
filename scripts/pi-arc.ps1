@@ -21,7 +21,7 @@ $ErrorActionPreference = "Stop"
 $shortcuts = @("27b", "35b", "35b-s", "35b-m", "35b-mtp", "flash", "9b", "4b", "g12", "e4b")
 # (a shortcut with a variant suffix: 27b-std, 9b-vision, 35b-mtp-std, g12-mtp, ...)
 function Test-Shortcut([string]$s) { $s = $s.ToLower(); return ($shortcuts | Where-Object { $s -match "^$([regex]::Escape($_))(-mtp|-vision|-std)?(-df|-nodf)?$" }).Count -gt 0 }
-$model = ""; $pick = $false; $thinking = "low"; $noMtp = $false; $ctx = ""; $chunk = 0; $sessGb = $null; $vision = ""; $zero = $true; $noStream = $false; $preserve = $false; $v4 = $false
+$model = ""; $pick = $false; $thinking = "low"; $noMtp = $false; $ctx = ""; $chunk = 0; $sessGb = $null; $vision = ""; $zero = $true; $noStream = $false; $preserve = $false; $v4 = $false; $slots = 0
 $piArgs = New-Object System.Collections.Generic.List[string]
 for ($i = 0; $i -lt $args.Count; $i++) {
   $a = [string]$args[$i]
@@ -125,6 +125,10 @@ LAUNCHER OPTIONS
                                  system prompt (in memory; from disk after a restart or a model switch).
   --v4                           a 4-bit copy of V for generation (Qwen): ~5-9 % faster answers deep in a long
                                  context (100K+ tokens), ~25 % more attention-cache memory; opt-in
+  --slots <N>, -Slots            the server holds N conversations at once (default 1): start the first Pi with
+                                 --slots 2, a second Pi (another terminal, plain pi-arc) shares the server; each
+                                 keeps its own KV cache and they take turns step by step. Each slot gets the
+                                 context that fits N of them (27B: 2 x 49,152 tokens, 35B: 2 x 110,592)
   --help, -h, -?, /?, help       the short help;  --help-all: this text
 
   A launcher option that differs from what the running server uses restarts the server (loading takes
@@ -159,6 +163,7 @@ SERVER COMMANDS (arc-server)
   arc-server clear-cache         delete all saved conversations (session cache)
   arc-server help                its own options:
     -Model <shortcut|text|path>  -Ctx <N|auto>  -Chunk <N>  -SessionCacheGb <N>  -NoMtp  -Vision on|off  -OpenCL  -NoStream  -V4
+    -Slots <N>
     -Port <N> (default 8090)  -MtpDrafts <1..7>  -ThinkBudget <N>  -ImageMinTokens / -ImageMaxTokens <N>
     -BudgetGb <GB>  -AttnF32  -NoPrefixCache  -PrefixCacheGb <N>  -NoSwap  -ListenHost <addr>  -SessionDir <dir>
     -Quiet
@@ -183,6 +188,7 @@ bin\serverz.exe --help)
   --no-swap                      keep the loaded model (requests for another model are not switched to)
   --host <addr>                  listen address (default 127.0.0.1)
   --attn-f32                     f32 attention (tests)   --budget <GB>       keep decoded weights resident up to GB
+  --slots <N>                    hold N conversations at once, taking turns step by step (arcinferzero)
   --v4                           4-bit V copy for generation (arcinferzero, Qwen): faster long answers at long
                                  contexts, ~25 % more attention-cache memory (experimental)
   --webui <dir>                  web UI folder           --kernels <dir>     OpenCL kernel folder
@@ -247,6 +253,7 @@ shortens a long conversation (the details it drops are gone for the model).
   elseif ($a -in "--preserve-thinking", "-PreserveThinking") { $preserve = $true }
   elseif ($a -in "--no-stream", "-NoStream") { $zero = $true; $noStream = $true }
   elseif ($a -in "--v4", "-V4") { $zero = $true; $v4 = $true }  # (4-bit V copy for generation at long contexts)
+  elseif ($a -in "--slots", "-Slots") { $slots = [int]$args[++$i] }  # (conversations the server holds at once)
   else { $piArgs.Add($a) }
 }
 # Which model: the one the server is running, else the one started last, else ask (--pick: always ask).
@@ -268,7 +275,8 @@ if (-not $model -and -not $pick) {
   }
 }
 $sessArg = @{}; if ($null -ne $sessGb) { $sessArg.SessionCacheGb = $sessGb }  # (not given: the server's default, 8 GB)
-if ($preserve) { $sessArg.PreserveThinking = $true }  # (only when given: a plain start keeps the running server)
+if ($preserve) { $sessArg.PreserveThinking = $true }
+if ($slots -gt 0) { $sessArg.Slots = $slots }  # (only when given, as above)  # (only when given: a plain start keeps the running server)
 & (Join-Path $PSScriptRoot "arc-server.ps1") start -Model $model -Ctx $ctx -Chunk $chunk @sessArg -NoMtp:$noMtp -Vision $vision -Zero:$zero -OpenCL:(-not $zero) -NoStream:$noStream -V4:$v4
 if (-not $?) { exit 1 }
 

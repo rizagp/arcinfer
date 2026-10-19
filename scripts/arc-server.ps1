@@ -32,6 +32,7 @@ param(
   [switch]$Zero,
   [switch]$OpenCL,
   [switch]$NoStream,
+  [int]$Slots = 0,
   # the other server options (0 / empty / off = the server's default)
   [int]$MtpDrafts = 0,
   [int]$ThinkBudget = 8192,
@@ -60,6 +61,7 @@ New-Item -ItemType Directory -Force $stateDir | Out-Null
 # the engine: arcinferzero (Level Zero) unless -OpenCL (-Zero: the default, kept for old commands)
 if (-not $OpenCL) { $Zero = $true }
 if ($NoStream) { $Zero = $true }  # (arcinferzero with every expert on the GPU, as arcinfer: no SSD cache)
+if ($Slots -gt 1 -and -not $Zero) { throw "-Slots: arcinferzero only (not with -OpenCL)" }
 $Engine = if ($NoStream) { "zero-nostream" } elseif ($Zero) { "zero" } else { "arcinfer" }
 # ($arch: the model's architecture; only mixture-of-experts models keep their experts on the SSD)
 function Engine-Text([string]$e, [string]$arch = "") {
@@ -215,6 +217,10 @@ Options for start / restart:
                                  other engine is restarted. The first start writes the expert file (35B: 16 GB,
                                  ~2.5 min; Flash Next: 56 GB, ~9.5 min) to %LOCALAPPDATA%\arcinfer\zero (safe to
                                  delete: it is written again).
+  -Slots <N>                     hold N conversations at once (arcinferzero; default 1): two Pi sessions each
+                                 keep their own KV cache and states and take turns step by step (a prompt piece,
+                                 a token), so neither waits for the other's whole answer. Each slot gets the
+                                 context that fits N of them (-Ctx auto; 27B: 2 x 49,152, 35B: 2 x 110,592)
   -NoStream                      arcinferzero (Level Zero) with every expert on the GPU, as arcinfer: no expert
                                  file, no SSD reads; MoE models then get arcinfer's (smaller) context
   -Vision on|off                 image / audio input (default on). off: the projector (mmproj) is not loaded and
@@ -312,11 +318,12 @@ if (($Vision -eq "off" -and $m.vision) -or ($NoMtp -and $m.mtp) -or ($Vision -eq
   $v = $models | Where-Object { $_.supported -and (Same-Path $_.path $m.path) -and [bool]$_.vision -eq $wantVision -and [bool]$_.mtp -eq $wantMtp } | Select-Object -First 1
   if ($v) { $m = $v }
 }
-$ctxArg = if ($Ctx) { $Ctx } elseif ($m.ctx) { "$($m.ctx)" } else { "auto" }
+$ctxArg = if ($Ctx) { $Ctx } elseif ($Slots -gt 1) { "auto" } elseif ($m.ctx) { "$($m.ctx)" } else { "auto" }  # (the listed context is for one slot)
 $novision = $(if ($m.vision -eq $false) { "1" } else { "0" })
 # the other options, as server arguments (also kept in the state file: a change restarts the server)
 $extra = @()
 if ($MtpDrafts -gt 0) { $extra += @("--mtp-drafts", $MtpDrafts) }
+if ($Slots -gt 1) { $extra += @("--slots", $Slots) }
 if ($ImageMinTokens -gt 0) { $extra += @("--image-min-tokens", $ImageMinTokens) }
 if ($ImageMaxTokens -gt 0) { $extra += @("--image-max-tokens", $ImageMaxTokens) }
 if ($BudgetGb -gt 0) { $extra += @("--budget", $BudgetGb) }
@@ -331,7 +338,7 @@ if ($SessionDir) { $extra += @("--session-dir", "`"$SessionDir`"") }
 $extraKey = "$($extra -join ' ')|think $ThinkBudget"
 # (compared with the running server's only when given: pi-arc's plain start keeps a server started with other options)
 $extraGiven = @("MtpDrafts", "ThinkBudget", "ImageMinTokens", "ImageMaxTokens", "BudgetGb", "AttnF32", "V4", "PreserveThinking", "NoPrefixCache",
-  "PrefixCacheGb", "NoSwap", "ListenHost", "SessionDir" | Where-Object { $PSBoundParameters.ContainsKey($_) }).Count -gt 0
+  "PrefixCacheGb", "NoSwap", "ListenHost", "SessionDir", "Slots" | Where-Object { $PSBoundParameters.ContainsKey($_) }).Count -gt 0
 # the running server is kept unless an option given now differs from what it runs with (empty / 0 = not given)
 $same = $running -eq $m.alias -and (-not $Ctx -or ($st -and "$($st.ctx)" -eq $ctxArg)) -and
   ($Chunk -eq 0 -or ($st -and "$($st.chunk)" -eq "$Chunk")) -and (-not $PSBoundParameters.ContainsKey("SessionCacheGb") -or ($st -and "$($st.sess)" -eq "$SessionCacheGb")) -and

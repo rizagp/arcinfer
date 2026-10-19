@@ -21,7 +21,7 @@ engines.
   size or engine, and the drafters give exactly the text of plain decoding. Every speed change is held to that.
 - **Built for agents and long documents**: prompt and session caches (a new message only processes itself), system
   prompts kept on disk per project, images and audio input, schema-constrained tool calls, model switching from
-  inside Pi.
+  inside Pi, two Pi sessions at once on one model (`--slots 2`, arcinferzero).
 
 ### Results at a glance (2026-10-18)
 
@@ -371,6 +371,9 @@ Qwen3.8 Flash Next.
   folders do not replace (27B: ~290 MB each); other clients' prompts: the 8 used last. All models together
   stay under `--prefix-cache-gb` (default 8; least recently used go first); `--no-prefix-cache` turns it off.
   Files: `<folder>-<folder hash>-<prompt hash>-<tokens>.arcp`.
+- Conversation slots (`--slots N`, arcinferzero): the server holds N conversations, each with its own KV cache and
+  states; requests in different slots take turns step by step (by GPU time), so two clients answer at the same
+  time. Each slot gets the context that fits N of them. Details: [USAGE.md](USAGE.md#3-managing-the-server).
 - Session cache: when a request belongs to another conversation (a new Pi session, or switching back to an older
   one), the server saves the conversation it holds to disk (KV cache, DeltaNet states; `%LOCALAPPDATA%\arcinfer\zero\sessions`)
   and loads a saved one that matches the request, instead of processing its whole prompt again. New conversations

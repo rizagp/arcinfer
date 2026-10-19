@@ -184,8 +184,19 @@ cache of the MoE models gets a little smaller (35B at 131K: 90 -> 87 % of the ex
 (4-bit values; 35B: perplexity +0.4 %), MTP and DFlash2 still give the same text as plain decoding. Below ~64K
 tokens of context it brings nothing; leave it off unless long answers at very long contexts are the main use.
 
-**One answer at a time.** The server runs one request on the GPU at a time; other requests wait for it (several
-Pi windows or clients share one model and take turns).
+**Two conversations at once (`-Slots 2`, arcinferzero).** By default the server holds one conversation and runs one
+request at a time: a second Pi window waits until the first one's answer is finished, and switching between them
+goes through the session cache. `pi-arc 35b --slots 2` (or `arc-server start -Model 35b -Slots 2`) makes the server
+hold two conversations, each with its own attention cache, DeltaNet states and snapshots; start a second Pi in
+another terminal with plain `pi-arc` and it shares that server. The GPU still runs one step at a time, but the two
+requests take turns step by step (a piece of up to 8,192 prompt tokens, or one generated token / verification
+pass), sharing the GPU time evenly, so a short question is answered while the other session reads a long prompt
+(35B, a 46K-token prompt in one slot: a question sent 2 s later was answered after 9.6 s instead of after the whole
+prompt). Each slot gets the context that fits two of them (`-Ctx auto`: 27B 2 x 49,152 tokens, 35B 2 x 110,592, its
+expert cache 77 -> 67 % of the experts). The answers are the same as with one slot (greedy text identical; the
+engine's logits bit-identical alone or interleaved). Together, two answers take about as long as one after the
+other: the gain is that neither waits for the other's whole answer. Real batching (both tokens in one GPU step) is
+queued as QUEUE 20.4-20.6.
 
 **Qwen3.8 Flash Next (arcinferzero only).** A MoE model with 512 experts fetched from the SSD (like the 35B). Run
 `serverz.exe` with `-m` pointing to the first file (`...-IQ3_S-00001-of-00002.gguf`); the second file must be in the

@@ -86,6 +86,7 @@ struct EngineOptions {
   bool stream_experts = true;
   double expert_cache_gb = 0, expert_cache_pct = 0, windows_reserve_gb = 14;
   size_t stream_reserve = 0;  // bytes the automatic cache size leaves for GPU memory allocated later (image encoders)
+  int slots = 1;  // conversations held at once (server --slots): each further one its own KV caches and states
 };
 
 class VisionQwen3VL;
@@ -148,6 +149,7 @@ class Engine {
       alloc_buffers();
       mem_bufs_ = gpu_bytes - g0;
     }
+    if (opt.slots > 1) add_slots(opt.slots);  // (before the expert cache takes what is left)
     if (xc_) size_expert_cache();
     // (--ctx auto: room for an expert cache of 90 % of the experts, as far as what the weights and buffers leave
     //  allows with 128K tokens of context (32K until 18 Oct), or at least 3/4 of it. The context took the memory
@@ -158,7 +160,8 @@ class Engine {
     if (stream_ && opt.dry) {
       const double left = (double)device_mem() - 1.17 * 1073741824.0 - (double)gpu_bytes + (double)ctx_bytes(ctx) -
                           (double)snapshot_bytes() - (double)opt.stream_reserve;
-      const double room = std::max(0.75 * left, left - (double)ctx_bytes(131072));
+      const double room = std::max(0.75 * left, left - (double)ctx_bytes(131072) -
+                                                   (double)(std::max(opt.slots, 1) - 1) * (double)slot_bytes(131072));
       gpu_bytes += (size_t)std::max(0.0, std::min(0.9 * (double)stream_bytes_, room));
     }
     mem_load_ = gpu_bytes;
@@ -1865,7 +1868,7 @@ class Engine {
       const uint64_t share = zrt::global_mem, slack = (uint64_t)(1.4 * GiB);
       uint64_t limit = std::min(ram > reserve ? ram - reserve : 0, share > slack ? share - slack : 0);
       // (+ kernels and host side, the server's state snapshots, and what the caller keeps for its encoders)
-      const uint64_t used = gpu_bytes + xc_->stage_bytes + (uint64_t)(0.1 * GiB) + snapshot_bytes() + opt.stream_reserve;
+      const uint64_t used = gpu_bytes + xc_->stage_bytes + (uint64_t)(0.1 * GiB) + snapshot_bytes() * std::max(opt.slots, 1) + opt.stream_reserve;
       want = limit > used ? limit - used : 0;
       fprintf(stderr, "arcinferzero: memory limit %.2f GiB (RAM %.1f - Windows %.1f, GPU share %.2f), model + buffers %.2f GiB\n",
               limit / GiB, ram / GiB, reserve / GiB, share / GiB, used / GiB);

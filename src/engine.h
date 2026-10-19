@@ -47,6 +47,7 @@ struct Hparams {
 
 struct EngineOptions {
   int ctx = 8192;
+  int slots = 1;  // (arcinferzero only: conversations held at once; this engine holds one)
   int chunk = 0;              // prompt tokens per forward step; 0 = auto
   int min_chunk = 0;          // at least this many (Gemma 4 images: one non-causal block of up to the image limit)
   double w8_budget_gb = 9.0;  // keep decoded W8 weights resident if raw + W8 fit in this budget
@@ -121,6 +122,12 @@ class Engine {
   Engine& operator=(const Engine&) = delete;
 
   // Clears the KV cache and recurrent states.
+  // (conversation slots: arcinferzero only, this engine holds one conversation)
+  int slot_count() const { return 1; }
+  void bind(int) {}
+  size_t slot_bytes(int) const { return 0; }
+  void reset_drafter_choice() {}
+
   void reset() {
     pos = 0;
     written_hi_ = 0;
