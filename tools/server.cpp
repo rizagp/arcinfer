@@ -2002,7 +2002,8 @@ static std::vector<ModelInfo> scan_models() {
       {"Qwen3.5-9B-UD-Q4_K_XL.gguf", {"qwen3.5-9b", "9b"}},
       {"Qwen3.5-4B-UD-Q4_K_XL.gguf", {"qwen3.5-4b", "4b"}},
       {"gemma-4-12b-it-qat-q4_0.gguf", {"gemma4-12b", "g12"}},
-      {"gemma-4-E4B_q4_0-it.gguf", {"gemma4-e4b", "e4b"}}};
+      {"gemma-4-E4B_q4_0-it.gguf", {"gemma4-e4b", "e4b"}},
+      {"gemma-4-26B_q4_0-it.gguf", {"gemma4-26b", "g26"}}};
   std::vector<ModelInfo> out;
   for (size_t i = 0; i < cands.size(); ++i) {
     const Cand& c = cands[i];
@@ -2031,7 +2032,10 @@ static std::vector<ModelInfo> scan_models() {
         try {
           const GgufFile g(s.path().string());
           const std::string pt = g.get_str("clip.vision.projector_type", "");
-          mmproj = m.arch == "gemma4" ? pt == "gemma4uv" || pt == "gemma4v"
+          // (gemma4v: the GPU encoder's 64-dim heads; Gemma 4 26B-A4B's projector has 72)
+          const int64_t ve = g.get_int("clip.vision.embedding_length", 0), vh = g.get_int("clip.vision.attention.head_count", 0);
+          const bool g4v_ok = vh > 0 && ve % vh == 0 && ve / vh == 64;
+          mmproj = m.arch == "gemma4" ? pt == "gemma4uv" || (pt == "gemma4v" && g4v_ok)
                                       : (m.arch == "qwen35" || m.arch == "qwen35moe") && VisionQwen3VL::usable(g);
           // (audio: the encoders load_model loads, AudioGemma4A for gemma4a, AudioGemma4 for gemma4ua)
           const std::string at = g.get_str("clip.audio.projector_type", "");
@@ -2448,12 +2452,14 @@ static int list_models() {
     j.set("ctx", a.ctx);
     if (m.supported) {  // the values the server picks for this variant when not given (the launcher fills them in)
       Json d = Json::object();
-      const bool moe = m.arch == "qwen35moe" || m.arch == "qwen4exp", gemma = m.arch == "gemma4";
+      bool moe = m.arch == "qwen35moe" || m.arch == "qwen4exp";
+      const bool gemma = m.arch == "gemma4";
       int64_t n_embd = 0;
       std::string pt;  // image projector type
       try {
         const GgufFile g(m.path);
         n_embd = g.get_int(m.arch + ".embedding_length", 0);
+        moe = moe || g.get_int(m.arch + ".expert_count", 0) > 0;  // (Gemma 4 26B-A4B)
       } catch (const std::exception&) {}
       if (m.vision) {
         std::error_code ec;
@@ -2857,7 +2863,13 @@ int main(int argc, char** argv) {
   if (so.webui.empty()) so.webui = find_dir("webui");
   if (alias.empty()) alias = std::filesystem::path(model).stem().string();
 
-  std::unique_ptr<Loaded> cur = load_model(model, alias, so);
+  std::unique_ptr<Loaded> cur;
+  try {  // (a model that cannot load: its reason, not a silent abort)
+    cur = load_model(model, alias, so);
+  } catch (const std::exception& e) {
+    fprintf(stderr, "arcinfer-server: cannot load %s: %s\n", model.c_str(), e.what());
+    return 1;
+  }
   std::vector<ModelInfo> catalog = swap ? scan_models() : std::vector<ModelInfo>();
   std::shared_mutex swap_mu;  // requests share it; switching models takes it exclusively
   // the catalog entry a request's "model" names (alias, org/repo name or file), rescanning once for new downloads

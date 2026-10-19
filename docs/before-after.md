@@ -23,6 +23,7 @@ character. "Bit-identical" below means exactly that, not "close". Changes that a
 | Qwen3.8 Flash Next (IQ3_S, 512 experts on the SSD) | 166 tok/s (4K), 163 (32K), 123 (125K) | 6-7 tok/s | KL 0.020 against the CPU reference with QSA (3.5K prompt) |
 | Qwen3.5 4B | 911 tok/s (2K prompt) | 17.6 tok/s | KL 0.0021; perplexity 6.056 (llama.cpp 6.141) |
 | Gemma 4 12B (Google QAT) | 240 tok/s (2K prompt) | 7.5 tok/s | KL 0.021; greedy text equal to llama.cpp |
+| Gemma 4 26B-A4B (Google QAT Q4_0, MoE, experts on the SSD) | 450 tok/s (4K prompt), 410 (8K) | 19.6-20.6 tok/s | KL 0.068-0.073 against the CPU reference (440 tokens); the reference's own int8-input copy differs by 0.063 |
 
 Against llama.cpp on the same files and laptop (10 October, arcinfer's OpenCL engine; arcinferzero gives the same
 logits as that engine and the newer numbers in the table above):
@@ -68,6 +69,7 @@ That property is what every speed change is held to:
 
 | Date | Change | Before | After | Answers |
 |---|---|---|---|---|
+| 10-19 | **Gemma 4 26B-A4B** (MoE, Google QAT Q4_0) on arcinferzero: experts streamed from the SSD (13.2 GB expert file, written in 73 s) | not supported | prompt 450 tok/s (4K), 410 (8K); generation 19.6-20.6 tok/s; expert cache 85-93 % (runz), 72 % at the server's 106K context | KL 0.073 prompt / 0.068 decode path; f32 router (was 0.079 with an int8 router); greedy answers correct in English and Indonesian |
 | 10-19 | **Batched decoding over slots** (`--slots 2`, Qwen): both requests' next tokens and drafts in one pass | two answers at once taking turns: 27B 7.32 tok/s together (prose), 11.63 (code); 35B 20.24, 28.97 | **10.48** (1.43x), **15.42** (1.33x); **24.65** (1.22x), **30.73** (1.06x); engine without drafts 27B 2 / 3 / 4 slots 1.78 / 2.43 / 3.04x, 35B 1.35 / 1.67 / 1.91x | bit-identical to each slot alone (runz `--slots-check`: 27B and 35B plain / MTP / DFlash2); server texts equal with and without batching; one slot unchanged (logits dumps of the previous build) |
 | 10-19 | **Two conversations at once** (`--slots 2`): each slot its own KV cache and states, requests take turns step by step by GPU time | a second Pi window waits for the first one's whole answer; switching conversations goes through the session cache | both answer at the same time; a question during another slot's 46K-token prompt (35B) answered after **9.6 s** (first try, turns every step: 49 s); context per slot: 27B 49,152, 35B 110,592 (expert cache 67 %) | bit-identical alone vs interleaved (runz `--slots-check`: 27B, 35B + MTP / DFlash2, Flash Next 9000 tokens); server greedy text the same with 1 and 2 slots |
 | 10-19 | Flash Next prompt chunks: the HC mixers' up input as **two int8 passes** (values + rounding residual), opt-in `ARC_HC_F32=4` | KL 0.0647 against the f32 reference (363 tokens, max 1.56), top token 324 / 363; prompt 4096 tokens 168.4 tok/s, 9000: 148.3 | KL **0.0483** (max 0.78), top token **331 / 363**; 159.8 (-5.1 %), 138.6 (-6.5 %); not the default (cost above 5 %) | default unchanged (same KL to the last digit); f32 mixers (`=1`) KL 0.0369 at -22 % |

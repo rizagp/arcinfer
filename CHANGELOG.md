@@ -1,6 +1,13 @@
 # Changelog
 
-## 2026-10-19: two conversations at once, Flash Next accuracy knob
+## 2026-10-19: two conversations at once, Gemma 4 26B-A4B, Flash Next accuracy knob
+
+- **Gemma 4 26B-A4B** (Google QAT Q4_0; arcinferzero, `pi-arc g26`): the dense FFN and 128 routed experts side by
+  side, experts streamed from the SSD like the 35B's (gate / up from one tensor; GELU; the router in f32 on its own
+  input norm; a scale per expert). Prompt 450 tok/s (4K), generation ~20 tok/s; KL 0.07 against the CPU reference
+  (`tools/ref_forward` now runs its experts), the size of int8 activations' own effect. Images not yet (its vision
+  encoder has 72-dim heads); `--ctx auto` keeps no memory for an encoder it cannot run.
+- The server prints why a model cannot load instead of stopping silently.
 
 - **Conversation slots** (arcinferzero; `serverz --slots N`, `arc-server -Slots N`, `pi-arc --slots N`): the server
   holds N conversations, each with its own KV caches, DeltaNet / conv states, QSA keys, MTP / DFlash2 state and

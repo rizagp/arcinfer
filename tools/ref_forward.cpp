@@ -356,6 +356,75 @@ static void gemma4_layers(const std::vector<int>& toks, std::vector<float>& x) {
     matmul(p + "ffn_up.weight", h, T, uu);
     for (size_t i = 0; i < gg.size(); ++i) gg[i] = gelu_tanh(gg[i]) * uu[i];
     matmul(p + "ffn_down.weight", gg, T, dd);
+    if (F->find(p + "ffn_gate_inp.weight")) {
+      // 26B-A4B (llama.cpp gemma4): dd = rmsnorm(mlp) * post_ffw_norm_1 + rmsnorm(experts) * post_ffw_norm_2; the
+      // experts take rmsnorm(x) * pre_ffw_norm_2, the router rmsnorm(x) / sqrt(E) * ffn_gate_inp.scale; softmax over
+      // the experts, top n_expert_used renormalized, times each expert's scale (ffn_down_exps.scale); GELU experts
+      // whose gate and up rows are one tensor (gate first)
+      const int NE = hp("expert_count"), NU = hp("expert_used_count");
+      auto p1 = vecf(p + "post_ffw_norm_1.weight"), p2 = vecf(p + "post_ffw_norm_2.weight"),
+           n2 = vecf(p + "pre_ffw_norm_2.weight"), rs = vecf(p + "ffn_gate_inp.scale"), es = vecf(p + "ffn_down_exps.scale");
+      for (int t = 0; t < T; ++t) rmsnorm(&dd[(size_t)t * E], E, p1.data(), eps);
+      std::vector<float> rin = x, ein = x, lg;
+      for (int t = 0; t < T; ++t) {
+        rmsnorm(&rin[(size_t)t * E], E, nullptr, eps);
+        for (int i = 0; i < E; ++i) rin[(size_t)t * E + i] *= rs[i] / std::sqrt((float)E);
+        rmsnorm(&ein[(size_t)t * E], E, n2.data(), eps);
+      }
+      matmul(p + "ffn_gate_inp.weight", rin, T, lg);
+      ein = fake_quant(p + "ffn_gate_up_exps.weight", ein, E);  // (REF_Q: the experts' inputs rounded as the engine's)
+      std::vector<std::vector<std::pair<int, float>>> by_e(NE);  // per expert: (token, weight)
+      for (int t = 0; t < T; ++t) {
+        const float* l = &lg[(size_t)t * NE];
+        std::vector<int> idx(NE);
+        for (int e = 0; e < NE; ++e) idx[e] = e;
+        std::partial_sort(idx.begin(), idx.begin() + NU, idx.end(), [&](int a, int b) { return l[a] > l[b] || (l[a] == l[b] && a < b); });
+        double z = 0;
+        for (int k = 0; k < NU; ++k) z += std::exp((double)l[idx[k]] - l[idx[0]]);
+        for (int k = 0; k < NU; ++k) by_e[idx[k]].push_back({t, (float)(std::exp((double)l[idx[k]] - l[idx[0]]) / z * es[idx[k]])});
+      }
+      const GgufTensor& tgu = F->get(p + "ffn_gate_up_exps.weight");
+      const GgufTensor& tdn = F->get(p + "ffn_down_exps.weight");
+      const int K = (int)tgu.dims[0], R2 = (int)tgu.dims[1], Fe = R2 / 2, Kd = (int)tdn.dims[0], Nd = (int)tdn.dims[1];
+      const size_t rbu = tgu.nbytes / ((size_t)R2 * NE), rbd = tdn.nbytes / ((size_t)Nd * NE);
+      std::vector<double> ysum((size_t)T * E, 0.0);
+      std::mutex mu;
+#pragma omp parallel for schedule(dynamic, 1)
+      for (int e = 0; e < NE; ++e) {
+        if (by_e[e].empty()) continue;
+        const size_t nt = by_e[e].size();
+        std::vector<float> w(std::max(K, Kd)), h(nt * Fe), up(nt * Fe);
+        for (int r = 0; r < R2; ++r) {
+          dequant_row(tgu.type, tgu.data + ((size_t)e * R2 + r) * rbu, K, w.data());
+          for (size_t j = 0; j < nt; ++j) {
+            const float* xv = &ein[(size_t)by_e[e][j].first * E];
+            double acc = 0;
+            for (int k = 0; k < K; ++k) acc += (double)w[k] * xv[k];
+            (r < Fe ? h[j * Fe + r] : up[j * Fe + r - Fe]) = (float)acc;
+          }
+        }
+        for (size_t j = 0; j < nt * Fe; ++j) h[j] = gelu_tanh(h[j]) * up[j];
+        h = fake_quant(p + "ffn_down_exps.weight", h, Fe);
+        std::vector<double> y(nt * Nd, 0.0);
+        for (int n = 0; n < Nd; ++n) {
+          dequant_row(tdn.type, tdn.data + ((size_t)e * Nd + n) * rbd, Kd, w.data());
+          for (size_t j = 0; j < nt; ++j) {
+            double acc = 0;
+            for (int k = 0; k < Kd; ++k) acc += (double)w[k] * h[j * Fe + k];
+            y[j * Nd + n] = acc * by_e[e][j].second;
+          }
+        }
+        std::lock_guard<std::mutex> g(mu);
+        for (size_t j = 0; j < nt; ++j)
+          for (int n = 0; n < Nd; ++n) ysum[(size_t)by_e[e][j].first * E + n] += y[j * Nd + n];
+      }
+      for (int t = 0; t < T; ++t) {
+        std::vector<float> m(E);
+        for (int i = 0; i < E; ++i) m[i] = (float)ysum[(size_t)t * E + i];
+        rmsnorm(m.data(), E, p2.data(), eps);
+        for (int i = 0; i < E; ++i) dd[(size_t)t * E + i] += m[i];
+      }
+    }
     auto pf = vecf(p + "post_ffw_norm.weight");
     float scale = 1.0f;
     if (F->find(p + "layer_output_scale.weight")) scale = vecf(p + "layer_output_scale.weight")[0];

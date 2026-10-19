@@ -1010,6 +1010,10 @@ class Engine {
     float out_scale = 1.0f;
     cl_mem post_attn = nullptr, ffn_norm = nullptr, post_ffw = nullptr, rope_ff = nullptr;
     int kv_src = -1;            // shared KV: the layer whose cache this layer reads (no K/V of its own)
+    // Gemma 4 with experts: the dense FFN's output norm, the experts' input norm and output norm, the router's input
+    // norm weights (its scale / sqrt(E)), the scale of each expert
+    cl_mem post_ffw1 = nullptr, ffn_norm2 = nullptr, post_ffw2 = nullptr, rnorm = nullptr, escale = nullptr,
+           router_f32 = nullptr;
     GpuWeight ple_gate, ple_proj;
     cl_mem ple_post = nullptr;  // per-layer-embedding block
     // Flash Next hyper-connection mixers before the attention / DeltaNet block (0) and the FFN (1): stream norm,
@@ -1352,6 +1356,7 @@ class Engine {
   bool mtp_block_ = false;  // the model's own MTP (nextn) block is loaded (Qwen)
   // MoE: router logits, routing, slots (token, expert pairs grouped by expert), expert activations and outputs
   std::string moe_src_;
+  cl_mem gmlp_ = nullptr, gmoe_ = nullptr;  // (Gemma 4 experts, see layer_gemma_ffn)
   cl_mem rl_ = nullptr, mids_ = nullptr, mwts_ = nullptr, sgate_ = nullptr, mcount_ = nullptr, moffs_ = nullptr,
          mcursor_ = nullptr, mtiles_ = nullptr, stok_ = nullptr, swt_ = nullptr, minv_ = nullptr, mh_ = nullptr,
          mhq_ = nullptr, mhsc_ = nullptr, my_ = nullptr, msh_ = nullptr, mtstart_ = nullptr;
@@ -1510,7 +1515,22 @@ class Engine {
       if ((hd != 256 && hd != 512) || hp.n_head % hp.kv_heads[il])
         throw std::runtime_error("unsupported Gemma 4 attention shape");
     }
-    if (hp.n_embd % 256 || hp.n_ff % 256) throw std::runtime_error("unsupported Gemma 4 dimensions");
+    // (26B-A4B: the dense FFN is 2112 wide; its gate / up get zero rows and its down rows zero columns up to whole
+    //  superblocks, 2304: the extra values are gelu(0) * 0 = 0, the results the same)
+    hp.n_ff = padded_k(hp.n_ff);
+    if (hp.n_embd % 256) throw std::runtime_error("unsupported Gemma 4 dimensions");
+    // Gemma 4 26B-A4B: every layer has the dense FFN and routed experts next to it (expert gate and up in one tensor,
+    // GELU, a router of its own input norm, a scale per expert)
+    hp.n_expert = (int)f_.get_int(a + ".expert_count", 0);
+    if (hp.n_expert > 0) {
+      hp.moe = hp.moe_std = true;
+      hp.n_expert_used = I("expert_used_count");
+      hp.n_ff_exp = I("expert_feed_forward_length");
+      hp.n_ff_exp_pad = padded_k(hp.n_ff_exp);
+      hp.n_ff_shexp = 0;
+      if (hp.n_expert % 16 || hp.n_expert_used > 16 || hp.n_ff_exp % 32 || hp.n_ple)
+        throw std::runtime_error("unsupported Gemma 4 expert shape");
+    }
   }
 
   // q heads per attention sub-group: the largest of 4,3,2,1 dividing the GQA ratio.
@@ -2020,7 +2040,7 @@ class Engine {
     std::vector<std::string> pre(hp.n_layer + 1);
     for (int il = 0; il <= hp.n_layer; ++il) {
       const std::string p = "blk." + std::to_string(il) + ".";
-      if (f_.find(p + "ffn_gate_exps.weight")) pre[il] = p;
+      if (f_.find(p + "ffn_gate_exps.weight") || f_.find(p + "ffn_gate_up_exps.weight")) pre[il] = p;
     }
     xc_->st.open_or_build(f_, path_, pre, hp.n_expert);
     // (staging records per half: ARC_XSTAGE, default 64 = 8 verification tokens x 8 experts)
@@ -2279,6 +2299,67 @@ class Engine {
     }
   }
 
+  // Gemma 4 26B-A4B experts of layer L (see layer_gemma_ffn): router rows padded to router_rows() (zeros past the
+  // experts), the norms and scales, the experts (streamed: the expert file; else gate / up taken apart from
+  // ffn_gate_up_exps, the down rows padded to whole superblocks)
+  void load_moe_gemma(Layer& L, const std::string& p) {
+    const int E = hp.n_embd, NR = hp.router_rows(), NE = hp.n_expert, F = hp.n_ff_exp;
+    const GgufTensor& r = f_.get(p + "ffn_gate_inp.weight");
+    if (r.nelements() != (uint64_t)NE * E) throw std::runtime_error("unexpected Gemma 4 router shape");
+    // (f32 rows, read by gemv_f32 with f32 inputs; router_rows() of them, zeros past the experts)
+    std::vector<float> v((size_t)NR * E, 0.0f);
+    dequant_row(r.type, r.data, NE * E, v.data());
+    L.router_f32 = buf(v.size() * 4, v.data());
+    L.router.N = NR;
+    L.router.K = E;
+    {
+      const GgufTensor& t = f_.get(p + "ffn_gate_inp.scale");
+      std::vector<float> w(E);
+      dequant_row(t.type, t.data, E, w.data());
+      for (float& x : w) x /= std::sqrt((float)E);  // (llama.cpp gemma4: rms_norm(x) / sqrt(n_embd) * scale)
+      L.rnorm = buf((size_t)E * 4, w.data());
+    }
+    {
+      const GgufTensor& t = f_.get(p + "ffn_down_exps.scale");
+      std::vector<float> w(NE);
+      dequant_row(t.type, t.data, NE, w.data());
+      L.escale = buf((size_t)NE * 4, w.data());
+    }
+    L.post_ffw1 = load_f32(p + "post_ffw_norm_1.weight");
+    L.ffn_norm2 = load_f32(p + "pre_ffw_norm_2.weight");
+    L.post_ffw2 = load_f32(p + "post_ffw_norm_2.weight");
+    for (int i = 0; i < 3; ++i) {
+      const ExpertStore::Src m = ExpertStore::src(f_, p, i);
+      const GgufTensor& t = *m.t;
+      const int K = (int)t.dims[0];
+      if (t.dims.size() != 3 || t.dims[2] != (uint64_t)NE || m.rows != (uint64_t)(i == 2 ? E : F) || K != (i == 2 ? F : E) ||
+          !is_w8_type(t.type))
+        throw std::runtime_error("unexpected Gemma 4 expert tensor " + t.name);
+      L.ex_type[i] = t.type;
+      const size_t rows = (size_t)NE * m.rows, prow = (size_t)padded_k(K) / 256 * gguf_sb_bytes(t.type);
+      if (stream_) {
+        stream_bytes_ += rows * (padded_k(K) / 256) * raw_padded_sb_bytes(t.type);
+        continue;
+      }
+      if (opt.dry) {
+        gpu_bytes += rows * (padded_k(K) / 256) * raw_padded_sb_bytes(t.type) + kRawSlack;
+        continue;
+      }
+      int blk = 0, bytes = 0;
+      ggml_block_info(t.type, blk, bytes);
+      const size_t rb = (size_t)K / blk * bytes;  // (GGUF row bytes)
+      std::vector<uint8_t> all(rows * prow);
+      for (int e = 0; e < NE; ++e) {
+        const uint8_t* src = t.data + ((size_t)e * m.per + m.row0) * rb;
+        uint8_t* dst = all.data() + (size_t)e * m.rows * prow;
+        if (K % 256) pad_small_block_rows(t.type, src, (int)m.rows, K, dst);
+        else memcpy(dst, src, m.rows * rb);
+      }
+      L.ex_q[i] = upload_padded(t.type, all.data(), all.size());
+    }
+    if (L.ex_type[0] != L.ex_type[1]) throw std::runtime_error("MoE: gate and up experts of different types");
+  }
+
   void load_attn(Layer& L, const std::string& p) {
     {
       {
@@ -2385,9 +2466,10 @@ class Engine {
         L.ple_proj = load_w(p + "proj.weight");
         L.ple_post = load_f32(p + "post_norm.weight");
       }
-      L.gate = load_w(p + "ffn_gate.weight");
-      L.up = load_w(p + "ffn_up.weight");
-      L.down = load_w(p + "ffn_down.weight");
+      L.gate = load_w_pad(p + "ffn_gate.weight", hp.n_ff);
+      L.up = load_w_pad(p + "ffn_up.weight", hp.n_ff);
+      L.down = load_w_pad(p + "ffn_down.weight", hp.n_embd);
+      if (hp.moe) load_moe_gemma(L, p);
       clFinish(cl_.queue);
     }
     if (opt.mtp) {
@@ -2663,6 +2745,11 @@ class Engine {
       mhq_ = buf(S * F);
       mhsc_ = buf(S * (F / 32) * 4);
       msh_ = buf(M * hp.n_embd * 4);
+      if (hp.gemma) {  // (Gemma 4 experts: msh_ stays zero; the dense FFN's normed output; the experts' sum)
+        fill(msh_, M * hp.n_embd * 4);
+        gmlp_ = buf(M * hp.n_embd * 4);
+        gmoe_ = buf(M * hp.n_embd * 4);
+      }
       mtstart_ = buf((NE + 1) * 4);
       fill(mcount_, NE * 4);
       if (moe_gemm_ok()) {
@@ -3200,6 +3287,22 @@ class Engine {
         run_rows_quant("swiglu_quant", F, T, Mp);
       }
       matmul("gemm_down", L.down, Mp, big_, E, 0, 0, a_dn);
+    }
+    if (hp.moe) {
+      // Gemma 4 26B-A4B (llama.cpp gemma4): ffn = rmsnorm(mlp) * post_ffw_norm_1 + rmsnorm(experts(rmsnorm(x) *
+      // pre_ffw_norm_2)) * post_ffw_norm_2, the router on rmsnorm(x) * scale / sqrt(E); then the usual post_ffw norm
+      float eps = hp.eps;
+      int EE = E, MM = Mp, TT = T, r0 = 0, wh = 1, a32 = 1;
+      size_t rgws[2] = {256, (size_t)Mp}, rlws[2] = {256, 1};
+      set_args(k_rmsnorm_, 0, big_, r0, L.post_ffw1, EE, MM, TT, eps, aq_, asc_, absum_, gmlp_, wh, a32);
+      run("rmsnorm_quant", k_rmsnorm_, 2, rgws, rlws);
+      layer_moe(L, T, Mp);  // (the experts' sum into gmoe_)
+      set_args(k_rmsnorm_, 0, gmoe_, r0, L.post_ffw2, EE, MM, TT, eps, aq_, asc_, absum_, big_, wh, a32);
+      run("rmsnorm_quant", k_rmsnorm_, 2, rgws, rlws);
+      cl_kernel k = kernel("ops", "", "dfl_add");
+      set_args(k, 0, big_, gmlp_, EE);
+      size_t gws[2] = {(size_t)E, (size_t)T};
+      run("ffn_add", k, 2, gws, nullptr);
     }
     // single-token passes: the residual add + norm also prepares the next input (the next layer's attention norm,
     // or the per-layer-embedding gate's plain quantization)
@@ -3898,13 +4001,34 @@ class Engine {
     zrt::note_T = T;
     const int E = hp.n_embd, F = hp.n_ff_exp, Fs = hp.n_ff_shexp, NR = hp.router_rows(), NU = hp.n_expert_used;
     const int Fp = hp.n_ff_exp_pad;  // (the experts' h rows and down input width: Flash Next 640 padded to 768)
-    if (!hp.hc) rmsnorm_quant(x_, 0, L.post_norm, E, Mp, T, 1);
+    const bool g4 = hp.gemma;  // (Gemma 4: no shared expert; the router's input norm of its own, scaled experts)
+    if (g4) {  // (the router in f32: its input normed into gmoe_, free until the experts' sum)
+      {
+        float eps = hp.eps;
+        int r0 = 0, EE = E, MM = Mp, TT = T, wh = 1, a32 = 1;
+        set_args(k_rmsnorm_, 0, x_, r0, L.rnorm, EE, MM, TT, eps, aq_, asc_, absum_, gmoe_, wh, a32);
+        size_t gws[2] = {256, (size_t)Mp}, lws[2] = {256, 1};
+        run("rmsnorm_quant", k_rmsnorm_, 2, gws, lws);
+      }
+      {
+        cl_kernel k = kernel("ops", "", "gemv_f32");
+        int K = E, N = NR, ld = NR;  // (all the padded rows: the logit past the experts stays 0, not stale)
+        set_args(k, 0, gmoe_, K, L.router_f32, N, rl_, ld);
+        size_t gws[2] = {(size_t)16 * NR, (size_t)T}, lws[2] = {16, 1};
+        run("gemm_router", k, 2, gws, lws);
+      }
+      rmsnorm_quant(x_, 0, L.ffn_norm2, E, Mp, T, 1);
+    } else if (!hp.hc) {
+      rmsnorm_quant(x_, 0, L.post_norm, E, Mp, T, 1);
+    }
     // router + shared expert gate/up (prompt chunks fuse silu(gate) * up into the up GEMM); one token: one GEMV
     // over the stacked rows when the layer has them (router logits at rgu_out_[0], gate / up in rgu_gu_)
     const int fused = cur_T_ > 8 ? 1 : 0;
     cl_mem rl = rl_, gu = big_;
     static const bool no_rgu = getenv("ARC_NO_RGU") != nullptr;  // (A/B: three GEMVs)
-    if (T == 1 && L.rgu.raw && !no_rgu) {
+    if (g4) {
+      // (done above)
+    } else if (T == 1 && L.rgu.raw && !no_rgu) {
       matmul("gemm_router_sh", L.rgu, Mp, rgu_out_, 0, 0, 0, true);
       rl = rgu_out_;
       gu = rgu_gu_;
@@ -3922,11 +4046,12 @@ class Engine {
     const int tm = T == 1 ? 1 : hp.moe_std ? tm_std : 16, n = T * NU;
     const std::string defs = "-cl-intel-256-GRF-per-thread -DNE=" + std::to_string(hp.n_expert) +
                              " -DNU=" + std::to_string(NU) + " -DTM=" + std::to_string(tm) +
-                             (Fp != F ? " -DFV=" + std::to_string(F) : std::string());
-    const std::string hld = Fp != F ? " -DHLD=" + std::to_string(Fp) : std::string();
+                             (Fp != F ? " -DFV=" + std::to_string(F) : std::string()) + (g4 ? " -DESCALE" : "");
+    const std::string hld = (Fp != F ? " -DHLD=" + std::to_string(Fp) : std::string()) + (g4 ? " -DMOE_GELU" : "");
     if (T == 1) {  // one token: its NU experts are the tiles
       cl_kernel k = kernel("moe", defs, "moe_route1");
       set_args(k, 0, rl, sgate_, mtiles_, stok_, swt_, minv_);
+      if (g4) set_args(k, 6, L.escale);
       size_t g1 = 16, l1 = 16;
       run("moe_route", k, 1, &g1, &l1);
       // streamed experts: guess the next layer's experts with its router on this layer's FFN input (the residual
@@ -3950,6 +4075,7 @@ class Engine {
       {
         cl_kernel k = kernel("moe", defs, "moe_route");
         set_args(k, 0, rl_, NR, T, mids_, mwts_, sgate_, mcount_);
+        if (g4) set_args(k, 7, L.escale);
         size_t gws[2] = {16, (size_t)T}, lws[2] = {16, 1};
         run("moe_route", k, 2, gws, lws);
       }
@@ -4095,13 +4221,13 @@ class Engine {
     }
     quant_h();
     // shared expert down: its quantized input replaces the FFN input in aq_ (the expert GEMM above has read it)
-    {
+    if (!g4) {
       int a32 = 1, gelu = 0;
       set_args(k_swiglu_, 0, gu, Fs, Mp, T, aq_, asc_, absum_, a32, fused, gelu);
       size_t gws[2] = {256, (size_t)Mp}, lws[2] = {256, 1};
       run("swiglu_quant", k_swiglu_, 2, gws, lws);
+      matmul("gemm_down_sh", L.down_sh, Mp, msh_, E, 0, 0, true);
     }
-    matmul("gemm_down_sh", L.down_sh, Mp, msh_, E, 0, 0, true);
     if (rg_down) {
       moe_rg(L, 2, Mp, max_tiles);
     } else if (use_gemm) {
@@ -4117,7 +4243,8 @@ class Engine {
     {
       cl_kernel k = kernel("moe", defs, "moe_combine");
       if (hp.hc) fill(hco_, (size_t)T * E * 4);  // (Flash Next: the block output alone, combined into the streams after)
-      set_args(k, 0, hp.hc ? hco_ : x_, msh_, sgate_, my_, minv_, E);
+      if (g4) fill(gmoe_, (size_t)T * E * 4);    // (Gemma 4: the experts' sum alone; msh_ stays zero)
+      set_args(k, 0, g4 ? gmoe_ : hp.hc ? hco_ : x_, msh_, sgate_, my_, minv_, E);
       size_t gws[2] = {((size_t)E + 255) / 256 * 256, (size_t)T}, lws[2] = {256, 1};  // (moe_combine checks c < N)
       run("moe_combine", k, 2, gws, lws);
     }

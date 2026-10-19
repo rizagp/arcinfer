@@ -2765,6 +2765,24 @@ __kernel void hc_norm_quant(__global const float* res, int r0, __global const fl
   }
 }
 
+// out[t][n] = W[n] . x[t] in f32 (rows of K floats; K a multiple of 64): a router whose choice int8 inputs would
+// change (Gemma 4 26B-A4B: int8 router inputs alone move the reference by KL 0.035). One sub-group per (row, token).
+// grid (16 * N, T), local (16, 1).
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void gemv_f32(__global const float* x, int K, __global const float* w, int N, __global float* out, int ldo) {
+  const int n = get_global_id(0) / 16, t = get_global_id(1), lane = get_sub_group_local_id();
+  if (n >= N) return;
+  __global const float4* xr = (__global const float4*)(x + (size_t)t * K);
+  __global const float4* wr = (__global const float4*)(w + (size_t)n * K);
+  float acc = 0.0f;
+  for (int i = lane; i < K / 4; i += 16) {
+    const float4 a = xr[i], b = wr[i];
+    acc += a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+  }
+  acc = sub_group_reduce_add(acc);
+  if (lane == 0) out[(size_t)t * ldo + n] = acc;
+}
+
 // silu(lo / HC) of the low-rank activations ([M][LR], row stride LD), padded with zeros to KP (a multiple of 256) and quantized
 // for the up projection. grid (16 * KP / 256, M), local (16, 1).
 __attribute__((intel_reqd_sub_group_size(SG)))

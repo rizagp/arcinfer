@@ -19,8 +19,16 @@ inline uint dec2(uint w, int j) { return (((w >> (2 * j)) & 0x03030303u) + 0x7E7
 // over the selection; counts the tokens of every expert. Row t of `logits` holds the shared-expert gate logit at
 // column NE. grid (16, T), local (16, 1).
 __attribute__((intel_reqd_sub_group_size(SG)))
+// -DESCALE (Gemma 4): each chosen expert's weight times its scale (escale [NE]), after the normalization
+#ifdef ESCALE
+#define ESCALE_ARG , __global const float* escale
+#define ESCALE_MUL(e) * escale[e]
+#else
+#define ESCALE_ARG
+#define ESCALE_MUL(e)
+#endif
 __kernel void moe_route(__global const float* logits, int ldl, int T, __global int* ids, __global float* wts,
-                        __global float* sgate, __global int* counts) {
+                        __global float* sgate, __global int* counts ESCALE_ARG) {
   const int t = get_group_id(1), l = get_sub_group_local_id();
   if (t >= T) return;
   __global const float* lg = logits + (size_t)t * ldl;
@@ -54,7 +62,7 @@ __kernel void moe_route(__global const float* logits, int ldl, int T, __global i
   for (int k = 0; k < NU; ++k)
     if (l == k) {
       ids[t * NU + k] = sel[k];
-      wts[t * NU + k] = p[k] / sum;
+      wts[t * NU + k] = p[k] / sum ESCALE_MUL(sel[k]);
       atomic_inc(&counts[sel[k]]);
     }
   if (l == 0) sgate[t] = 1.0f / (1.0f + exp(-lg[NE]));
@@ -64,7 +72,7 @@ __kernel void moe_route(__global const float* logits, int ldl, int T, __global i
 // scan or scatter). grid (16), local (16).
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void moe_route1(__global const float* logits, __global float* sgate, __global int* tiles,
-                         __global int* stok, __global float* swt, __global int* inv) {
+                         __global int* stok, __global float* swt, __global int* inv ESCALE_ARG) {
   const int l = get_sub_group_local_id();
   float v[NE / SG];
   float mx = -INFINITY;
@@ -99,7 +107,7 @@ __kernel void moe_route1(__global const float* logits, __global float* sgate, __
       tiles[2 + 3 * k] = k;
       tiles[3 + 3 * k] = 1;
       stok[k] = 0;
-      swt[k] = p[k] / sum;
+      swt[k] = p[k] / sum ESCALE_MUL(sel[k]);
       inv[k] = k;
     }
   if (l == 0) {

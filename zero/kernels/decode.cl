@@ -1638,7 +1638,12 @@ __kernel void moe_gateup_q(__global const uchar* rg, __global const uchar* ru, i
     for (int m = 0; m < TM; ++m) {
       const float g = sub_group_reduce_add(ag[r][m]), u = sub_group_reduce_add(au[r][m]);
       const int n = n0 + r;
+#ifdef MOE_GELU  // (Gemma 4 experts: gelu_tanh(gate) * up)
+      if (lane == 0 && n < F && m < nr)
+        h[(size_t)(r0 + m) * HLD + n] = 0.5f * g * (1.0f + tanh(0.7978845608f * (g + 0.044715f * g * g * g))) * u;
+#else
       if (lane == 0 && n < F && m < nr) h[(size_t)(r0 + m) * HLD + n] = g / (1.0f + exp(-g)) * u;
+#endif
     }
 }
 

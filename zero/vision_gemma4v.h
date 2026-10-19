@@ -61,6 +61,9 @@ class VisionGemma4V : public GemmaImageEncoder {
     const size_t E = g.get_int("clip.vision.embedding_length", 0), F = g.get_int("clip.vision.feed_forward_length", 0);
     const size_t P = g.get_int("clip.vision.patch_size", 16), pool = g.get_int("clip.vision.projector.scale_factor", 3);
     const size_t out = g.get_int("clip.vision.projection_dim", 0), K0 = 3 * P * P;
+    // (a shape the encoder refuses: nothing to keep free; Gemma 4 26B-A4B's 72-dim heads)
+    const int64_t nh = g.get_int("clip.vision.attention.head_count", 12);
+    if (nh <= 0 || E % nh || E / nh != 64) return 0;
     const size_t R = ((size_t)max_tokens * pool * pool + 127) / 128 * 128;
     const size_t per = K0 * 4 + E * 4 + 8 + E * 4 + E * 4 + std::max(3 * E, 2 * F) * 4 + F * 4 + E * 4 +
                        std::max(E, out) * 4 + 3 * E * 2;

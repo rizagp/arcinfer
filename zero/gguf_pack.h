@@ -20,7 +20,8 @@
 namespace zpack {
 
 inline bool is_expert_tensor(const std::string& name) {
-  return name.find("_exps.") != std::string::npos;  // (blk.N.ffn_{gate,up,down}_exps.weight)
+  // (blk.N.ffn_{gate,up,down}_exps.weight, Gemma 4 ffn_gate_up_exps.weight; not its ffn_down_exps.scale)
+  return name.find("_exps.weight") != std::string::npos;
 }
 inline std::string packages_dir() {
   const char* la = getenv("LOCALAPPDATA");
@@ -139,7 +140,7 @@ inline Result make_package(const std::string& source, int n_layer_hint = 0) {
   std::vector<std::string> pre(n_layer + 1);
   for (int il = 0; il <= n_layer; ++il) {
     const std::string p = "blk." + std::to_string(il) + ".";
-    if (src.find(p + "ffn_gate_exps.weight")) pre[il] = p;
+    if (src.find(p + "ffn_gate_exps.weight") || src.find(p + "ffn_gate_up_exps.weight")) pre[il] = p;
   }
   // ---- 1. the package GGUF: all metadata + every non-expert tensor; the experts as virtual tensors
   std::vector<const GgufTensor*> keep;

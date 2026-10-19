@@ -32,6 +32,7 @@ engines.
 | Qwen3.8 Flash Next IQ3_S (512 experts on the SSD) | 166 tok/s (4K), 163 (32K), 123 (125K) | 6-7 tok/s | 0.020 |
 | Qwen3.5 4B | 911 tok/s (2K) | 17.6 tok/s | 0.0021 |
 | Gemma 4 12B (Google QAT) | 240 tok/s (2K) | 7.5 tok/s | 0.021 (greedy text equal to llama.cpp) |
+| Gemma 4 26B-A4B (Google QAT, MoE, experts on the SSD) | 450 tok/s (4K), 410 (8K) | 19.6-20.6 tok/s | 0.068-0.073 (int8 activations; the reference with int8 inputs: 0.063) |
 
 | vs llama.cpp (same file, same laptop) | arcinfer | llama.cpp Vulkan | llama.cpp SYCL |
 |---|---|---|---|

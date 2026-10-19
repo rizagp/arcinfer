@@ -3,7 +3,7 @@
 #   arc-server start                  asks which model to load: every supported GGUF model in the Hugging Face cache
 #                                     (and %LOCALAPPDATA%\arcinfer\models), listed by its full name; Enter keeps the
 #                                     running one. Waits until the server is ready.
-#   arc-server start -Model 27b       the same without asking: a shortcut (27b 35b 35b-s 35b-mtp flash 9b 4b g12 e4b,
+#   arc-server start -Model 27b       the same without asking: a shortcut (27b 35b 35b-s 35b-mtp flash 9b 4b g12 e4b g26,
 #                                     with -mtp / -vision / -std / -nodf / -df for a variant), a model id, part of a model's
 #                                     name (e.g. swift) or a path to a .gguf file
 #        [-SessionCacheGb N]          save conversations to disk when switching (N GB; default 8, 0 = off)
@@ -193,7 +193,7 @@ arc-server: the arcinfer server in the background (port $Port), for Pi and other
   arc-server help                this text (also --help, -h)
 
 Options for start / restart:
-  -Model <shortcut|text|path>    27b 35b 35b-s 35b-mtp flash 9b 4b g12 e4b; a variant with -mtp (MTP, no images),
+  -Model <shortcut|text|path>    27b 35b 35b-s 35b-mtp flash 9b 4b g12 e4b g26; a variant with -mtp (MTP, no images),
                                  -vision (images, no MTP) or -std (neither), e.g. 9b-std, 27b-std; a model id
                                  (as in Pi's /model), part of a model's name (e.g. swift) or a .gguf path.
                                  -nodf / -df (models with a DFlash2 drafter): the MTP block only / DFlash2 only.

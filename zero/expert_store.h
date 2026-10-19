@@ -33,6 +33,23 @@ struct ExpertStore {
   static constexpr uint32_t kVersion = 1;
   static constexpr uint64_t kAlign = 4096;
 
+  // matrix i (0 gate, 1 up, 2 down) of a layer's experts: its tensor and the rows of one expert it takes (Gemma 4
+  // keeps gate and up in one tensor, ffn_gate_up_exps: per expert the gate rows, then the up rows)
+  struct Src {
+    const GgufTensor* t;
+    uint64_t row0, rows, per;  // first row and rows of the matrix within an expert's `per` rows of the tensor
+  };
+  static Src src(const GgufFile& f, const std::string& p, int i) {
+    static const char* names[3] = {"gate", "up", "down"};
+    if (i < 2 && !f.find(p + "ffn_gate_exps.weight") && f.find(p + "ffn_gate_up_exps.weight")) {
+      const GgufTensor& t = f.get(p + "ffn_gate_up_exps.weight");
+      const uint64_t r = t.dims[1] / 2;
+      return {&t, i ? r : 0, r, t.dims[1]};
+    }
+    const GgufTensor& t = f.get(p + "ffn_" + names[i] + "_exps.weight");
+    return {&t, 0, t.dims[1], t.dims[1]};
+  }
+
   ~ExpertStore() {
     for (auto& s : slots_) if (s.ev) CloseHandle(s.ev);
     if (h_ != INVALID_HANDLE_VALUE) CloseHandle(h_);
@@ -67,7 +84,6 @@ struct ExpertStore {
     if (package) path = (fs::path(gguf_path).parent_path() / f.get_str("arcinferzero.experts_file")).string();
 
     // layout
-    const char* names[3] = {"gate", "up", "down"};
     layers.assign(prefixes.size(), LayerInfo{});
     uint64_t off = kAlign * ((64 + prefixes.size() * 80 + kAlign - 1) / kAlign);  // after the header
     for (size_t l = 0; l < prefixes.size(); ++l) {
@@ -75,11 +91,12 @@ struct ExpertStore {
       LayerInfo& L = layers[l];
       uint64_t sum = 0;
       for (int i = 0; i < 3; ++i) {
-        const GgufTensor& t = f.get(prefixes[l] + "ffn_" + names[i] + "_exps.weight");
+        const Src m = src(f, prefixes[l], i);
+        const GgufTensor& t = *m.t;
         L.type[i] = t.type;
-        // (a small-block type whose rows are not whole superblocks, Flash Next's K = 640 down rows, is padded with
-        // zero blocks to padded_k: quants.h pad_small_block_rows)
-        const uint64_t rows = t.dims[1], nsb = (uint64_t)padded_k((int)t.dims[0]) / 256;
+        // (a 32-value block type whose rows are not whole superblocks, Flash Next's K = 640 and Gemma 4 26B's 704
+        // down rows, is padded with zero blocks to padded_k: quants.h pad_small_block_rows)
+        const uint64_t rows = m.rows, nsb = (uint64_t)padded_k((int)t.dims[0]) / 256;
         L.part[i] = rows * nsb * (uint64_t)raw_padded_sb_bytes(t.type);
         sum += L.part[i];
       }
@@ -215,13 +232,16 @@ struct ExpertStore {
       put(hb, first);
       VirtualFree(hb, 0, MEM_RELEASE);
     }
-    const char* names[3] = {"gate", "up", "down"};
     const int G = 32;  // experts converted per batch (in parallel)
     for (size_t l = 0; l < prefixes.size(); ++l) {
       if (prefixes[l].empty()) continue;
       const LayerInfo& L = layers[l];
+      Src m[3];
       const GgufTensor* t[3];
-      for (int i = 0; i < 3; ++i) t[i] = &f.get(prefixes[l] + "ffn_" + names[i] + "_exps.weight");
+      for (int i = 0; i < 3; ++i) {
+        m[i] = src(f, prefixes[l], i);
+        t[i] = m[i].t;
+      }
       struct Buf { uint8_t* p; ~Buf() { VirtualFree(p, 0, MEM_RELEASE); } } bb{(uint8_t*)VirtualAlloc(nullptr, (size_t)L.rec * G, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)};
       uint8_t* buf = bb.p;
       for (int e0 = 0; e0 < n_expert; e0 += G) {
@@ -234,17 +254,18 @@ struct ExpertStore {
             const uint32_t ty = L.type[i];
             const size_t bb = gguf_sb_bytes(ty), bp = raw_padded_sb_bytes(ty);
             const size_t nsb = L.part[i] / bp;  // superblocks of one expert matrix
-            const int K = (int)t[i]->dims[0], rows = (int)t[i]->dims[1];
+            const int K = (int)t[i]->dims[0], rows = (int)m[i].rows;
+            const size_t row1 = (size_t)(e0 + j) * m[i].per + m[i].row0;  // the expert's first row of this matrix
             const uint8_t* src;
             std::vector<uint8_t> padded;
             if (K % 256) {  // rows padded to whole superblocks first
               int blk = 0, bytes = 0;
               ggml_block_info(ty, blk, bytes);
               padded.resize(nsb * bb);
-              pad_small_block_rows(ty, t[i]->data + (size_t)(e0 + j) * rows * (K / blk) * bytes, rows, K, padded.data());
+              pad_small_block_rows(ty, t[i]->data + row1 * (K / blk) * bytes, rows, K, padded.data());
               src = padded.data();
             } else {
-              src = t[i]->data + (size_t)(e0 + j) * nsb * bb;
+              src = t[i]->data + row1 * (K / 256) * bb;
             }
             for (size_t s = 0; s < nsb; ++s) gpu_raw_sb(ty, src + s * bb, dst + s * bp);
             dst += L.part[i];
