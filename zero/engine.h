@@ -605,15 +605,24 @@ class Engine {
     auto add = [&](cl_mem& f) {
       if (f && seen.insert(f).second) roles_.push_back(&f);
     };
+    // (with the verification pass's state, so that a slot's drafts can wait for verify_done while other slots run:
+    //  S_next and the inputs verify_done replays, the pass's hidden states, its DFlash2 rows)
     auto add_layer = [&](Layer& L) {
-      for (cl_mem* f : {&L.kq, &L.vq, &L.ksc, &L.vsc, &L.vq4, &L.vsc4, &L.conv_state, &L.S, &L.pk}) add(*f);
+      for (cl_mem* f : {&L.kq, &L.vq, &L.ksc, &L.vsc, &L.vq4, &L.vsc4, &L.conv_state, &L.S, &L.pk, &L.S_next, &L.conv_pre,
+                        &L.xin, &L.qkvin, &L.abin})
+        add(*f);
       if (!opt.attn_int8) { add(L.kc); add(L.vc); }
     };
     for (auto& L : layers_) add_layer(L);
     if (mtp_block_) add_layer(mtp_);
     add(hlast_);
     add(hpend_);
+    add(hver_);
     for (auto& D : dfl_l_) { add(D.rk); add(D.rv); }
+    if (dfl_) {
+      dfl_vrows_ = buf((size_t)(1 + kMaxDrafts) * hp.n_embd * 4);
+      add(dfl_vrows_);
+    }
     // views into those buffers (the PLE history and QSA tails in a recurrent state) follow their buffer
     for (ZMem* m : zrt::mems) {
       if (m->owner) continue;
@@ -627,8 +636,6 @@ class Engine {
     }
     // the addresses the buffer objects had (put back before they are freed); S_next trades places with S
     for (cl_mem* r : roles_) orig_ptrs_.push_back({*r, (*r)->ptr});
-    for (auto& L : layers_)
-      if (L.S_next) orig_ptrs_.push_back({L.S_next, L.S_next->ptr});
     for (auto& v : subs_) orig_ptrs_.push_back({v.m, v.m->ptr});
     slot_ptrs_.assign(n, {});
     slot_host_.assign(n, SlotHost());
@@ -643,8 +650,146 @@ class Engine {
   }
   void bind(int s) {
     if (s == slot_ || s < 0 || s >= (int)slot_ptrs_.size()) return;
-    if (!last_drafts_.empty()) throw std::runtime_error("bind: a verification pass is not settled");
+    if (!last_drafts_.empty() && !vrows_) throw std::runtime_error("bind: a verification pass is not settled");
     clFinish(cl_.queue);  // (cancellation reads and host snapshots work on the bound buffers)
+    park();
+    unpark(s);
+  }
+
+  // ---------------------------------------------------------------- batched decoding over slots (QUEUE 20.4)
+  // One generation step for several slots at once: row b is the next token of slot slots[b] (at that slot's position).
+  // The parts that work row by row (norms, every projection and FFN / MoE GEMV, the output head) run once for all rows,
+  // so the weights are read once per step instead of once per slot; the parts that follow a sequence (DeltaNet conv
+  // and recurrence, RoPE and the K/V write, attention) run per slot on its rows with its state (point_to). Then each
+  // slot's MTP block KV / hidden state and DFlash2 context take their row. Returns the logits rows (row b: slot b).
+  // Dense and MoE Qwen models (not Flash Next or Gemma); every slot's drafts settled; up to 1 + max(drafts, slots - 1)
+  // rows. The bound slot stays bound.
+  bool batch_ok() const { return !hp.gemma && !hp.hc && opt.attn_int8 && slot_ptrs_.size() > 1; }
+  const std::vector<float>& forward_batch(const std::vector<int>& slots, const std::vector<int>& toks) {
+    const int B = (int)slots.size();
+    if (!batch_ok() || B < 1 || B != (int)toks.size() || B > batch_rows_)
+      throw std::runtime_error("forward_batch: not for this model or too many rows");
+    const int bound = slot_;
+    for (int b = 0; b < B; ++b) {  // (pending MTP rows of accepted drafts first, each in its slot)
+      bind(slots[b]);
+      if (has_mtp) flush_mtp_pending();
+    }
+    clFinish(cl_.queue);
+    park();
+    batch_.clear();
+    for (int b = 0; b < B; ++b) {
+      const SlotHost& h = slot_host_[slots[b]];
+      if (h.pos + 1 > ctx) {
+        unpark(bound);
+        throw std::runtime_error("context overflow");
+      }
+      batch_.push_back({slots[b], b, 1, h.pos, h.rope_shift});
+    }
+    const int Mp = 16;
+    embed(toks.data(), B, Mp);
+    // (DFlash2: every row's features go to the first accumulator; each slot's ring takes its row below)
+    pos = 0;
+    dfl_cap_lo_ = dfl_cap_base_ = 0;
+    dfl_cap_end_ = B;
+    for (auto& L : layers_) run_layer(L, B, Mp);
+    const std::vector<BatchSeq> seqs = batch_;
+    batch_.clear();
+    head_rows(0, B, out_norm_, nullptr);
+    if (batch_logits_host_.size() < (size_t)hp.n_vocab * B) batch_logits_host_.resize((size_t)hp.n_vocab * batch_rows_);
+    CL_CHECK(clEnqueueReadBuffer(cl_.queue, logits_, CL_TRUE, 0, (size_t)hp.n_vocab * B * 4, batch_logits_host_.data(), 0,
+                                 nullptr, nullptr));
+    for (const BatchSeq& q : seqs) {
+      point_to(q.slot);
+      pos = q.pos;
+      rope_shift = q.rs;
+      if (mtp_block_) {  // as mtp_prefill for its row: hlast_, then the row's final hidden state, then the MTP block
+        const size_t E4 = (size_t)hp.n_embd * 4;
+        CL_CHECK(clEnqueueCopyBuffer(cl_.queue, hlast_, hfin_, 0, 0, E4, 0, nullptr, nullptr));
+        float eps = hp.eps;
+        int E = hp.n_embd, M = Mp, TT = 1, r0 = q.row, wh = 1, a32 = 1;
+        set_args(k_rmsnorm_, 0, x_, r0, out_norm_, E, M, TT, eps, aq_, asc_, absum_, hfin1_, wh, a32);
+        size_t gws[2] = {256, 1}, lws[2] = {256, 1};
+        run("mtp_concat", k_rmsnorm_, 2, gws, lws);
+        CL_CHECK(clEnqueueCopyBuffer(cl_.queue, hfin_, hlast_, E4, 0, E4, 0, nullptr, nullptr));
+        mtp_rows(&toks[q.row], hfin_, 1, q.pos, false);
+      }
+      if (dfl_) dfl_commit(0, q.row, 1, q.pos);
+      slot_host_[q.slot].pos = q.pos + 1;
+    }
+    dfl_cap_lo_ = dfl_cap_end_ = 0;
+    unpark(bound);
+    clFinish(cl_.queue);
+    collect_profile();
+    return batch_logits_host_;
+  }
+  int batch_rows() const { return batch_rows_; }
+  // verify() for several slots in one pass: rows[b] = {token, drafts...} of slot slots[b] (drafts from mtp_draft in
+  // that slot). Returns the logits rows of every slot one after the other; then each slot settles its own with
+  // verify_done() (bound to it, in any order, other slots' passes may run in between). At most batch_rows() rows
+  // (8 or fewer keep the single-token kernels: the rows bit-identical to verify() of each slot alone).
+  const std::vector<float>& verify_batch(const std::vector<int>& slots, const std::vector<std::vector<int>>& rows) {
+    const int B = (int)slots.size();
+    int R = 0;
+    for (const auto& r : rows) R += (int)r.size();
+    if (!batch_ok() || gemma_mtp_ || !has_mtp || B < 1 || B != (int)rows.size() || R > batch_rows_)
+      throw std::runtime_error("verify_batch: not for this model or too many rows");
+    const int bound = slot_;
+    for (int b = 0; b < B; ++b) {
+      if (rows[b].size() < 2 || (int)rows[b].size() > 1 + max_drafts()) throw std::runtime_error("verify_batch: drafts");
+      bind(slots[b]);
+      flush_mtp_pending();
+    }
+    clFinish(cl_.queue);
+    park();
+    batch_.clear();
+    std::vector<int> toks;
+    for (int b = 0; b < B; ++b) {
+      SlotHost& h = slot_host_[slots[b]];
+      if (h.pos + (int)rows[b].size() > ctx) {
+        unpark(bound);
+        throw std::runtime_error("context overflow");
+      }
+      batch_.push_back({slots[b], (int)toks.size(), (int)rows[b].size(), h.pos, h.rope_shift});
+      h.last_drafts.assign(rows[b].begin() + 1, rows[b].end());
+      h.vrows = true;
+      toks.insert(toks.end(), rows[b].begin(), rows[b].end());
+    }
+    const int Mp = 16;
+    embed(toks.data(), R, Mp);
+    pos = 0;
+    dfl_cap_lo_ = dfl_cap_base_ = 0;
+    dfl_cap_end_ = R;
+    spec_ = true;
+    for (auto& L : layers_) run_layer(L, R, Mp);
+    spec_ = false;
+    const std::vector<BatchSeq> seqs = batch_;
+    batch_.clear();
+    head_rows(0, R, out_norm_, nullptr);
+    if (batch_logits_host_.size() < (size_t)hp.n_vocab * R) batch_logits_host_.resize((size_t)hp.n_vocab * batch_rows_);
+    CL_CHECK(clEnqueueReadBuffer(cl_.queue, logits_, CL_TRUE, 0, (size_t)hp.n_vocab * R * 4, batch_logits_host_.data(), 0,
+                                 nullptr, nullptr));
+    const size_t E4 = (size_t)hp.n_embd * 4;
+    for (const BatchSeq& q : seqs) {  // each slot's hidden states (verify_done) and DFlash2 rows of the pass
+      point_to(q.slot);
+      float eps = hp.eps;
+      int E = hp.n_embd, M = Mp, nn = q.n, r0 = q.row, wh = 1, a32 = 1;
+      set_args(k_rmsnorm_, 0, x_, r0, out_norm_, E, M, nn, eps, aq_, asc_, absum_, hver_, wh, a32);
+      size_t gws[2] = {256, (size_t)q.n}, lws[2] = {256, 1};
+      run("rmsnorm_quant", k_rmsnorm_, 2, gws, lws);
+      if (dfl_)
+        CL_CHECK(clEnqueueCopyBuffer(cl_.queue, dfl_acc_[0], dfl_vrows_, (size_t)q.row * E4, 0, (size_t)q.n * E4, 0, nullptr, nullptr));
+      slot_host_[q.slot].pos = q.pos + q.n;
+    }
+    dfl_cap_lo_ = dfl_cap_end_ = 0;
+    unpark(bound);
+    clFinish(cl_.queue);
+    collect_profile();
+    return batch_logits_host_;
+  }
+
+ private:
+  // the bound slot's host state and device addresses back into its records
+  void park() {
     SlotHost& h = slot_host_[slot_];
     h.pos = pos;
     h.rope_shift = rope_shift;
@@ -659,7 +804,13 @@ class Engine {
     h.dfl_wait = dfl_wait_;
     h.dfl_gap = dfl_gap_;
     h.dfl_probe = dfl_probe_;
+    h.dfl_used = dfl_used_;
+    h.vrows = vrows_;
+    h.last_drafts = std::move(last_drafts_);
     for (size_t i = 0; i < roles_.size(); ++i) slot_ptrs_[slot_][i] = (*roles_[i])->ptr;
+  }
+  // slot s's host state and device addresses into the engine
+  void unpark(int s) {
     slot_ = s;
     SlotHost& g = slot_host_[s];
     pos = g.pos;
@@ -675,11 +826,41 @@ class Engine {
     dfl_wait_ = g.dfl_wait;
     dfl_gap_ = g.dfl_gap;
     dfl_probe_ = g.dfl_probe;
-    for (size_t i = 0; i < roles_.size(); ++i) (*roles_[i])->ptr = slot_ptrs_[s][i];
-    for (auto& v : subs_) v.m->ptr = (*roles_[v.role])->ptr + v.off;
+    dfl_used_ = g.dfl_used;
+    vrows_ = g.vrows;
+    last_drafts_ = std::move(g.last_drafts);
+    point_to(s);
     attn_in_ready_ = ffn_in_ready_ = false;
     rt_pos_[0] = rt_pos_[1] = -1;
   }
+  // the state buffers at slot s's memory (device addresses only; inside a batched pass, every slot parked)
+  void point_to(int s) {
+    for (size_t i = 0; i < roles_.size(); ++i) (*roles_[i])->ptr = slot_ptrs_[s][i];
+    for (auto& v : subs_) v.m->ptr = (*roles_[v.role])->ptr + v.off;
+  }
+  // a batched pass: each sequence's rows (slot, first row, rows, position, rotary shift); empty otherwise
+  struct BatchSeq { int slot, row, n, pos, rs; };
+  std::vector<BatchSeq> batch_;
+  bool vrows_ = false;            // the pending verification is a batched one: its DFlash2 rows in dfl_vrows_
+  cl_mem dfl_vrows_ = nullptr;    // (slots with DFlash2: a slot's rows of a batched verification pass)
+  int batch_rows_ = 1;
+  std::vector<float> batch_logits_host_;
+  // a working buffer from byte `off` on (rows of a sequence inside a batched pass), made once
+  std::map<std::pair<ZMem*, size_t>, cl_mem> views_;
+  cl_mem from(cl_mem b, size_t off) {
+    if (!off || !b) return b;
+    cl_mem& v = views_[{b, off}];
+    if (!v) {
+      cl_buffer_region r{off, b->size - off};
+      cl_int err;
+      v = clCreateSubBuffer(b, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &r, &err);
+      CL_CHECK(err);
+      mems_.push_back(v);
+    }
+    return v;
+  }
+
+ public:
   // GPU bytes of one more slot with a context of c tokens: the KV caches (and QSA pooled keys), the recurrent states,
   // the MTP block's hidden states, DFlash2's rings, the snapshots
   size_t slot_bytes(int c) const {
@@ -867,7 +1048,8 @@ class Engine {
     HostSnap hsnap;
     double dfl_ema = 4.0;
     int dfl_wait = 0, dfl_gap = 8;
-    bool dfl_probe = false;
+    bool dfl_probe = false, dfl_used = false, vrows = false;
+    std::vector<int> last_drafts;
   };
   struct SlotView { ZMem* m; int role; size_t off; };
   std::vector<cl_mem*> roles_;
@@ -2447,7 +2629,9 @@ class Engine {
     }
     // decode key-split partials: up to 4 rows x splits (small splits only while splits * sub-groups < 512)
     apart_ = buf((size_t)4 * std::max(ctx / 256 + 1, 512) * hp.n_head * (hp.head_dim + 2) * 4);
-    logits_ = buf((size_t)hp.n_vocab * 4 * (1 + max_drafts()));  // rows of a speculative verification pass
+    // rows of a speculative verification pass or a batched pass over the slots
+    batch_rows_ = std::min(16, std::max(1 + max_drafts(), std::max(opt.slots, 1)));
+    logits_ = buf((size_t)hp.n_vocab * 4 * batch_rows_);
     if (hp.moe) {
       const size_t S = M * hp.n_expert_used, F = hp.n_ff_exp_pad, NE = hp.n_expert;
       slots_ = (int)S;
@@ -3451,30 +3635,41 @@ class Engine {
       size_t g1 = ((size_t)n + 255) / 256 * 256, l1 = 256;
       run("gdn_gates", k_gdn_gates_, 1, &g1, &l1);
     }
-    {
-      set_args(k_gdn_conv_, 0, bigc, L.conv_state, L.conv_w, C, nk, T, eps, conv_out_);
-      size_t gws[2] = {(size_t)C / 128 * 16, (size_t)(T + conv_ct_ - 1) / conv_ct_}, lws[2] = {64, 1};
-      run("gdn_conv", k_gdn_conv_, 2, gws, lws);
-      size_t g1 = ((size_t)C + 255) / 256 * 256, l1 = 256;  // (conv_state_update checks c < C)
-      if (spec_) {  // (verification pass: what verify_done() needs to replay the accepted tokens)
-        CL_CHECK(clEnqueueCopyBuffer(cl_.queue, L.conv_state, L.conv_pre, 0, 0, (size_t)3 * C * 4, 0, nullptr, nullptr));
-        CL_CHECK(clEnqueueCopyBuffer(cl_.queue, bigc, L.qkvin, 0, 0, (size_t)T * C * 4, 0, nullptr, nullptr));
-        CL_CHECK(clEnqueueCopyBuffer(cl_.queue, conv_out_, L.xin, 0, 0, (size_t)T * C * 4, 0, nullptr, nullptr));
-        CL_CHECK(clEnqueueCopyBuffer(cl_.queue, gbc, L.abin, 0, 0, (size_t)T * 2 * nv * 4, 0, nullptr, nullptr));
+    // (a batched pass: per sequence, on its rows of the buffers and its slot's states)
+    auto seq = [&](int r0, int Tq) {
+      cl_mem bq = from(bigc, (size_t)r0 * C * 4), cq = from(conv_out_, (size_t)r0 * C * 4),
+             gq = from(gbc, (size_t)r0 * 2 * nv * 4), oq = from(o_, (size_t)r0 * Di * 4);
+      {
+        set_args(k_gdn_conv_, 0, bq, L.conv_state, L.conv_w, C, nk, Tq, eps, cq);
+        size_t gws[2] = {(size_t)C / 128 * 16, (size_t)(Tq + conv_ct_ - 1) / conv_ct_}, lws[2] = {64, 1};
+        run("gdn_conv", k_gdn_conv_, 2, gws, lws);
+        size_t g1 = ((size_t)C + 255) / 256 * 256, l1 = 256;  // (conv_state_update checks c < C)
+        if (spec_) {  // (verification pass: what verify_done() needs to replay the accepted tokens)
+          CL_CHECK(clEnqueueCopyBuffer(cl_.queue, L.conv_state, L.conv_pre, 0, 0, (size_t)3 * C * 4, 0, nullptr, nullptr));
+          CL_CHECK(clEnqueueCopyBuffer(cl_.queue, bq, L.qkvin, 0, 0, (size_t)Tq * C * 4, 0, nullptr, nullptr));
+          CL_CHECK(clEnqueueCopyBuffer(cl_.queue, cq, L.xin, 0, 0, (size_t)Tq * C * 4, 0, nullptr, nullptr));
+          CL_CHECK(clEnqueueCopyBuffer(cl_.queue, gq, L.abin, 0, 0, (size_t)Tq * 2 * nv * 4, 0, nullptr, nullptr));
+        }
+        set_args(k_conv_upd_, 0, bq, L.conv_state, C, Tq);
+        run("conv_state_update", k_conv_upd_, 1, &g1, &l1);
       }
-      set_args(k_conv_upd_, 0, bigc, L.conv_state, C, T);
-      run("conv_state_update", k_conv_upd_, 1, &g1, &l1);
-    }
-    {
-      // (ARC_GDN1=1: a T = 1 kernel with 4 lanes per state column and 128 GRF; bit-identical but slower: 35B 248-341
-      //  vs 226-254 ms per 96 tokens for gdn_recur with vector state loads, which was 316)
-      static const bool use1 = getenv("ARC_GDN1") && atoi(getenv("ARC_GDN1")) != 0;
-      const bool one = T == 1 && use1;
-      cl_kernel k = one ? k_gdn_recur1_ : k_gdn_recur_;
-      set_args(k, 0, conv_out_, C, gbc, nk, nv, L.S, T, o_, spec_ ? L.S_next : L.S);
-      size_t g1 = (size_t)nv * (one ? 512 : 128), l1 = 64;
-      run(one ? "gdn_recur1" : "gdn_recur", k, 1, &g1, &l1);
-    }
+      {
+        // (ARC_GDN1=1: a T = 1 kernel with 4 lanes per state column and 128 GRF; bit-identical but slower: 35B 248-341
+        //  vs 226-254 ms per 96 tokens for gdn_recur with vector state loads, which was 316)
+        static const bool use1 = getenv("ARC_GDN1") && atoi(getenv("ARC_GDN1")) != 0;
+        const bool one = Tq == 1 && use1;
+        cl_kernel k = one ? k_gdn_recur1_ : k_gdn_recur_;
+        set_args(k, 0, cq, C, gq, nk, nv, L.S, Tq, oq, spec_ ? L.S_next : L.S);
+        size_t g1 = (size_t)nv * (one ? 512 : 128), l1 = 64;
+        run(one ? "gdn_recur1" : "gdn_recur", k, 1, &g1, &l1);
+      }
+    };
+    if (batch_.empty()) seq(0, T);
+    else
+      for (const BatchSeq& q : batch_) {
+        point_to(q.slot);
+        seq(q.row, q.n);
+      }
     const int a_out = act32_for(true);
     {
       set_args(k_gnorm_, 0, o_, zc, L.ssm_norm, Di, Mp, T, eps, aq_, asc_, absum_, a_out);
@@ -3598,7 +3793,27 @@ class Engine {
     matmul("gemm_q", L.wq, Mp, big_, ldq, 0, false, a_in);
     matmul("gemm_k", L.wk, Mp, big_, ldq, nh * hd * 2, false, a_in);
     matmul("gemm_v", L.wv, Mp, big_, ldq, nh * hd * 2 + nkv * hd, false, a_in);
-    {
+    if (!batch_.empty()) {  // a batched pass: each sequence's rows with its slot's caches and position (T <= 8)
+      const cl_mem qi0 = qi_, qsc0 = qsc_, o0 = o_;
+      for (const BatchSeq& q : batch_) {
+        point_to(q.slot);
+        float eps = hp.eps, theta_scale = std::pow(hp.rope_base, -2.0f / hp.n_rot), kq_scale = 1.0f / std::sqrt((float)hd);
+        int p0 = q.pos, nr = hp.n_rot, cx = ctx, f32a = 0, rs = q.rs, ur = 0, Tq = q.n;
+        struct alignas(16) Int4 { int x, y, z, w; } sect = {hp.rope_sect[0], hp.rope_sect[1], hp.rope_sect[2], hp.rope_sect[3]};
+        qi_ = from(qi0, (size_t)q.row * nh * hd);
+        qsc_ = from(qsc0, (size_t)q.row * nh * 4);
+        o_ = from(o0, (size_t)q.row * nh * hd * 4);
+        set_args(k_attn_prep_, 0, from(big_, (size_t)q.row * ldq * 4), ldq, nh, nkv, L.q_norm, L.k_norm, Tq, p0, eps,
+                 theta_scale, nr, kq_scale, qrope_, L.kc, L.vc, cx, qi_, qsc_, L.kq, L.ksc, L.vq, L.vsc, f32a, rs, qsc_, ur, sect);
+        if (opt.v4) set_args(k_attn_prep_, 27, L.vq4, L.vsc4);
+        size_t gws[2] = {(size_t)(nh + nkv) * 16, (size_t)Tq}, lws[2] = {16, 1};
+        run("attn_prep", k_attn_prep_, 2, gws, lws);
+        attn_decode_rows("attention", L, ctx, nkv, nh / nkv, hd, q.pos, Tq, 0);
+      }
+      qi_ = qi0;
+      qsc_ = qsc0;
+      o_ = o0;
+    } else {
       float eps = hp.eps, theta_scale = std::pow(hp.rope_base, -2.0f / hp.n_rot), kq_scale = 1.0f / std::sqrt((float)hd);
       int p0 = pos, nr = hp.n_rot, cx = ctx, f32a = opt.attn_int8 ? 0 : 1, rs = rope_shift, ur = use_rpos_;
       struct alignas(16) Int4 { int x, y, z, w; } sect = {hp.rope_sect[0], hp.rope_sect[1], hp.rope_sect[2], hp.rope_sect[3]};
@@ -3608,8 +3823,10 @@ class Engine {
       size_t gws[2] = {(size_t)(nh + nkv) * 16, (size_t)T}, lws[2] = {16, 1};
       run("attn_prep", k_attn_prep_, 2, gws, lws);
     }
-    const bool qsa = L.qr > 0 && qsa_prepare(L, T, Mp, a_in);
-    if (qsa) {
+    const bool qsa = batch_.empty() && L.qr > 0 && qsa_prepare(L, T, Mp, a_in);
+    if (!batch_.empty()) {
+      // (done above, per sequence)
+    } else if (qsa) {
       qsa_attention(L, T);
     } else if (opt.attn_int8 && T <= 8) {
       // flash-decoding, token by token (single tokens and speculative verification): split the keys over many
@@ -4303,8 +4520,9 @@ class Engine {
     matmul("dfl_fc", dfl_fc_[li], Mp, dfl_acc_[v], hp.n_embd, 0, li > 0 ? 1 : 0, a32);
   }
   // the context K / V of rows r0 .. r0 + n of accumulator v (positions p0 ..) into every drafter layer's ring
-  void dfl_commit(int v, int r0, int n, int p0) {
+  void dfl_commit(int v, int r0, int n, int p0, cl_mem src = nullptr) {
     if (n <= 0) return;
+    if (!src) src = dfl_acc_[v];
     const int saved = cur_T_, E = hp.n_embd, KW = dfl_nkv_ * 128;
     for (int c0 = 0; c0 < n; c0 += max_chunk) {
       const int T = std::min(max_chunk, n - c0), Mp = T >= 128 ? std::min((T + 127) / 128 * 128, max_chunk) : (T + 15) / 16 * 16;
@@ -4313,7 +4531,7 @@ class Engine {
       {
         float eps = dfl_eps_;
         int rr = r0 + c0, EE = E, MM = Mp, TT = T, wh = 0, aa = a32;
-        set_args(k_rmsnorm_, 0, dfl_acc_[v], rr, dfl_hnorm_, EE, MM, TT, eps, aq_, asc_, absum_, big_, wh, aa);
+        set_args(k_rmsnorm_, 0, src, rr, dfl_hnorm_, EE, MM, TT, eps, aq_, asc_, absum_, big_, wh, aa);
         size_t gws[2] = {256, (size_t)Mp}, lws[2] = {256, 1};
         run("dfl_ctx", k_rmsnorm_, 2, gws, lws);
       }
@@ -4687,6 +4905,7 @@ class Engine {
     std::vector<int> toks{tok};
     toks.insert(toks.end(), drafts.begin(), drafts.end());
     last_drafts_ = drafts;
+    vrows_ = false;
     embed(toks.data(), T, 16);
     if (dfl_) dfl_window(pos, T);
     spec_ = !gemma_mtp_;
@@ -4703,6 +4922,8 @@ class Engine {
   // The first `accepted` drafts of the last verify() turned out right; the rest are dropped.
   void verify_done(int accepted) {
     const size_t E4 = (size_t)hp.n_embd * 4;
+    const cl_mem dfl_src = vrows_ ? dfl_vrows_ : nullptr;  // (a batched pass: the slot's own copy of its rows)
+    vrows_ = false;
     const int nd = (int)last_drafts_.size();
     accepted = std::clamp(accepted, 0, nd);
     if (!gemma_mtp_)
@@ -4729,7 +4950,7 @@ class Engine {
       return;
     }
     if (dfl_) {  // DFlash: the context of the token and the accepted drafts (rows 0 .. accepted of the pass)
-      dfl_commit(0, 0, accepted + 1, pos - accepted - 1);
+      dfl_commit(0, 0, accepted + 1, pos - accepted - 1, dfl_src);
       if (dfl_used_) dfl_ema_ = 0.75 * dfl_ema_ + 0.25 * accepted;
       if (dfl_used_ && dfl_probe_) {
         dfl_gap_ = dfl_ema_ >= dfl_min_acc() ? 8 : std::min(2 * dfl_gap_, 1 << 16);

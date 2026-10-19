@@ -96,7 +96,8 @@ static int run_main(int argc, char** argv) {
             "  --kl-ref F            KL of the next-token distributions against an f32 reference (tools\\ref_forward)\n"
             "  --kl-decode           with --kl-ref: through the token-by-token generation path\n"
             "  --slots-check         two conversations (the prompt's halves) alone, then held at once in slots 0 and 1\n"
-            "                        with their steps interleaved: every logit must be bit for bit the same (--mtp: drafts)\n"
+            "                        with their steps interleaved and batched: every logit must be bit for bit the same\n"
+            "  --bench-batch N       time of a batched decoding step over 1..N slots against one slot alone\n"
             "  --perplexity F        perplexity of a text file (llama-perplexity method: second half of each chunk scored)\n"
             "  --ppl-ctx N           chunk length (default 512)   --ppl-chunks N   chunks to score (default all)\n"
             "  --ppl-dump F          write the chunks' token ids to F (for ref_forward)\n"
@@ -113,6 +114,7 @@ static int run_main(int argc, char** argv) {
   int n_gen = 16, chunk = 0, ctx = 0, bench_pp = 0, feed_step = 0;
   EngineOptions eo;
   bool prof = false, show = false, prof_gen = false, kl_decode = false, slots_check = false;
+  int bench_batch = 0;
   std::string dump_logits;  // every generation step's logits (f32), to compare two builds / settings bitwise
   for (int i = 2; i < argc; ++i) {
     std::string a = argv[i];
@@ -154,6 +156,7 @@ static int run_main(int argc, char** argv) {
     else if (a == "--mtp-min-p") eo.mtp_min_p = (float)atof(argv[++i]);
     else if (a == "--kl-ref") kl_ref = argv[++i];
     else if (a == "--slots-check") slots_check = true;
+    else if (a == "--bench-batch") bench_batch = atoi(argv[++i]);
     else if (a == "--kl-decode") kl_decode = true;  // with --kl-ref of every position: feed the prompt token by token
     else if (a == "--perplexity") ppl_file = argv[++i];
     else if (a == "--ppl-dump") ppl_dump = argv[++i];
@@ -179,7 +182,8 @@ static int run_main(int argc, char** argv) {
     printf("%zu tokens -> %s\n", toks.size(), dump_ids.c_str());
     return 0;
   }
-  const int need = std::max((bench_pp > 0 ? bench_pp : (int)toks.size()) + n_gen + 16, ppl_file.empty() ? 0 : ppl_ctx + 16);
+  const int need = std::max((bench_pp > 0 ? bench_pp : (int)toks.size()) + n_gen + 16 + (bench_batch > 1 ? 1024 : 0),
+                            ppl_file.empty() ? 0 : ppl_ctx + 16);
   if (!ppl_file.empty() && chunk == 0) chunk = std::min(ppl_ctx, 8192);  // (longer chunks: fed in pieces of 8192)
   eo.ctx = std::max(ctx, need);
   eo.chunk = chunk;
@@ -190,13 +194,79 @@ static int run_main(int argc, char** argv) {
          eng.hp.n_layer, eng.hp.n_embd, eng.hp.n_vocab, eng.gpu_bytes / 1073741824.0,
          eng.w8_resident ? "resident" : "just-in-time", eng.max_chunk, eng.ctx, eng.load_ms);
 
+  if (bench_batch > 1) {  // batched decoding (forward_batch) over 1..N slots holding the prompt, against one slot alone
+    const int NS = bench_batch;
+    eng.add_slots(NS);
+    for (int s = 0; s < NS; ++s) {
+      eng.bind(s);
+      eng.forward(toks.data(), (int)toks.size());
+    }
+    eng.bind(0);
+    const int reps = 16;
+    for (int B = 1; B <= std::min(NS, eng.batch_rows()); ++B) {
+      double best = 1e30, one = 1e30;
+      std::vector<int> sl, tk;
+      for (int b = 0; b < B; ++b) { sl.push_back(b); tk.push_back(toks[b]); }
+      for (int round = 0; round < 3; ++round) {
+        auto t0 = std::chrono::steady_clock::now();
+        for (int r = 0; r < reps; ++r) eng.forward_batch(sl, tk);
+        best = std::min(best, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / reps);
+        t0 = std::chrono::steady_clock::now();
+        for (int r = 0; r < reps; ++r) eng.forward(&tk[0], 1);
+        one = std::min(one, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / reps);
+      }
+      printf("B %d: %.1f ms per batched step (%.1f tok/s together) | one slot alone %.1f ms (%.1f tok/s): %.2fx\n", B, best,
+             1000.0 * B / best, one, 1000.0 / one, one * B / best);
+    }
+    if (eng.has_mtp)  // with drafts (as many as B slots' rows fit one pass; none accepted, the same work every step)
+      for (int B = 2; B <= NS && 2 * B <= eng.batch_rows(); ++B) {
+        const int nd = std::min(eng.opt.mtp_drafts, eng.batch_rows() / B - 1);
+        double alt = 1e30, bat = 1e30;
+        for (int round = 0; round < 3; ++round) {
+          auto t0 = std::chrono::steady_clock::now();
+          for (int r = 0; r < reps / 2; ++r)
+            for (int b = 0; b < B; ++b) {  // each slot alone, in turn
+              eng.bind(b);
+              eng.verify(toks[b], eng.mtp_draft(toks[b], nd));
+              eng.verify_done(0);
+            }
+          alt = std::min(alt, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / (reps / 2));
+          t0 = std::chrono::steady_clock::now();
+          for (int r = 0; r < reps / 2; ++r) {  // the drafts of every slot, one verification pass, each settled
+            std::vector<int> sl;
+            std::vector<std::vector<int>> rows;
+            for (int b = 0; b < B; ++b) {
+              eng.bind(b);
+              std::vector<int> row{toks[b]};
+              for (int d : eng.mtp_draft(toks[b], nd)) row.push_back(d);
+              sl.push_back(b);
+              rows.push_back(row);
+            }
+            eng.verify_batch(sl, rows);
+            for (int b = 0; b < B; ++b) {
+              eng.bind(b);
+              eng.verify_done(0);
+            }
+          }
+          bat = std::min(bat, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / (reps / 2));
+        }
+        eng.bind(0);
+        printf("B %d with %d drafts each: %.1f ms per step of every slot in turn, %.1f ms batched: %.2fx\n", B, nd, alt, bat,
+               alt / bat);
+      }
+    return 0;
+  }
   if (slots_check) {
     // conversation A = the first half of the prompt, B = the second half; each prompt fed in two calls, then n_gen
-    // greedy tokens (with drafts when the engine drafts). Alone: one after the other in slot 0; together: A in slot 0,
-    // B in slot 1, every call alternating. The FNV hash of every logits row read is compared.
+    // greedy tokens one by one, then (when the engine drafts) n_gen more with drafts. Alone: one after the other in
+    // slot 0; interleaved: A in slot 0, B in slot 1, every call alternating; batched (dense / MoE Qwen): the one-by-one
+    // tokens of both slots in one pass (forward_batch), then the drafted ones alternating. The FNV hash of every
+    // logits row read is compared.
     if (toks.size() < 8) { fprintf(stderr, "--slots-check needs a prompt of at least 8 tokens\n"); return 1; }
     eng.add_slots(2);
-    const int V = eng.hp.n_vocab;
+    const int V = eng.hp.n_vocab, n_all = eng.has_mtp ? 2 * n_gen : n_gen;
+    // (drafts per step: as many as two slots' rows fit one batched pass, in every run)
+    const int nd = std::max(1, std::min(eng.opt.mtp_drafts, eng.batch_rows() / 2 - 1));
     auto fnv = [](const float* p, size_t n) {
       uint64_t h = 1469598103934665603ull;
       const uint8_t* b = (const uint8_t*)p;
@@ -210,7 +280,7 @@ static int run_main(int argc, char** argv) {
       std::vector<float> lg;
       int stage = 0;
     };
-    // one call of a conversation: prompt part 1, prompt part 2, then a generation step (a verification pass with drafts)
+    // one call of a conversation: prompt part 1, prompt part 2, a token, or a verification pass with drafts
     auto step = [&](Conv& c) {
       const int half = (int)c.P.size() / 2;
       if (c.stage == 0) {
@@ -224,8 +294,8 @@ static int run_main(int argc, char** argv) {
       } else {
         const int t = argmax(c.lg.data());
         c.out.push_back(t);
-        if (eng.has_mtp) {
-          const std::vector<int> d = eng.mtp_draft(t, eng.opt.mtp_drafts);
+        if ((int)c.out.size() > n_gen) {
+          const std::vector<int> d = eng.mtp_draft(t, nd);
           const std::vector<float>& lv = eng.verify(t, d);
           size_t acc = 0;
           while (acc < d.size() && argmax(&lv[acc * V]) == d[acc]) ++acc;
@@ -240,27 +310,83 @@ static int run_main(int argc, char** argv) {
       }
       ++c.stage;
     };
-    auto done = [&](const Conv& c) { return c.stage >= 2 && (int)c.out.size() >= n_gen; };
+    auto done = [&](const Conv& c) { return c.stage >= 2 && (int)c.out.size() >= n_all; };
     const int mid = (int)toks.size() / 2;
-    Conv a1, b1, a2, b2;
-    a1.P = a2.P = std::vector<int>(toks.begin(), toks.begin() + mid);
-    b1.P = b2.P = std::vector<int>(toks.begin() + mid, toks.end());
+    Conv a1, b1, a2, b2, a3, b3;
+    a1.P = a2.P = a3.P = std::vector<int>(toks.begin(), toks.begin() + mid);
+    b1.P = b2.P = b3.P = std::vector<int>(toks.begin() + mid, toks.end());
     for (Conv* c : {&a1, &b1})
       while (!done(*c)) step(*c);
     while (!done(a2) || !done(b2)) {
       if (!done(a2)) { eng.bind(0); step(a2); }
       if (!done(b2)) { eng.bind(1); step(b2); }
     }
+    const bool batched = eng.batch_ok();
+    if (batched) {
+      for (int k = 0; k < 2; ++k) {
+        eng.bind(0); step(a3);
+        eng.bind(1); step(b3);
+      }
+      while ((int)a3.out.size() < n_gen || (int)b3.out.size() < n_gen) {  // (both the same number of plain tokens)
+        const int ta = argmax(a3.lg.data()), tb = argmax(b3.lg.data());
+        const std::vector<float>& lv = eng.forward_batch({0, 1}, {ta, tb});
+        for (int r = 0; r < 2; ++r) {
+          Conv& c = r ? b3 : a3;
+          c.out.push_back(r ? tb : ta);
+          c.lg.assign(lv.begin() + (size_t)r * V, lv.begin() + (size_t)(r + 1) * V);
+          c.h.push_back(fnv(c.lg.data(), V));
+          ++c.stage;
+        }
+      }
+      // then the drafted steps of both slots verified in one pass (verify_batch), each settled in its slot
+      while (eng.has_mtp && !done(a3) && !done(b3)) {
+        std::vector<std::vector<int>> rows;
+        for (int r = 0; r < 2; ++r) {
+          Conv& c = r ? b3 : a3;
+          const int t = argmax(c.lg.data());
+          c.out.push_back(t);
+          eng.bind(r);
+          std::vector<int> row{t};
+          for (int d : eng.mtp_draft(t, nd)) row.push_back(d);
+          rows.push_back(row);
+        }
+        const std::vector<float> lv = eng.verify_batch({0, 1}, rows);
+        size_t r0 = 0;
+        for (int r = 0; r < 2; ++r) {
+          Conv& c = r ? b3 : a3;
+          const std::vector<int> d(rows[r].begin() + 1, rows[r].end());
+          size_t acc = 0;
+          while (acc < d.size() && argmax(&lv[(r0 + acc) * V]) == d[acc]) ++acc;
+          for (size_t k = 0; k <= acc; ++k) c.h.push_back(fnv(&lv[(r0 + k) * V], V));
+          eng.bind(r);
+          eng.verify_done((int)acc);
+          c.out.insert(c.out.end(), d.begin(), d.begin() + acc);
+          c.lg.assign(lv.begin() + (r0 + acc) * V, lv.begin() + (r0 + acc + 1) * V);
+          ++c.stage;
+          r0 += rows[r].size();
+        }
+      }
+      while (!done(a3) || !done(b3)) {
+        if (!done(a3)) { eng.bind(0); step(a3); }
+        if (!done(b3)) { eng.bind(1); step(b3); }
+      }
+    }
     eng.bind(0);
     bool ok = true;
-    for (auto [x, y, name] : {std::tuple{&a1, &a2, "A"}, std::tuple{&b1, &b2, "B"}}) {
+    auto cmp = [&](const Conv* x, const Conv* y, const char* name) {
       size_t same = 0;
       while (same < x->h.size() && same < y->h.size() && x->h[same] == y->h[same]) ++same;
       const bool eq = same == x->h.size() && same == y->h.size() && x->out == y->out;
       ok = ok && eq;
-      printf("conversation %s: %zu prompt tokens, %zu generated, %zu logits rows: %s", name, x->P.size(), x->out.size(),
-             x->h.size(), eq ? "bit-identical\n" : "DIFFERENT");
+      printf("%s: %zu prompt tokens, %zu generated, %zu logits rows: %s", name, x->P.size(), x->out.size(), x->h.size(),
+             eq ? "bit-identical\n" : "DIFFERENT");
       if (!eq) printf(" (first difference at row %zu of %zu / %zu)\n", same, x->h.size(), y->h.size());
+    };
+    cmp(&a1, &a2, "conversation A interleaved");
+    cmp(&b1, &b2, "conversation B interleaved");
+    if (batched) {
+      cmp(&a1, &a3, "conversation A batched");
+      cmp(&b1, &b3, "conversation B batched");
     }
     printf("slots check: %s\n", ok ? "passed" : "FAILED");
     return ok ? 0 : 2;
