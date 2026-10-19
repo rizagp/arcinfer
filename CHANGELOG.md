@@ -5,8 +5,10 @@
 - **Gemma 4 26B-A4B** (Google QAT Q4_0; arcinferzero, `pi-arc g26`): the dense FFN and 128 routed experts side by
   side, experts streamed from the SSD like the 35B's (gate / up from one tensor; GELU; the router in f32 on its own
   input norm; a scale per expert). Prompt 450 tok/s (4K), generation ~20 tok/s; KL 0.07 against the CPU reference
-  (`tools/ref_forward` now runs its experts), the size of int8 activations' own effect. Images not yet (its vision
-  encoder has 72-dim heads); `--ctx auto` keeps no memory for an encoder it cannot run.
+  (`tools/ref_forward` now runs its experts), the size of int8 activations' own effect. Images too: its vision
+  encoder's 72-dim heads (`g4v_qkv_hd`) and std_bias / std_scale; the embeddings match `tools/gemma4v_ref.py` (cosine
+  >= 0.999997; `bin\vision_testz.exe` writes them for arcinferzero). `--ctx auto` keeps no memory for an encoder it
+  cannot run.
 - The server prints why a model cannot load instead of stopping silently.
 
 - **Conversation slots** (arcinferzero; `serverz --slots N`, `arc-server -Slots N`, `pi-arc --slots N`): the server

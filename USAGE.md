@@ -51,7 +51,7 @@ and the DFlash2 drafters are not downloaded by setup.
 | `pi-arc flash` | Qwen3.8 Flash Next: large mixture of experts, slower (~6-7 tokens/s) |
 | `pi-arc g12` | Gemma 4 12B: reads images (attach an image in Pi or the web UI) |
 | `pi-arc e4b` | Gemma 4 E4B: small and fast |
-| `pi-arc g26` | Gemma 4 26B-A4B (Google QAT Q4_0): mixture of experts (~4B active), ~20 tokens/s, 106K context; no images yet |
+| `pi-arc g26` | Gemma 4 26B-A4B (Google QAT Q4_0): mixture of experts (~4B active), ~20 tokens/s, reads images; 57K context with images, 106K with `--vision off` |
 | `pi-arc 9b` | Qwen3.5 9B: faster, medium quality |
 | `pi-arc 4b` | Qwen3.5 4B: fastest |
 | `pi-arc --think off` | No thinking (reasoning) phase: much faster answers |

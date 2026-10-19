@@ -2032,9 +2032,13 @@ static std::vector<ModelInfo> scan_models() {
         try {
           const GgufFile g(s.path().string());
           const std::string pt = g.get_str("clip.vision.projector_type", "");
-          // (gemma4v: the GPU encoder's 64-dim heads; Gemma 4 26B-A4B's projector has 72)
+          // (gemma4v: the head sizes the GPU encoder takes, 64 and 72 (26B-A4B); the OpenCL engine's 64 only)
           const int64_t ve = g.get_int("clip.vision.embedding_length", 0), vh = g.get_int("clip.vision.attention.head_count", 0);
+#ifdef ARC_ZERO
+          const bool g4v_ok = vh > 0 && ve % vh == 0 && VisionGemma4V::head_ok((int)(ve / vh));
+#else
           const bool g4v_ok = vh > 0 && ve % vh == 0 && ve / vh == 64;
+#endif
           mmproj = m.arch == "gemma4" ? pt == "gemma4uv" || (pt == "gemma4v" && g4v_ok)
                                       : (m.arch == "qwen35" || m.arch == "qwen35moe") && VisionQwen3VL::usable(g);
           // (audio: the encoders load_model loads, AudioGemma4A for gemma4a, AudioGemma4 for gemma4ua)

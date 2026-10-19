@@ -2625,6 +2625,51 @@ __kernel void g4v_qkv(__global const float* h, int nh, __global const float* qn,
   }
 }
 
+// g4v_qkv for heads of G4V_HD dims (-DG4V_HD, a multiple of 4 up to 128; Gemma 4 26B-A4B: 72): the same values, lane l
+// taking dims l, l + 16, ... of a head; the rotary partner of a dim (NEOX within each half: dims (i, i + G4V_HD / 4)) is
+// read from the row again and normed with the same factor. Output [nh][Mp][G4V_HD] f16. grid (nh * 16, M_valid).
+#ifndef G4V_HD
+#define G4V_HD 64
+#endif
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void g4v_qkv_hd(__global const float* h, int nh, __global const float* qn, __global const float* kn,
+                         __global const int2* pos, float eps, float8 cl, float log2_base, int Mp, __global half* q,
+                         __global half* k, __global half* v) {
+  const int l = get_sub_group_local_id(), hh = get_global_id(0) / 16, m = get_global_id(1), E = nh * G4V_HD, Q = G4V_HD / 4;
+  const int2 p = pos[m];  // (column, row)
+  const size_t o = ((size_t)hh * Mp + m) * G4V_HD;
+  const float los[3] = {cl.s0, cl.s2, cl.s4}, his[3] = {cl.s1, cl.s3, cl.s5};
+  for (int t = 0; t < 3; ++t) {
+    __global const float* row = h + (size_t)m * 3 * E + t * E + hh * G4V_HD;
+    float ss = 0.0f;
+    for (int d = l; d < G4V_HD; d += 16) {
+      const float a = clamp(row[d], los[t], his[t]);
+      ss += a * a;
+    }
+    const float r = rsqrt(sub_group_reduce_add(ss) / (float)G4V_HD + eps);
+    __global half* dst = t == 0 ? q : t == 1 ? k : v;
+    for (int d = l; d < G4V_HD; d += 16) {
+      float a = clamp(row[d], los[t], his[t]) * r;
+      if (t < 2) {
+        __global const float* nw = t == 0 ? qn : kn;
+        const int i = d % Q, second = d % (2 * Q) >= Q, pd = second ? d - Q : d + Q;
+        const float b = clamp(row[pd], los[t], his[t]) * r * nw[pd];
+        a *= nw[d];
+        const float th = (float)(d < 2 * Q ? p.x : p.y) * exp2(-log2_base * (float)i / (float)Q);
+        const float c = cos(th), s = sin(th);
+        a = second ? b * s + a * c : a * c - b * s;
+      }
+      vstore_half(a, o + d, dst);
+    }
+  }
+}
+
+// x[t] = (x[t] - bias) * scale (Gemma 4 vision std_bias / std_scale, after the pooling). grid (E, n_tok).
+__kernel void g4v_std(__global float* x, int E, __global const float* bias, __global const float* scale) {
+  const int e = get_global_id(0), t = get_global_id(1);
+  x[(size_t)t * E + e] = (x[(size_t)t * E + e] - bias[e]) * scale[e];
+}
+
 // FFN: out[m][n] = clamp(gelu_tanh(clamp(g, cl.s0, cl.s1)) * clamp(u, cl.s2, cl.s3), cl.s4, cl.s5) with
 // h[m] = [gate | up] (2F); the last clamp is the down projection's input range. grid (F, M_valid).
 __kernel void g4v_geglu(__global const float* h, int F, float8 cl, __global float* out) {

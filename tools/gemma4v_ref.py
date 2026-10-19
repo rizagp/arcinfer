@@ -109,14 +109,15 @@ def main():
     for il in range(L):
         b = f'v.blk.{il}.'
         h = rms(x, T[b + 'ln1.weight'], eps)
-        q = lin(b + 'attn_q', h).reshape(N, nh, 64).transpose(1, 0, 2)
-        k = lin(b + 'attn_k', h).reshape(N, nh, 64).transpose(1, 0, 2)
-        v = lin(b + 'attn_v', h).reshape(N, nh, 64).transpose(1, 0, 2)
+        hd = E // nh  # (64; Gemma 4 26B-A4B 72)
+        q = lin(b + 'attn_q', h).reshape(N, nh, hd).transpose(1, 0, 2)
+        k = lin(b + 'attn_k', h).reshape(N, nh, hd).transpose(1, 0, 2)
+        v = lin(b + 'attn_v', h).reshape(N, nh, hd).transpose(1, 0, 2)
         q = rms(q, T[b + 'attn_q_norm.weight'], eps)
         k = rms(k, T[b + 'attn_k_norm.weight'], eps)
         v = rms(v, None, eps)
-        q = np.concatenate([rope_neox(q[..., :32], cols), rope_neox(q[..., 32:], rows)], axis=-1)
-        k = np.concatenate([rope_neox(k[..., :32], cols), rope_neox(k[..., 32:], rows)], axis=-1)
+        q = np.concatenate([rope_neox(q[..., :hd // 2], cols), rope_neox(q[..., hd // 2:], rows)], axis=-1)
+        k = np.concatenate([rope_neox(k[..., :hd // 2], cols), rope_neox(k[..., hd // 2:], rows)], axis=-1)
         s = q @ k.transpose(0, 2, 1)  # unscaled
         s = s - s.max(axis=-1, keepdims=True)
         a = np.exp(s)
@@ -130,6 +131,8 @@ def main():
         x = x + rms(d, T[b + 'ffn_post_norm.weight'], eps)
     # 3x3 average pooling, times sqrt(E), RMS norm, projection
     g = x.reshape(ny // pool, pool, nx // pool, pool, E).mean(axis=(1, 3)).reshape(-1, E) * np.sqrt(E)
+    if 'v.std_bias' in T:  # (26B-A4B: llama.cpp gemma4v's std_bias / std_scale)
+        g = (g - T['v.std_bias']) * T['v.std_scale']
     ref = rms(g, None, eps) @ T['mm.input_projection.weight'].T
     hdr = np.fromfile(img + '.g4v.bin', dtype=np.int32, count=3)
     gpu = np.fromfile(img + '.g4v.bin', dtype=np.float32, offset=12).reshape(hdr[0], hdr[1])

@@ -43,11 +43,10 @@ class VisionGemma4V : public GemmaImageEncoder {
       for (int c = 0; c < 3 && c < (int)m->size(); ++c) mean_[c] = (float)(*m)[c];
     if (const auto* s = f_.get_floats("clip.vision.image_std"))
       for (int c = 0; c < 3 && c < (int)s->size(); ++c) std_[c] = (float)(*s)[c];
-    if (n_embd % 16 || n_ff % 16 || n_out % 16 || n_embd / n_head != 64 || 3 * patch * patch % 16)
+    hd_ = n_head > 0 && n_embd % n_head == 0 ? n_embd / n_head : 0;
+    if (n_embd % 16 || n_ff % 16 || n_out % 16 || !head_ok(hd_) || 3 * patch * patch % 16)
       throw std::runtime_error("mmproj: this Gemma 4 vision shape is not supported on the GPU (embedding " +
                                std::to_string(n_embd) + ", heads " + std::to_string(n_head) + ")");
-    if (f_.find("v.std_bias") || f_.find("v.std_scale"))
-      throw std::runtime_error("mmproj: Gemma 4 vision std_bias / std_scale are not supported yet");
     pos_size = (int)f_.get("v.position_embd.weight").dims[1];
     // Google's default budget is 280 tokens, 1120 the most it was trained with; small text needs the full 1120
     min_tokens = 1120;
@@ -55,15 +54,17 @@ class VisionGemma4V : public GemmaImageEncoder {
   }
 
   int out_dim() const override { return n_out; }
+  // head sizes the kernels take: 64 (E2B / E4B), 72 (26B-A4B: g4v_qkv_hd, vit_attn_rows -DHD=72)
+  static bool head_ok(int hd) { return hd == 64 || hd == 72; }
 
   // GPU memory the encoder takes for images of up to max_tokens (weights + the buffers of reserve()).
   static size_t gpu_bytes(const GgufFile& g, int max_tokens) {
     const size_t E = g.get_int("clip.vision.embedding_length", 0), F = g.get_int("clip.vision.feed_forward_length", 0);
     const size_t P = g.get_int("clip.vision.patch_size", 16), pool = g.get_int("clip.vision.projector.scale_factor", 3);
     const size_t out = g.get_int("clip.vision.projection_dim", 0), K0 = 3 * P * P;
-    // (a shape the encoder refuses: nothing to keep free; Gemma 4 26B-A4B's 72-dim heads)
+    // (a shape the encoder refuses: nothing to keep free)
     const int64_t nh = g.get_int("clip.vision.attention.head_count", 12);
-    if (nh <= 0 || E % nh || E / nh != 64) return 0;
+    if (nh <= 0 || E % nh || !head_ok((int)(E / nh))) return 0;
     const size_t R = ((size_t)max_tokens * pool * pool + 127) / 128 * 128;
     const size_t per = K0 * 4 + E * 4 + 8 + E * 4 + E * 4 + std::max(3 * E, 2 * F) * 4 + F * 4 + E * 4 +
                        std::max(E, out) * 4 + 3 * E * 2;
@@ -126,7 +127,7 @@ class VisionGemma4V : public GemmaImageEncoder {
       gemm(hn_, E, l.k.w, h_, 3 * E, E, false, Mp, N);
       gemm(hn_, E, l.v.w, h_, 3 * E, 2 * E, false, Mp, N);
       {
-        cl_kernel k = kern("g4v_qkv", "");
+        cl_kernel k = hd_ == 64 ? kern("g4v_qkv", "") : kern("g4v_qkv_hd", "-DG4V_HD=" + std::to_string(hd_));
         int nh = n_head, mp = Mp;
         float ep = eps, lb = log2_base;
         F8 cl = {{l.q.out_lo, l.q.out_hi, l.k.out_lo, l.k.out_hi, l.v.out_lo, l.v.out_hi, 0.0f, 0.0f}};
@@ -135,7 +136,7 @@ class VisionGemma4V : public GemmaImageEncoder {
         e_.run("g4v_qkv", k, 2, g, lw);
       }
       {
-        cl_kernel k = kern("vit_attn_rows", "-cl-intel-256-GRF-per-thread");
+        cl_kernel k = kern("vit_attn_rows", "-cl-intel-256-GRF-per-thread" + (hd_ == 64 ? std::string() : " -DHD=" + std::to_string(hd_)));
         int n = N, mp = Mp, nh = n_head;
         set_args(k, 0, q_, k_, v_, n, mp, nh, o_);
         const size_t rows = (size_t)8 * 4;
@@ -170,6 +171,13 @@ class VisionGemma4V : public GemmaImageEncoder {
       size_t g[2] = {(size_t)E, (size_t)n_tok};
       e_.run("g4v_pool", k, 2, g, nullptr);
     }
+    if (std_bias_) {  // (26B-A4B: (pooled - std_bias) * std_scale, as llama.cpp gemma4v)
+      cl_kernel k = kern("g4v_std", "");
+      int e = E;
+      set_args(k, 0, t_, e, std_bias_, std_scale_);
+      size_t g[2] = {(size_t)E, (size_t)n_tok};
+      e_.run("g4v_pool", k, 2, g, nullptr);
+    }
     norm(t_, E, ones_, -FLT_MAX, FLT_MAX, hn_, E, n_tok);
     gemm(hn_, E, proj_, o_, n_out, 0, false, Mq, n_tok);
     std::vector<float> out((size_t)n_tok * n_out);
@@ -199,6 +207,8 @@ class VisionGemma4V : public GemmaImageEncoder {
     CW q, k, v, o, gate, up, down;
   };
   bool loaded_ = false;
+  int hd_ = 64;
+  cl_mem std_bias_ = nullptr, std_scale_ = nullptr;
   std::vector<Layer> L_;
   FW patch_w_, proj_;
   std::vector<float> pos_table_;
@@ -274,6 +284,10 @@ class VisionGemma4V : public GemmaImageEncoder {
     {
       const std::vector<float> one(n_embd, 1.0f);  // (the weightless RMS norm before the projection)
       ones_ = e_.buf(one.size() * 4, one.data());
+    }
+    if (f_.find("v.std_bias") && f_.find("v.std_scale")) {
+      std_bias_ = f32("v.std_bias");
+      std_scale_ = f32("v.std_scale");
     }
     proj_ = f16("mm.input_projection.weight");
     if (proj_.K != n_embd || proj_.N != n_out) throw std::runtime_error("mmproj: unexpected Gemma 4 vision projection");
