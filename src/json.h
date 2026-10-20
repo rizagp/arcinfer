@@ -187,7 +187,11 @@ class Json {
     ++i;
     return o;
   }
-  static Json parse_value(const std::string& s, size_t& i) {
+  // (nesting up to kMaxDepth: a body of 100,000 '[' overflowed the stack of the connection's thread, which no
+  //  exception handler catches)
+  static constexpr int kMaxDepth = 256;
+  static Json parse_value(const std::string& s, size_t& i, int depth = 0) {
+    if (depth > kMaxDepth) throw std::runtime_error("json: nesting too deep");
     skip_ws(s, i);
     if (i >= s.size()) throw std::runtime_error("json: unexpected end");
     const char c = s[i];
@@ -202,7 +206,7 @@ class Json {
         skip_ws(s, i);
         if (i >= s.size() || s[i] != ':') throw std::runtime_error("json: expected ':'");
         ++i;
-        o.o_.push_back({k, parse_value(s, i)});
+        o.o_.push_back({k, parse_value(s, i, depth + 1)});
         skip_ws(s, i);
         if (i < s.size() && s[i] == ',') { ++i; continue; }
         if (i < s.size() && s[i] == '}') { ++i; return o; }
@@ -215,7 +219,7 @@ class Json {
       skip_ws(s, i);
       if (i < s.size() && s[i] == ']') { ++i; return a; }
       while (true) {
-        a.a_.push_back(parse_value(s, i));
+        a.a_.push_back(parse_value(s, i, depth + 1));
         skip_ws(s, i);
         if (i < s.size() && s[i] == ',') { ++i; continue; }
         if (i < s.size() && s[i] == ']') { ++i; return a; }

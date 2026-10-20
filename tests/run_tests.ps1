@@ -139,7 +139,8 @@ function Find-DFlash([string[]]$patterns) {  # a folder whose path matches and t
   return ""
 }
 if (-not $NoAutoDetect -and (-not $SkipGpu -or $ListModels)) {
-  if (-not $Model4B) { $Model4B = Find-Gguf @("Qwen3.5-4B*.gguf", "qwen3.5*4b*.gguf") }
+  # (only the file its reference and greedy lines were made from: another 4B, e.g. QUASAR-QAT's, fails them by design)
+  if (-not $Model4B) { $Model4B = Find-Gguf @("Qwen3.5-4B-UD-Q4_K_XL.gguf") }
   if (-not $Model27B) { $Model27B = Find-Gguf @("Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf") }
   if (-not $Model35B) { $Model35B = Find-Gguf @("Qwen3.6-35B-A3B-UD-IQ4_XS.gguf", "Qwen3.6-35B-A3B-UD-Q3_K_M.gguf") }
   if (-not $ModelFlashNext) { $ModelFlashNext = Find-Gguf @("Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf") }

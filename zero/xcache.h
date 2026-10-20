@@ -145,6 +145,7 @@ inline Plan choose(const std::vector<uint64_t>& lrec, int NE, uint64_t bytes) {
 
 #ifndef XCACHE_POOLS_ONLY
 #include "expert_store.h"
+#include <system_error>
 #include <thread>
 
 struct XCache {
@@ -459,7 +460,7 @@ struct XCache {
   std::vector<ExpertStore::Req> pf_reqs_;
   double pf_ms_ = 0;
   int pf_layer_ = -1;  // the layer a deep prefetch is filling (-1: none)
-  std::string pf_err_;  // a deep prefetch's error (the read failed): join() drops its experts and throws it
+  std::string pf_err_;  // a prefetch's error (the read failed): join() drops what it read and throws it
   int pf_wait_[2] = {-1, -1};  // per staging half: the layer whose copies the main list still has to wait for
   void join() {
     if (!pf_.joinable()) return;
@@ -469,16 +470,22 @@ struct XCache {
     read_ms += pf_ms_;
     const int X = pf_layer_;
     pf_layer_ = -1;
-    if (!pf_err_.empty()) {  // (X's slots hold no valid records: they become free slots)
+    if (!pf_err_.empty()) {
       const std::string e = std::move(pf_err_);
       pf_err_.clear();
-      if (X >= 0 && pool_of[X] >= 0) {
-        Pool& P = pools[pool_of[X]];
-        for (int s = 0; s < P.used; ++s)
-          if (P.key[s] >= 0 && P.key[s] / NE == X && fresh_[P.key[s]]) where[P.key[s]] = -1, fresh_[P.key[s]] = 0, P.key[s] = -1;
-      }
+      drop_prefetch(X);
       throw std::runtime_error(e);
     }
+  }
+  // after a failed prefetch: a deep one's slots of layer X hold no valid records (they become free slots); a plain
+  // one's staging holds none either
+  void drop_prefetch(int X) {
+    if (X >= 0 && pool_of[X] >= 0) {
+      Pool& P = pools[pool_of[X]];
+      for (int s = 0; s < P.used; ++s)
+        if (P.key[s] >= 0 && P.key[s] / NE == X && fresh_[P.key[s]]) where[P.key[s]] = -1, fresh_[P.key[s]] = 0, P.key[s] = -1;
+    }
+    if (X < 0) stage_layer[0] = stage_layer[1] = -1;
   }
   // Deep prefetch (prompts; ARC_XCOPY=0: off): EVERY missing expert of layer X gets its slot now and is read on a
   // thread through stage[X % 2] in rounds of S / 2 records, each round copied into the slots on a second command list
@@ -542,6 +549,7 @@ struct XCache {
     ZE_CHECK(zeEventHostReset(ev));
     pf_wait_[h] = X;
     const uint64_t rec = P.rec;
+    try {
     pf_ = std::thread([this, todo = std::move(todo), h, cc, rec, X, ev] {
       const auto t0 = std::chrono::steady_clock::now();
       std::vector<ExpertStore::Req> reqs;
@@ -572,6 +580,12 @@ struct XCache {
       }
       pf_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     });
+    } catch (const std::system_error&) {  // (no thread: nothing waits for the event; ensure() reads X itself)
+      zeEventHostSignal(ev);
+      pf_wait_[h] = -1;
+      pf_layer_ = -1;
+      drop_prefetch(X);
+    }
   }
   // (the staging half of X is free: the copies out of it were queued before the sync of the current layer)
   // tokens: how many go through X before the layer after it. A deep prefetch reads every missing expert of X, so it
@@ -594,11 +608,23 @@ struct XCache {
     }
     if (pf_reqs_.empty()) return;
     pf_reads += pf_reqs_.size();
-    pf_ = std::thread([this] {
-      const auto t0 = std::chrono::steady_clock::now();
-      st.read(pf_reqs_);
-      pf_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    });
+    start_read();
+  }
+  // the reads of pf_reqs_ on the prefetch thread (an error goes to join(), not std::terminate); no thread: none
+  void start_read() {
+    try {
+      pf_ = std::thread([this] {
+        const auto t0 = std::chrono::steady_clock::now();
+        try {
+          st.read(pf_reqs_);
+        } catch (const std::exception& e) {
+          pf_err_ = std::string("expert prefetch: ") + e.what();
+        }
+        pf_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+      });
+    } catch (const std::system_error&) {
+      drop_prefetch(-1);
+    }
   }
 
   // (generation) the experts `ids` of layer X that are not cached, into stage[X % 2] on a thread: a guess of the next
@@ -620,11 +646,7 @@ struct XCache {
     }
     if (pf_reqs_.empty()) return;
     g_pf += pf_reqs_.size();
-    pf_ = std::thread([this] {
-      const auto t0 = std::chrono::steady_clock::now();
-      st.read(pf_reqs_);
-      pf_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    });
+    start_read();
   }
 
   // Makes the experts `ids` (any order, repeats allowed) of layer l readable by the kernels; prompt = a prompt chunk.

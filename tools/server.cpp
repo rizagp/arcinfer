@@ -336,6 +336,7 @@ class Server {
   std::atomic<int> waiting_{0};  // requests waiting for the engine lock (to start, or for their next step)
   void use_slot(int s) {
     if (s == cur_slot_) return;
+    eng_.bind(s);  // (first: if it throws, the server's fields still match the slot the engine holds)
     SlotSrv& o = slots_[cur_slot_];
     o.cached = std::move(cached_);
     o.cur_saved = cur_saved_;
@@ -344,7 +345,6 @@ class Server {
     cached_ = std::move(n.cached);
     cur_saved_ = n.cur_saved;
     last_gen_cut_ = n.last_gen_cut;
-    eng_.bind(s);
     cur_slot_ = s;
   }
   // the engine lock for a request (counted: the request holding it lets this one start)
@@ -413,11 +413,14 @@ class Server {
     double vmin = -1;
     for (const auto& x : slots_)
       if (x.busy && (vmin < 0 || x.vtime < vmin)) vmin = x.vtime;
+    use_slot(k);  // (before busy: a slot left busy by a bind that threw would never be free again)
     slots_[k].vtime = std::max(0.0, vmin - kNewCredit);
     slots_[k].since = clk::now();
     slots_[k].busy = true;
     slots_[k].used = ++slot_clock_;
-    use_slot(k);
+#ifdef ARC_ZERO
+    if (cont < 0) eng_.reset_drafter_choice();  // (another conversation: its own DFlash2 / MTP choice)
+#endif
     return k;
   }
   // ---- batched generation steps (--slots, Qwen models on arcinferzero: QUEUE 20.4). A request at a generation step
@@ -657,6 +660,13 @@ class Server {
   bool save_held() {
     std::lock_guard<std::mutex> lock(mu_);
     bool any = false;
+    struct Back {  // (the slot bound before: a request between two steps finds the engine as it left it)
+      Server& s;
+      int k;
+      ~Back() {
+        try { s.use_slot(k); } catch (const std::exception&) {}
+      }
+    } back{*this, cur_slot_};
     for (int k = 0; k < (int)slots_.size(); ++k) {  // (--slots: each slot's; a request takes its own back with use_slot)
       if (slots_.size() > 1 && slots_[k].busy) continue;  // (a running request's: mid-answer)
       use_slot(k);
@@ -2238,12 +2248,14 @@ static std::string ctx_key(const std::string& model, const EngineOptions& eo) {
 #ifdef ARC_ZERO
          "|z" + std::to_string((int)(eo.windows_reserve_gb * 10)) + (eo.stream_experts ? "s" : "n") +
          (eo.dflash.empty() ? std::string() : eo.mtp_block ? "|dflash" : "|dflash-only") + (eo.v4 ? "|v4" : "") +
-         (eo.slots > 1 ? "|slots" + std::to_string(eo.slots) + "/32k" : std::string()) + "|" +  // (DFlash2 drafter: its weights and buffers; 4-bit V)
+         (eo.slots > 1 ? "|slots" + std::to_string(eo.slots) + "/" + std::to_string(Engine::kSlotCtxFloor) : std::string()) +
+         "|md" + std::to_string(eo.mtp_drafts) + "|" +  // (DFlash2 drafter: its weights and buffers; 4-bit V)
 #endif
          (eo.min_chunk ? "/" + std::to_string(eo.min_chunk) : std::string()) + "|" + (eo.mtp ? "mtp" : "-") + "|" + (eo.attn_int8 ? "i8" : "f32") + "|" + std::to_string(device_global_mem()) +
-         "|m13";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
+         "|m14";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
                  // for 27B, m6: MoE prompt GEMM staging, m7: MoE buffers shared, m8: MoE MTP 1 draft, Q3_K experts, m9: memory parts in the cache,
-                 // m12: streamed MoE reserves 128K of context before the expert cache, m13: streamed MoE chunk 8192);
+                 // m12: streamed MoE reserves 128K of context before the expert cache, m13: streamed MoE chunk 8192, m14: slot_bytes with every
+                 // slot buffer, f16 K / V with --attn-f32);
                  // bump on changes
 }
 // "ctx\tresident" lines (older lines without the second field are computed again)

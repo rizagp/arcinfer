@@ -387,6 +387,37 @@ static int run_main(int argc, char** argv) {
     if (batched) {
       cmp(&a1, &a3, "conversation A batched");
       cmp(&b1, &b3, "conversation B batched");
+      // misuse: refused before anything changes (and the slots work afterwards)
+      auto refused = [&](const char* what, auto&& call) {
+        bool threw = false;
+        try { call(); } catch (const std::exception&) { threw = true; }
+        ok = ok && threw;
+        printf("refused %s: %s\n", what, threw ? "yes" : "NO");
+      };
+      const int t0 = argmax(a3.lg.data());
+      refused("a slot out of range", [&] { eng.forward_batch({0, 2}, {t0, t0}); });
+      refused("a negative slot", [&] { eng.forward_batch({-1, 0}, {t0, t0}); });
+      refused("a slot twice", [&] { eng.forward_batch({0, 0}, {t0, t0}); });
+      refused("bind out of range", [&] { eng.bind(2); });
+      if (eng.batch_verify_ok()) {  // a verification pass not settled: no batch over that slot until verify_done
+        eng.bind(0);
+        std::vector<int> row{t0};
+        for (int d : eng.mtp_draft(t0, nd)) row.push_back(d);
+        eng.bind(1);
+        const int tb = argmax(b3.lg.data());
+        std::vector<int> rowb{tb};
+        for (int d : eng.mtp_draft(tb, nd)) rowb.push_back(d);
+        eng.verify_batch({0, 1}, {row, rowb});
+        refused("a batch over unsettled drafts", [&] { eng.forward_batch({0, 1}, {t0, tb}); });
+        for (int r = 0; r < 2; ++r) {
+          eng.bind(r);
+          eng.verify_done(0);
+        }
+        bool works = true;
+        try { eng.forward_batch({0, 1}, {t0, tb}); } catch (const std::exception&) { works = false; }
+        ok = ok && works;
+        printf("batch after the drafts were settled: %s\n", works ? "ok" : "FAILED");
+      }
     }
     printf("slots check: %s\n", ok ? "passed" : "FAILED");
     return ok ? 0 : 2;

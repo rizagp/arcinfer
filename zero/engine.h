@@ -165,7 +165,7 @@ class Engine {
       //  One slot: as before)
       const int ns = std::max(opt.slots, 1), per = (131072 / ns + 4095) / 4096 * 4096;
       auto ctx_all = [&](int c) { return (double)ctx_bytes(c) + (double)(ns - 1) * (double)slot_bytes(c); };
-      const double room = std::max(left - ctx_all(per), std::min(0.75 * left, left - ctx_all(32768)));
+      const double room = std::max(left - ctx_all(per), std::min(0.75 * left, left - ctx_all(kSlotCtxFloor)));
       gpu_bytes += (size_t)std::max(0.0, std::min(0.9 * (double)stream_bytes_, room));
     }
     mem_load_ = gpu_bytes;
@@ -196,6 +196,10 @@ class Engine {
     written_hi_ = 0;
     swa_lo_ = 0;
     pend_toks_.clear();
+    last_drafts_.clear();  // (a verification pass never settled, a batch that threw: nothing left of them)
+    vrows_ = dfl_used_ = spec_ = false;
+    batch_.clear();
+    dfl_cap_lo_ = dfl_cap_base_ = dfl_cap_end_ = 0;
     if (hlast_) fill(hlast_, (size_t)hp.n_embd * 4);
     for (auto& L : layers_)
       if (hp.recurrent(L.il)) {
@@ -494,6 +498,7 @@ class Engine {
   // KV cache bytes of the MTP block's attention layer (allocated with the block)
   // Qwen KV bytes per position and kv head: K and V int8 + their scales (--v4: + the 4-bit V copy and its scales)
   size_t kv_pos_bytes() const {
+    if (!opt.attn_int8) return 4 * (size_t)hp.head_dim;  // (--attn-f32: f16 K and V rows, load_attn's kc / vc)
     return 2 * (size_t)hp.head_dim + 8 + (opt.v4 ? hp.head_dim / 2 + 4 * (hp.head_dim / 64) : 0);
   }
   size_t mtp_kv_bytes(int c) const {
@@ -603,7 +608,10 @@ class Engine {
     dfl_probe_ = false;
   }
   int bound_slot() const { return slot_; }
+  static constexpr int kMaxSlots = 8;
+  static constexpr int kSlotCtxFloor = 32768;  // (--ctx auto, slots of streamed MoE models: context kept per slot)
   void add_slots(int n) {
+    if (n > kMaxSlots) throw std::out_of_range("add_slots: at most " + std::to_string(kMaxSlots) + " slots");
     if (n <= 1 || !slot_ptrs_.empty() || opt.dry) return;
     std::set<cl_mem> seen;
     auto add = [&](cl_mem& f) {
@@ -624,7 +632,8 @@ class Engine {
     add(hver_);
     for (auto& D : dfl_l_) { add(D.rk); add(D.rv); }
     if (dfl_) {
-      dfl_vrows_ = buf((size_t)(1 + kMaxDrafts) * hp.n_embd * 4);
+      dfl_vrows_rows_ = batch_rows_;
+      dfl_vrows_ = buf((size_t)dfl_vrows_rows_ * hp.n_embd * 4);
       add(dfl_vrows_);
     }
     // views into those buffers (the PLE history and QSA tails in a recurrent state) follow their buffer
@@ -641,6 +650,13 @@ class Engine {
     // the addresses the buffer objects had (put back before they are freed); S_next trades places with S
     for (cl_mem* r : roles_) orig_ptrs_.push_back({*r, (*r)->ptr});
     for (auto& v : subs_) orig_ptrs_.push_back({v.m, v.m->ptr});
+    {  // (slot_bytes, which --ctx auto counts with, must be what a slot really takes)
+      size_t per = 0;
+      for (cl_mem* r : roles_) per += (*r)->size;
+      const size_t est = slot_bytes(ctx) - snapshot_bytes();
+      if (per > est + est / 100 || getenv("ARC_SLOT_BYTES"))
+        fprintf(stderr, "arcinferzero: a slot takes %.1f MiB, slot_bytes() counts %.1f MiB\n", per / 1048576.0, est / 1048576.0);
+    }
     slot_ptrs_.assign(n, {});
     slot_host_.assign(n, SlotHost());
     for (cl_mem* r : roles_) slot_ptrs_[0].push_back((*r)->ptr);
@@ -653,7 +669,8 @@ class Engine {
     clFinish(cl_.queue);
   }
   void bind(int s) {
-    if (s == slot_ || s < 0 || s >= (int)slot_ptrs_.size()) return;
+    if (s < 0 || s >= slot_count()) throw std::out_of_range("bind: slot " + std::to_string(s) + " out of range");
+    if (s == slot_) return;
     if (!last_drafts_.empty() && !vrows_) throw std::runtime_error("bind: a verification pass is not settled");
     clFinish(cl_.queue);  // (cancellation reads and host snapshots work on the bound buffers)
     park();
@@ -674,20 +691,19 @@ class Engine {
     const int B = (int)slots.size();
     if (!batch_ok() || B < 1 || B != (int)toks.size() || B > batch_rows_)
       throw std::runtime_error("forward_batch: not for this model or too many rows");
-    const int bound = slot_;
+    check_batch(slots, std::vector<int>(B, 1));
+    BatchGuard guard{*this, slot_};
     for (int b = 0; b < B; ++b) {  // (pending MTP rows of accepted drafts first, each in its slot)
       bind(slots[b]);
       if (has_mtp) flush_mtp_pending();
     }
+    bind(guard.bound);
     clFinish(cl_.queue);
     park();
+    guard.parked = true;
     batch_.clear();
     for (int b = 0; b < B; ++b) {
       const SlotHost& h = slot_host_[slots[b]];
-      if (h.pos + 1 > ctx) {
-        unpark(bound);
-        throw std::runtime_error("context overflow");
-      }
       batch_.push_back({slots[b], b, 1, h.pos, h.rope_shift});
     }
     const int Mp = 16;
@@ -729,12 +745,40 @@ class Engine {
       slot_host_[q.slot].pos = q.pos + 1;
     }
     dfl_cap_lo_ = dfl_cap_end_ = 0;
-    unpark(bound);
+    guard.parked = false;
+    unpark(guard.bound);
     clFinish(cl_.queue);
     collect_profile();
     return batch_logits_host_;
   }
   int batch_rows() const { return batch_rows_; }
+ private:
+  // a batch's slots: in range, each once, none with a verification pass not settled, n[b] more positions within ctx
+  void check_batch(const std::vector<int>& slots, const std::vector<int>& n) const {
+    std::vector<char> seen(slot_count(), 0);
+    for (size_t b = 0; b < slots.size(); ++b) {
+      const int s = slots[b];
+      if (s < 0 || s >= slot_count()) throw std::out_of_range("batch: slot " + std::to_string(s) + " out of range");
+      if (seen[s]++) throw std::runtime_error("batch: slot " + std::to_string(s) + " twice");
+      const bool bound = s == slot_;
+      const bool pending = bound ? !last_drafts_.empty() || vrows_ : !slot_host_[s].last_drafts.empty() || slot_host_[s].vrows;
+      if (pending) throw std::runtime_error("batch: slot " + std::to_string(s) + " has a verification pass not settled");
+      if ((bound ? pos : slot_host_[s].pos) + n[b] > ctx) throw std::runtime_error("context overflow");
+    }
+  }
+  // a batched pass's state, cleared however the pass ends; slots parked when it threw: the bound one again
+  struct BatchGuard {
+    Engine& e;
+    int bound;
+    bool parked = false;
+    ~BatchGuard() {
+      e.batch_.clear();
+      e.spec_ = false;
+      e.dfl_cap_lo_ = e.dfl_cap_base_ = e.dfl_cap_end_ = 0;
+      if (parked) e.unpark(bound);
+    }
+  };
+ public:
   // verify() for several slots in one pass: rows[b] = {token, drafts...} of slot slots[b] (drafts from mtp_draft in
   // that slot). Returns the logits rows of every slot one after the other; then each slot settles its own with
   // verify_done() (bound to it, in any order, other slots' passes may run in between). At most batch_rows() rows
@@ -743,27 +787,28 @@ class Engine {
     const int B = (int)slots.size();
     int R = 0;
     for (const auto& r : rows) R += (int)r.size();
-    if (!batch_verify_ok() || B < 1 || B != (int)rows.size() || R > batch_rows_)
+    if (!batch_verify_ok() || B < 1 || B != (int)rows.size() || R > batch_rows_ || (dfl_ && R > dfl_vrows_rows_))
       throw std::runtime_error("verify_batch: not for this model or too many rows");
-    const int bound = slot_;
+    std::vector<int> n(B);
     for (int b = 0; b < B; ++b) {
       if (rows[b].size() < 2 || (int)rows[b].size() > 1 + max_drafts()) throw std::runtime_error("verify_batch: drafts");
+      n[b] = (int)rows[b].size();
+    }
+    check_batch(slots, n);
+    BatchGuard guard{*this, slot_};
+    for (int b = 0; b < B; ++b) {
       bind(slots[b]);
       flush_mtp_pending();
     }
+    bind(guard.bound);
     clFinish(cl_.queue);
     park();
+    guard.parked = true;
     batch_.clear();
     std::vector<int> toks;
     for (int b = 0; b < B; ++b) {
-      SlotHost& h = slot_host_[slots[b]];
-      if (h.pos + (int)rows[b].size() > ctx) {
-        unpark(bound);
-        throw std::runtime_error("context overflow");
-      }
+      const SlotHost& h = slot_host_[slots[b]];
       batch_.push_back({slots[b], (int)toks.size(), (int)rows[b].size(), h.pos, h.rope_shift});
-      h.last_drafts.assign(rows[b].begin() + 1, rows[b].end());
-      h.vrows = true;
       toks.insert(toks.end(), rows[b].begin(), rows[b].end());
     }
     const int Mp = 16;
@@ -781,7 +826,8 @@ class Engine {
     CL_CHECK(clEnqueueReadBuffer(cl_.queue, logits_, CL_TRUE, 0, (size_t)hp.n_vocab * R * 4, batch_logits_host_.data(), 0,
                                  nullptr, nullptr));
     const size_t E4 = (size_t)hp.n_embd * 4;
-    for (const BatchSeq& q : seqs) {  // each slot's hidden states (verify_done) and DFlash2 rows of the pass
+    for (int b = 0; b < B; ++b) {  // each slot's hidden states (verify_done) and DFlash2 rows of the pass
+      const BatchSeq& q = seqs[b];
       point_to(q.slot);
       float eps = hp.eps;
       int E = hp.n_embd, M = Mp, nn = q.n, r0 = q.row, wh = 1, a32 = 1;
@@ -790,10 +836,14 @@ class Engine {
       run("rmsnorm_quant", k_rmsnorm_, 2, gws, lws);
       if (dfl_)
         CL_CHECK(clEnqueueCopyBuffer(cl_.queue, dfl_acc_[0], dfl_vrows_, (size_t)q.row * E4, 0, (size_t)q.n * E4, 0, nullptr, nullptr));
-      slot_host_[q.slot].pos = q.pos + q.n;
+      SlotHost& h = slot_host_[q.slot];
+      h.pos = q.pos + q.n;
+      h.last_drafts.assign(rows[b].begin() + 1, rows[b].end());  // (now pending: verify_done settles it)
+      h.vrows = true;
     }
     dfl_cap_lo_ = dfl_cap_end_ = 0;
-    unpark(bound);
+    guard.parked = false;
+    unpark(guard.bound);
     clFinish(cl_.queue);
     collect_profile();
     return batch_logits_host_;
@@ -854,6 +904,7 @@ class Engine {
   struct BatchSeq { int slot, row, n, pos, rs; };
   std::vector<BatchSeq> batch_;
   bool vrows_ = false;            // the pending verification is a batched one: its DFlash2 rows in dfl_vrows_
+  int dfl_vrows_rows_ = 0;
   cl_mem dfl_vrows_ = nullptr;    // (slots with DFlash2: a slot's rows of a batched verification pass)
   int batch_rows_ = 1;
   std::vector<float> batch_logits_host_;
@@ -863,6 +914,9 @@ class Engine {
     if (!off || !b) return b;
     cl_mem& v = views_[{b, off}];
     if (!v) {
+      if (off >= b->size) throw std::runtime_error("from: offset past the buffer");
+      for (cl_mem* role : roles_)  // (a view of a slot's buffer would not follow point_to: working buffers only)
+        if (*role == b) throw std::logic_error("from: a view of a slot's state buffer");
       cl_buffer_region r{off, b->size - off};
       cl_int err;
       v = clCreateSubBuffer(b, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &r, &err);
@@ -875,12 +929,21 @@ class Engine {
  public:
   // GPU bytes of one more slot with a context of c tokens: the KV caches (and QSA pooled keys), the recurrent states,
   // the MTP block's hidden states, DFlash2's rings, the snapshots
+  // (the roles add_slots copies: the KV caches and QSA keys of ctx_bytes; per recurrent layer S and conv_state, with
+  //  drafts also S_next, conv_pre, xin, qkvin, abin; hlast_ / hpend_ / hver_; DFlash2's rings and rows)
   size_t slot_bytes(int c) const {
     size_t n = ctx_bytes(c) - ctx_buf_bytes(c);
+    const bool spec = opt.mtp && !hp.gemma;
     for (const Layer& L : layers_)
-      if (hp.recurrent(L.il)) n += state_bytes() + conv_bytes();
-    if (has_mtp) n += (size_t)(1 + max_drafts()) * hp.n_embd * 4;
+      if (hp.recurrent(L.il)) {
+        n += state_bytes() + conv_bytes();
+        if (spec)
+          n += state_bytes() + conv_bytes() + 2 * (size_t)(1 + kMaxDrafts) * hp.conv_dim() * 4 +
+               (size_t)(1 + kMaxDrafts) * 2 * hp.ssm_nv * 4;
+      }
+    if (has_mtp) n += (size_t)hp.n_embd * 4 * (1 + max_drafts() + 1 + max_drafts());  // (hlast_, hpend_, hver_)
     n += dfl_l_.size() * 2 * (size_t)dfl_R_ * dfl_nkv_ * 128 * 4;
+    if (dfl_) n += (size_t)batch_rows_ * hp.n_embd * 4;
     return n + snapshot_bytes();
   }
 
@@ -1403,8 +1466,14 @@ class Engine {
       if (v < 0) throw std::runtime_error("missing hparam " + k);
       return (int)v;
     };
-    hp.n_layer = I("block_count") - (int)f_.get_int(a + ".nextn_predict_layers", 0);
+    {
+      const int blocks = I("block_count"), nextn = (int)f_.get_int(a + ".nextn_predict_layers", 0);
+      if (blocks <= 0 || blocks > 4096 || nextn < 0 || nextn >= blocks)
+        throw std::runtime_error("invalid block_count / nextn_predict_layers in the GGUF");
+      hp.n_layer = blocks - nextn;
+    }
     hp.n_embd = I("embedding_length");
+    if (hp.n_embd <= 0) throw std::runtime_error("invalid embedding_length in the GGUF");
     hp.n_ff = hp.moe ? 0 : I("feed_forward_length");
     if (hp.moe) {
       hp.n_expert = I("expert_count");
@@ -1496,6 +1565,7 @@ class Engine {
     };
     hp.gemma = true;
     hp.n_layer = I("block_count");
+    if (hp.n_layer <= 0 || hp.n_layer > 4096) throw std::runtime_error("invalid block_count in the GGUF");
     hp.n_embd = I("embedding_length");
     hp.n_ff = I("feed_forward_length");
     hp.n_head = I("attention.head_count");
@@ -1520,6 +1590,8 @@ class Engine {
       hp.kv_heads[il] = kvh && il < (int)kvh->size() ? (int)(*kvh)[il] : I("attention.head_count_kv");
     }
     hp.n_head_kv = *std::max_element(hp.kv_heads.begin(), hp.kv_heads.end());
+    if (hp.n_embd <= 0 || hp.n_head <= 0 || hp.n_head_kv <= 0 || hp.n_layer_kv > hp.n_layer)
+      throw std::runtime_error("invalid Gemma 4 shape in the GGUF");
     tok_embd_ = &f_.get("token_embd.weight");
     hp.n_vocab = (int)tok_embd_->dims[1];
     for (int il = 0; il < hp.n_layer; ++il) {
@@ -3619,7 +3691,11 @@ class Engine {
     // (1: both projections, 2: the down projection only, 3: the up projection only)
     // (4, the default since 20 Oct: the up projection's input as two int8 passes, the values then their rounding
     //  residual, accumulated: KL 0.0647 -> 0.0483 against the f32 reference, prompts 5-7 % slower; 0: one int8 pass)
-    static const int f32_mode = getenv("ARC_HC_F32") ? atoi(getenv("ARC_HC_F32")) : 4;
+    static const int f32_mode = [] {
+      const int m = getenv("ARC_HC_F32") ? atoi(getenv("ARC_HC_F32")) : 4;
+      if (m < 0 || m > 4) fprintf(stderr, "ARC_HC_F32=%d: not 0..4, the int8 mixers\n", m);
+      return m < 0 || m > 4 ? 0 : m;
+    }();
     static bool hc_logged = false;
     if (!hc_logged) {
       hc_logged = true;

@@ -209,14 +209,26 @@ struct ExpertStore {
     const std::string tmp = path + ".tmp";
     // unbuffered writes (4 KB multiples from page-aligned buffers): 15 GB through the Windows file cache filled the
     // RAM (3.9 GB left, paging) on the 32 GB laptop
-    HANDLE w = CreateFileA(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                           FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH, nullptr);
-    if (w == INVALID_HANDLE_VALUE) throw std::runtime_error("cannot write " + tmp);
+    // (the .tmp file goes away if the build fails half way: it is as large as the expert file)
+    struct Tmp {
+      HANDLE h;
+      std::string path;
+      bool done = false;
+      ~Tmp() {
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        if (!done) DeleteFileA(path.c_str());
+      }
+    } out{CreateFileA(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
+                      nullptr), tmp};
+    if (out.h == INVALID_HANDLE_VALUE) {
+      out.done = true;
+      throw std::runtime_error("cannot write " + tmp);
+    }
     auto put = [&](const void* p, uint64_t n) {
       while (n) {
         const DWORD c = (DWORD)std::min<uint64_t>(n, 1u << 30);
         DWORD got = 0;
-        if (!WriteFile(w, p, c, &got, nullptr) || got != c) { CloseHandle(w); throw std::runtime_error("write failed: " + tmp); }
+        if (!WriteFile(out.h, p, c, &got, nullptr) || got != c) throw std::runtime_error("write failed: " + tmp);
         p = (const uint8_t*)p + c;
         n -= c;
       }
@@ -226,6 +238,7 @@ struct ExpertStore {
       uint64_t first = kAlign;
       for (auto& L : layers) if (L.rec) { first = L.off; break; }
       uint8_t* hb = (uint8_t*)VirtualAlloc(nullptr, first, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+      if (!hb) throw std::runtime_error("out of memory writing the expert file");
       Header h{kMagic, kVersion, fp, layers.size(), (uint64_t)n_expert, file_bytes};
       memcpy(hb, &h, sizeof h);
       memcpy(hb + sizeof h, layers.data(), layers.size() * sizeof(LayerInfo));
@@ -244,6 +257,7 @@ struct ExpertStore {
       }
       struct Buf { uint8_t* p; ~Buf() { VirtualFree(p, 0, MEM_RELEASE); } } bb{(uint8_t*)VirtualAlloc(nullptr, (size_t)L.rec * G, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)};
       uint8_t* buf = bb.p;
+      if (!buf) throw std::runtime_error("out of memory writing the expert file");
       for (int e0 = 0; e0 < n_expert; e0 += G) {
         const int ne = std::min(G, n_expert - e0);
         memset(buf, 0, (size_t)ne * L.rec);
@@ -278,10 +292,11 @@ struct ExpertStore {
       fprintf(stderr, "\r  layer %zu / %zu", l + 1, prefixes.size());
     }
     fprintf(stderr, "\n");
-    CloseHandle(w);
-    std::error_code ec;
-    std::filesystem::rename(tmp, path, ec);
-    if (ec) throw std::runtime_error("cannot rename " + tmp + ": " + ec.message());
+    CloseHandle(out.h);
+    out.h = INVALID_HANDLE_VALUE;
+    if (!MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING))  // (an old file of the same name: replaced)
+      throw std::runtime_error("cannot rename " + tmp + " (" + std::to_string(GetLastError()) + ")");
+    out.done = true;
     build_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     built = true;
   }
