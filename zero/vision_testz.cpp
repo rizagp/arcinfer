@@ -1,6 +1,5 @@
 // arcinferzero: the Gemma 4 vision encoder (gemma4v) on one image, for tools/gemma4v_ref.py (the f32 reference):
-// writes <image>.g4v.bin (n_tok x n_out f32 embeddings) and <image>.g4v.rgb (the resized pixels), as
-// tools/vision_test.exe did for the OpenCL engine (removed 2026-10-20).
+// writes <image>.g4v.bin (n_tok x n_out f32 embeddings) and <image>.g4v.rgb (the resized pixels).
 // usage: vision_testz model.gguf mmproj.gguf image.(png|jpg) [max_tokens]
 #include "engine.h"
 #include "vision_gemma4v.h"

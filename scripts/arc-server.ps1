@@ -27,8 +27,6 @@ param(
   [int]$Port = 8090,
   [switch]$NoMtp,
   [ValidateSet("", "on", "off")] [string]$Vision = "",
-  [switch]$Zero,    # (accepted for old commands: arcinferzero is the only engine)
-  [switch]$OpenCL,  # (refused: the OpenCL engine was removed)
   [switch]$NoStream,
   [int]$Slots = 0,
   # the other server options (0 / empty / off = the server's default)
@@ -57,7 +55,6 @@ $root = Split-Path $PSScriptRoot -Parent
 $stateDir = Join-Path $env:LOCALAPPDATA "arcinfer"
 New-Item -ItemType Directory -Force $stateDir | Out-Null
 # the engine: arcinferzero (Level Zero); -NoStream keeps every expert on the GPU
-if ($OpenCL) { throw "-OpenCL: the OpenCL engine (bin\server.exe) was removed on 2026-10-20; arcinferzero is the engine" }
 $Engine = if ($NoStream) { "zero-nostream" } else { "zero" }
 # ($moe: the model has routed experts, from serverz --list-models; only those keep their experts on the SSD)
 function Engine-Text([string]$e, [bool]$moe = $false) {
@@ -106,13 +103,12 @@ function Stop-Arc {
   if (Test-Path $stateFile) {
     $st = Get-Content $stateFile -Raw | ConvertFrom-Json
     $p = Get-Process -Id $st.pid -ErrorAction SilentlyContinue
-    if ($p -and $p.ProcessName -in "server", "serverz") { Stop-Process -Id $p.Id -Force; $stopped = $true }
+    if ($p -and $p.ProcessName -eq "serverz") { Stop-Process -Id $p.Id -Force; $stopped = $true }
     Remove-Item $stateFile -Force
   }
   # a server started by hand on the same port
-  # (server.exe: a server started before the OpenCL engine was removed on 2026-10-20)
-  Get-CimInstance Win32_Process -Filter "Name = 'server.exe' OR Name = 'serverz.exe'" |
-    Where-Object { $_.ExecutablePath -like "$root\bin\server*.exe" -and $_.CommandLine -match "--port\s+$Port\b" } |
+  Get-CimInstance Win32_Process -Filter "Name = 'serverz.exe'" |
+    Where-Object { $_.ExecutablePath -like "$root\bin\serverz.exe" -and $_.CommandLine -match "--port\s+$Port\b" } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $stopped = $true }
   # A new server that allocates its GPU memory while Windows is still releasing the old one's can run at half speed
   # for its whole life (measured: Qwen3.6 35B on arcinferzero 26.4 -> 11.9 tok/s when started at once, normal with
@@ -204,20 +200,18 @@ Options for start / restart:
                                  memory, more context)
   -SessionCacheGb <N>            save conversations to disk when switching sessions (default 8 GB, 0 = off)
   -NoMtp                         no speculative decoding
-                                 The engine is arcinferzero (bin\serverz.exe, Level Zero): MoE models keep their
-                                 experts (MTP layer included) on the SSD and the most used ones in a GPU cache
-                                 and read the next layer's missing experts while the GPU computes (35B and Flash
-                                 Next: 131,072 tokens of context by default, up to 262,144 with -Ctx; Windows keeps
-                                 14 GB). The first start writes the expert file (35B: 16 GB, ~2.5 min; Flash Next:
-                                 56 GB, ~9.5 min; Gemma 4 26B: 13 GB, ~1 min) to %LOCALAPPDATA%\arcinfer\zero (safe
-                                 to delete: it is written again). (-Zero is accepted for old commands; the OpenCL
-                                 engine, -OpenCL, was removed on 2026-10-20)
   -Slots <N>                     hold N conversations at once (arcinferzero; default 1): two Pi sessions each
                                  keep their own KV cache and states and take turns step by step (a prompt piece,
                                  a token), so neither waits for the other's whole answer. Each slot gets the
                                  context that fits N of them (-Ctx auto; 27B: 2 x 49,152, 35B: 2 x 65,536, g26 2 x 32,768)
   -NoStream                      every expert on the GPU: no expert file, no SSD reads; MoE models then get a
-                                 smaller context
+                                 smaller context. Without it, MoE models (35B, Flash Next, Gemma 4 26B) keep their
+                                 experts (MTP layer included) on the SSD and the most used ones in a GPU cache
+                                 and read the next layer's missing experts while the GPU computes (35B and Flash
+                                 Next: 131,072 tokens of context by default, up to 262,144 with -Ctx; Windows keeps
+                                 14 GB). The first start writes the expert file (35B: 16 GB, ~2.5 min; Flash Next:
+                                 56 GB, ~9.5 min; Gemma 4 26B: 13 GB, ~1 min) to %LOCALAPPDATA%\arcinfer\zero (safe
+                                 to delete: it is written again).
   -Vision on|off                 image / audio input (default on). off: the projector (mmproj) is not loaded and
                                  --ctx auto keeps no GPU memory for it, so the context is longer
   -Port <N>                      port (default 8090; also for status / stop)

@@ -9,8 +9,6 @@
 #   .\tests\run_tests.ps1 -NoAutoDetect -Model4B <4b.gguf> # only the models given on the command line
 #
 # Parameters:
-#   -Engine zero               bin\runz.exe + bin\serverz.exe (the only engine since the OpenCL one was removed,
-#                              2026-10-20; the parameter stays for old commands)
 #   -Model4B / -Model27B / -Model35B / -ModelGemma / -ModelFlashNext   GGUF files (Flash Next: the -00001-of- shard)
 #   -DFlash27B / -DFlash35B    DFlash2 drafter folders (containing model.safetensors), zero engine only
 #   -Ref35B <file>             opt-in 35B KL check. tests\data\ref_35b_capital_all.bin is the f32 reference of the
@@ -30,7 +28,6 @@
 # KL vs the f32 CPU reference, greedy continuation, MTP / DFlash2 speculative decoding = plain greedy, and an OpenAI
 # API smoke test with streaming tool calls, prefix reuse and malformed requests (also JSON nested too deep).
 param(
-  [ValidateSet("zero")] [string]$Engine = "zero",
   [string]$Model4B = "",
   [string]$Model27B = "",
   [string]$Model35B = "",

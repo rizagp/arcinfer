@@ -5,7 +5,7 @@
 //                       [--session-cache-gb N] [--session-dir dir]   (saved conversations; default 0 = off)
 // Built as bin\serverz.exe (zero/serverz.cpp includes this file): the arcinferzero engine, zero/engine.h (Level Zero,
 // MoE experts streamed from the SSD), with its data folder %LOCALAPPDATA%\arcinfer\zero (context cache, saved
-// prompts and conversations). (The OpenCL engine and its bin\server.exe were removed on 20 Oct 2026.)
+// prompts and conversations).
 #include "../zero/engine.h"
 #include "../zero/gguf_pack.h"
 #define ARC_DATA "/arcinfer/zero/"

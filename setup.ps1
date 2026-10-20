@@ -138,7 +138,7 @@ $newestHeader = (Get-ChildItem (Join-Path $root "src") -Filter *.h | Measure-Obj
 # (arcinferzero: zero\serverz.cpp is tools\server.cpp on zero\engine.h, so it depends on both and on zero\*.h)
 $newestZero = (Get-ChildItem (Join-Path $root "zero") -Filter *.h | Measure-Object LastWriteTime -Maximum).Maximum
 $need = @()
-foreach ($t in "tools\clinfo", "zero\serverz", "zero\runz") {  # (bin\server.exe / run.exe: the OpenCL engine, removed 2026-10-20)
+foreach ($t in "tools\clinfo", "zero\serverz", "zero\runz") {
   $name = Split-Path $t -Leaf
   $exe = Join-Path $bin "$name.exe"
   $src = Get-Item (Join-Path $root "$t.cpp")

@@ -14,7 +14,7 @@ $arcServer = Join-Path $PSScriptRoot "arc-server.ps1"
 $stateDir = Join-Path $env:LOCALAPPDATA "arcinfer"
 New-Item -ItemType Directory -Force $stateDir | Out-Null
 # the engine: arcinferzero (bin\serverz.exe; MoE experts streamed from the SSD); the model list and its contexts come
-# from it (the OpenCL engine, bin\server.exe, was removed on 2026-10-20)
+# from it
 function Exe { Join-Path $root "bin\serverz.exe" }
 $exe = Exe
 $stateFile = Join-Path $stateDir "server.json"

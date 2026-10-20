@@ -92,8 +92,7 @@ LAUNCHER OPTIONS
                                  MTP layer included, on the SSD and the most used ones in a GPU cache, and read the
                                  next layer's missing experts while the GPU computes: 131,072 tokens of context by
                                  default, up to 262,144 with --ctx. The expert file (35B: 16 GB, Flash Next: 56 GB,
-                                 Gemma 4 26B: 13 GB) is written once and reused. (--zero is accepted for old
-                                 commands; the OpenCL engine, --opencl, was removed on 2026-10-20)
+                                 Gemma 4 26B: 13 GB) is written once and reused.
   --vision on|off, --no-vision   image / audio input (default on); off: the projector is not loaded and the
                                  automatic context is longer (Qwen3.5 9B: ~143K -> ~217K tokens)
   --preserve-thinking            Qwen3.6 35B: earlier turns keep their reasoning in the prompt (Qwen3.8 27B always
@@ -245,8 +244,6 @@ shortens a long conversation (the details it drops are gone for the model).
   elseif ($a -in "--no-mtp", "-NoMtp") { $noMtp = $true }
   elseif ($a -in "--no-vision", "-NoVision") { $vision = "off" }
   elseif ($a -in "--vision", "-Vision" -and $i + 1 -lt $args.Count) { $i++; $vision = ([string]$args[$i]).ToLower() }
-  elseif ($a -in "--zero", "-zero", "-Zero") { }  # (the only engine; accepted for old commands)
-  elseif ($a -in "--opencl", "-OpenCL") { Write-Host "pi-arc: the OpenCL engine was removed on 2026-10-20 (arcinferzero is the engine)"; exit 1 }
   elseif ($a -in "--preserve-thinking", "-PreserveThinking") { $preserve = $true }
   elseif ($a -in "--no-stream", "-NoStream") { $noStream = $true }
   elseif ($a -in "--v4", "-V4") { $v4 = $true }  # (4-bit V copy for generation at long contexts)
