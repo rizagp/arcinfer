@@ -256,6 +256,8 @@ foreach ($eng in $engines) {
     $o = Run-Exe $run @($Model4B, "--tokens", $ids, "--n", "9", "--mtp", "--slots-check")
     Check "$tag slots: interleaved / batched bit-identical, misuse refused" ($o -match "slots check: passed") ([regex]::Match($o, "slots check: \w+").Value)
     Check "$tag slots: memory of a slot counted" ($o -match "slot bytes: \d+ real, \d+ counted: OK") ([regex]::Match($o, "slot bytes: [^,]*, [^:]*: \w+").Value)
+    $o = Run-Exe $run @($Model4B, "--tokens", $ids, "--n", "9", "--mtp", "--attn-f32", "--slots-check")
+    Check "$tag slots with --attn-f32 (f16 K/V rows; interleaved only, no batched pass)" ($o -match "slots check: passed" -and $o -match "slot bytes: \d+ real, \d+ counted: OK") ([regex]::Match($o, "slot bytes: [^,]*, [^:]*: \w+").Value)
   }
 
   # 4c. Gemma 4 12B: next-token distributions vs its f32 CPU reference (ref_forward), greedy = llama.cpp's, and the
@@ -274,6 +276,8 @@ foreach ($eng in $engines) {
     Check "$tag Gemma 4 greedy = llama.cpp" ($o -match $greedy) (Get-Greedy $o)
     $o = Run-Exe $run @($ModelGemma, "--tokens", $gids, "--n", "12", "--mtp")
     Check "$tag Gemma 4 assistant drafter (greedy identical)" ($o -match $greedy) ([regex]::Match($o, "MTP: [^\r\n]*").Value)
+    $o = Run-Exe $run @($ModelGemma, "--tokens", $gids, "--n", "9", "--slots-check")
+    Check "$tag Gemma 4 slots: bit-identical, misuse refused, memory counted" ($o -match "slots check: passed" -and $o -match "slot bytes: \d+ real, \d+ counted: OK") ([regex]::Match($o, "slot bytes: [^,]*, [^:]*: \w+").Value)
   }
 
   # 4d. Qwen3.6-35B-A3B GSQ (tools\convert_gsq.py): MoE path vs its f32 CPU reference. Opt-in: the reference in
@@ -306,12 +310,18 @@ foreach ($eng in $engines) {
     $o = Run-Exe $run @($q.model, "--tokens", $ids, "--n", "16", "--mtp")
     $g1 = Get-Greedy $o
     Check "$n MTP greedy identical" ($g1 -eq $g0) $(if ($g1 -eq $g0) { [regex]::Match($o, "MTP: [^\r\n]*").Value } else { $g1 })
+    if ($q.name -ne "4B") {  # (two conversations in slots, as 4b2; the 4B ran there)
+      $o = Run-Exe $run @($q.model, "--tokens", $ids, "--n", "9", "--mtp", "--slots-check")
+      Check "$n slots (MTP): bit-identical, misuse refused, memory counted" ($o -match "slots check: passed" -and $o -match "slot bytes: \d+ real, \d+ counted: OK") ([regex]::Match($o, "slot bytes: [^,]*, [^:]*: \w+").Value)
+    }
     if (-not $q.dname) { continue }
     if (-not (Have $q.dflash)) { Skip "$n DFlash2 greedy identical" (Why $q.dflash "DFlash2 drafter ($($q.dname))"); continue }
     Write-Host "   $($q.name) DFlash2: $($q.dflash)"
     $o = Run-Exe $run @($q.model, "--tokens", $ids, "--n", "16", "--dflash", $q.dflash)
     $g2 = Get-Greedy $o
     Check "$n DFlash2 greedy identical" ($g2 -eq $g0) $(if ($g2 -eq $g0) { [regex]::Match($o, "MTP: [^\r\n]*").Value } else { $g2 })
+    $o = Run-Exe $run @($q.model, "--tokens", $ids, "--n", "9", "--dflash", $q.dflash, "--slots-check")
+    Check "$n slots (DFlash2): bit-identical, misuse refused, memory counted" ($o -match "slots check: passed" -and $o -match "slot bytes: \d+ real, \d+ counted: OK") ([regex]::Match($o, "slot bytes: [^,]*, [^:]*: \w+").Value)
   }
 }
 

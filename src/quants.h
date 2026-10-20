@@ -540,7 +540,7 @@ inline void dequant_row(uint32_t type, const uint8_t* row, int K, float* out) {
   }
 }
 
-// CPU version of the activation quantizer (must match kernels/ops.cl quant_store16): int8 with absmax scale
+// CPU version of the activation quantizer (must match zero/kernels/ops.cl quant_store16): int8 with absmax scale
 // per 256 elements (asc [K/256][M]) or per 32 (act32: asc [K/32][M]); absum [K/16][M] = sums per 16.
 inline void quantize_act_cpu(const float* x, int M, int K, int8_t* aq, float* asc, uint16_t* absum, bool act32 = false) {
   const int B = act32 ? 32 : 256;
@@ -562,7 +562,7 @@ inline void quantize_act_cpu(const float* x, int M, int K, int8_t* aq, float* as
 }
 
 // Weight types the GEMM reads natively (repacked once at load). Everything else is decoded just in time
-// on the GPU (kernels/decode.cl) into the W8 layout.
+// on the GPU (zero/kernels/decode.cl) into the W8 layout.
 inline bool is_native_type(uint32_t t) { return t == GGML_Q4_K || t == GGML_Q5_K || t == GGML_Q6_K || t == GGML_Q8_0; }
 // Small-block types (IQ4_NL: 32 elements / 18 bytes, Q2_0: 64 / 18) whose consecutive blocks are read as 256-element
 // "superblocks" by the GPU (144 / 72 bytes). A row whose K is not a multiple of 256 (Qwen3.8 Flash Next down
@@ -588,7 +588,7 @@ inline bool is_w8_type(uint32_t t) {
     default: return false;
   }
 }
-// W8x8 GEMM variant (kernels/gemm8.cl VARIANT 0..4) for a decoded GGUF type.
+// W8x8 GEMM variant (zero/kernels/gemm8.cl VARIANT 0..4) for a decoded GGUF type.
 // Types with mins (Q2_K/Q4_K/Q5_K) are requantized to signed int8 by decode_w8_sb (no min term in the GEMM: 3x the
 // speed of the scales + mins variants 2/3, about 0.5 % weight error). ARC_W8_MINS=1 selects the scales + mins form
 // (experimental: currently less accurate end to end, see docs/archive/review_notes.md).
@@ -607,7 +607,7 @@ inline int w8_variant(uint32_t t) {
 // Bytes of the decoded W8x8 form of an N x K matrix (q + header).
 inline size_t w8_bytes_q(int N, int K) { return (size_t)N * K; }
 inline size_t w8_bytes_h(int N, int K) { return (size_t)N / 8 * (K / 256) * 10 * 8 * 4; }
-// Codebooks for kernels/decode.cl, laid out at the TAB_* uint offsets defined there.
+// Codebooks for zero/kernels/decode.cl, laid out at the TAB_* uint offsets defined there.
 inline std::vector<uint32_t> build_iq_tables() {
   std::vector<uint32_t> t(8484, 0);
   auto put = [&](size_t off, const void* src, size_t bytes) { memcpy(t.data() + off, src, bytes); };
@@ -622,11 +622,11 @@ inline std::vector<uint32_t> build_iq_tables() {
   return t;
 }
 // GPU raw form of a GGUF matrix: each 256-element superblock zero-padded to a multiple of 8 bytes, so a pair of
-// superblocks is 16-byte aligned for sub-group block reads (kernels/decode.cl uses the padded size BBP).
+// superblocks is 16-byte aligned for sub-group block reads (zero/kernels/decode.cl uses the padded size BBP).
 // Q4_0, Q8_0 and the IQ2 / IQ3 codebook types are also regrouped (Q8_0: the 8 scales first, then 32-byte blocks;
 // its GEMV read 34-byte blocks at 37 GB/s). IQ2_XXS / IQ2_XS / IQ2_S / IQ3_XXS / IQ3_S: the leading
 // f16 scale moves behind the rest, so every block's fields (8-byte quant groups, 4-byte sign / scale words) are
-// aligned for vector loads (kernels/decode.cl: their GEMVs went from 27-61 to ~64 GB/s).
+// aligned for vector loads (zero/kernels/decode.cl: their GEMVs went from 27-61 to ~64 GB/s).
 // Q4_0: its 8 blocks of 18 bytes (f16 d + 16 bytes of nibbles) become the 8 scales followed by the
 // 8 x 16 nibble bytes, so every block's quants are 16-byte aligned for vector loads (same 144 bytes).
 inline int raw_padded_sb_bytes(uint32_t type) { return (gguf_sb_bytes(type) + 7) / 8 * 8; }

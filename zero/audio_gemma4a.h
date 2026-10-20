@@ -4,7 +4,7 @@
 //  - CPU: 16 kHz samples in clips of up to 30 s -> log-mel (semicausal padding, 320-sample Hann window in a 512-point
 //    FFT, hop 160, magnitude, 128 HTK mel bins, ln(max(mel, 0.001))) -> two 3x3 stride-2 convolutions (128 and 32
 //    channels, LayerNorm over channels, ReLU): 25 frames per second, 32 x 32 features each;
-//  - GPU (f16 weights, f32 activations, kernels/ops.cl vit_gemm_f16 and a4_*): the input projection, then per
+//  - GPU (f16 weights, f32 activations, zero/kernels/ops.cl vit_gemm_f16 and a4_*): the input projection, then per
 //    conformer block a half-step SiLU FFN, local causal self-attention (12 frames back, sinusoidal relative positions,
 //    logits soft-capped at 50), a convolution module (GLU, causal depthwise conv of width 5, RMS norm, SiLU) and a
 //    second half-step FFN, all with RMS norms and the mmproj's input / output clamps; then the output projection,

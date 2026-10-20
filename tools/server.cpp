@@ -423,6 +423,41 @@ class Server {
   std::condition_variable gen_cv_;
   // one step of the bound slot's request: alone, or with waiting steps of other slots
   void run_steps(std::vector<GenStep*> st) {
+    try {
+      run_batch(st);
+    } catch (const std::exception& e) {
+      // every request of the step fails (the waiting ones would otherwise wait for good), and their slots start
+      // over: the engine left their positions as they were, but part of their device state may be written
+      try { eng_.bind(cur_slot_); } catch (...) {}
+      for (GenStep* g : st) {
+        g->failed = e.what();
+        g->done = true;
+        drop_conversation(g->slot);
+      }
+      gen_cv_.notify_all();
+      throw;
+    }
+    for (GenStep* g : st) {
+      g->done = true;
+      g->batched = st.size() > 1;
+    }
+  }
+  // the conversation of slot k is gone (a step that threw): it starts over (prepare_prefix resets the engine there
+  // when the slot is next used; the bound slot is reset now)
+  void drop_conversation(int k) {
+    if (k == cur_slot_) {
+      cached_.clear();
+      cur_saved_ = false;
+      last_gen_cut_ = 0;
+      if (eng_.bound_slot() == k)  // (else the engine holds another slot: prepare_prefix resets k when it is used)
+        try { eng_.reset(); } catch (...) {}
+    } else {
+      slots_[k].cached.clear();
+      slots_[k].cur_saved = false;
+      slots_[k].last_gen_cut = 0;
+    }
+  }
+  void run_batch(const std::vector<GenStep*>& st) {
     const int V = eng_.hp.n_vocab;
     if (st.size() == 1) {
       GenStep& g = *st[0];
@@ -434,34 +469,10 @@ class Server {
       } else {
         g.rows = eng_.forward(&g.tok, 1);
       }
-      g.done = true;
       return;
     }
     std::vector<int> sl;
     for (GenStep* g : st) sl.push_back(g->slot);
-    try {
-      run_batch(st, sl);
-    } catch (const std::exception& e) {
-      // every request of the pass fails (the waiting ones would otherwise wait for good), and their slots start
-      // over: the engine left their positions as they were, but part of their device state may be written
-      try { eng_.bind(cur_slot_); } catch (...) {}
-      for (GenStep* g : st) {
-        g->failed = e.what();
-        g->done = true;
-        if (g->slot == cur_slot_) {
-          cached_.clear();
-          try { eng_.reset(); } catch (...) {}
-        } else {
-          slots_[g->slot].cached.clear();  // (prepare_prefix resets the engine when the slot is next used)
-        }
-      }
-      gen_cv_.notify_all();
-      throw;
-    }
-    for (GenStep* g : st) g->done = g->batched = true;
-  }
-  void run_batch(const std::vector<GenStep*>& st, const std::vector<int>& sl) {
-    const int V = eng_.hp.n_vocab;
     if (st[0]->max_drafts > 0) {
       const int nd = eng_.batch_rows() / (int)st.size() - 1;  // (the rows of every slot within one pass)
       std::vector<std::vector<int>> rows;
@@ -512,8 +523,7 @@ class Server {
       use_slot(slot);
       eng_.cancel = nullptr;  // (a prompt step of another request may have set its own)
       if (!me.failed.empty()) {  // (this slot starts over, as the leader did with its own)
-        cached_.clear();
-        try { eng_.reset(); } catch (...) {}
+        drop_conversation(slot);
         throw std::runtime_error("batched step: " + me.failed);
       }
       if (me.done) return;

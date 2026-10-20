@@ -58,8 +58,7 @@ Phase 2 (2026-10-13 onward):
 - F12 12.0–12.8, 12.10: marked "✅ code; overnight test" — the overnight test results are not recorded here.
 - F12 12.9 (⏳) `/v1/embeddings` with EmbeddingGemma 2 (`unsloth/embeddinggemma-2-GGUF`, BF16 558 MB; optional BF16 mmproj
   982 MB for images/audio) + a document question-answering (RAG) feature option in the web UI; download with permission.
-- F13 13.2 (🟡) Zero becomes the default: exes not renamed yet (`bin\server.exe` from the zero engine, `serverz.exe`
-  removed, `runz.exe` → `run.exe`, OpenCL temporarily as `server-opencl.exe`).
+- F13 13.2 (✅ 2026-10-20) Zero is the only engine; the exes keep their names (`bin\serverz.exe`, `bin\runz.exe`).
 - F13 13.3 (⏳) Daily use for 1–2 weeks.
 - F13 13.4 (✅ 2026-10-20) Remove the OpenCL path (src/engine.h OpenCL, old server.exe / run.exe): removed with kernels/, the OpenCL encoder copies, bitcheck / test_gemm / vision_test and stable/.
 - F14 Parallel drafting: the drafter (MTP / Gemma drafter) runs on a separate Level Zero queue, overlapping with

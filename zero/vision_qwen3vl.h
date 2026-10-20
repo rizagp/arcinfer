@@ -6,7 +6,7 @@
 // Matches llama.cpp tools/mtmd (models/qwen3vl.cpp, bicubic dyn-size preprocessing); no deepstack layers.
 //
 // The CPU only decodes, resizes and lays out the image (milliseconds). The matrix products run in floating point
-// (the mmproj's f16 weights, f32 activations and accumulation: kernels/ops.cl vit_gemm_f16): with the language
+// (the mmproj's f16 weights, f32 activations and accumulation: zero/kernels/ops.cl vit_gemm_f16): with the language
 // model's int8 GEMM the encoder's output drifted 10-23 % from the f32 reference on photos (every layer's int8
 // activations contributed), in f16 0.6-1.8 %. Attention is int8 (vit_attn_lr), norms and activations f32.
 // Weights are uploaded on the first image, buffers grow with the largest image seen.
@@ -217,7 +217,7 @@ class VisionQwen3VL {
   int cap_ = 0;  // rows the buffers hold
   cl_mem bin_ = nullptr, badd_ = nullptr, bpos_ = nullptr, x_ = nullptr, hn_ = nullptr, h_ = nullptr, o_ = nullptr,
          q_ = nullptr, k_ = nullptr, v_ = nullptr, qsc_ = nullptr, ksc_ = nullptr, vsc_ = nullptr, dummy_ = nullptr;
-  // int8 attention: 64-key tiles, softmax denominator from the quantized weights (kernels/ops.cl vit_attn_lr)
+  // int8 attention: 64-key tiles, softmax denominator from the quantized weights (zero/kernels/ops.cl vit_attn_lr)
   const std::string attn_defs_ = "-DVLR -DVKT=64 -DVCONS";
   bool att16_ = !getenv("ARC_VIT_ATT8");  // f32 attention (int8: 7-9 % error on photos, f32: 0.2-0.5 %)
   const int vcg_ = getenv("ARC_VCG") ? atoi(getenv("ARC_VCG")) : 1, vwgy_ = getenv("ARC_VWGY") ? atoi(getenv("ARC_VWGY")) : 8;

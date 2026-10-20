@@ -5,7 +5,7 @@
 //
 // Weights: the raw GGUF blocks of every matrix live on the GPU (used by the single-token GEMV path). For prompt
 // processing each matrix is multiplied in the int8 "W8" form: decoded once at load when it fits the memory
-// budget, otherwise decoded just in time before each GEMM (kernels/decode.cl). Q8_0 uses its own repacked form.
+// budget, otherwise decoded just in time before each GEMM (zero/kernels/decode.cl). Q8_0 uses its own repacked form.
 #pragma once
 #include "clrt.h"
 #include "xcache.h"
@@ -25,7 +25,7 @@ struct GpuWeight {
   int N = 0, K = 0;
   cl_mem raw = nullptr;               // raw GGUF rows
   cl_mem wq = nullptr, wh = nullptr;  // resident GEMM form (W8, or repacked Q8_0); null = decode just in time
-  int gemm_qtype = 0;                 // kernels/gemm.cl QTYPE
+  int gemm_qtype = 0;                 // zero/kernels/gemm.cl QTYPE
   int role = 0;                       // just-in-time W8 staging slot (one per matrix role within a layer)
 };
 
@@ -41,7 +41,7 @@ struct Hparams {
   int n_ple = 0, n_layer_kv = 0;  // per-layer embedding size (E2B/E4B), layers that own a KV cache
   float rope_base_swa = 1e4f, softcap = 0.0f;
   std::vector<int> swa, kv_heads;  // per layer
-  // mixture of experts (qwen35moe): routed experts (2-bit, kernels/moe.cl) + a sigmoid-gated shared expert
+  // mixture of experts (qwen35moe): routed experts (2-bit, zero/kernels/moe.cl) + a sigmoid-gated shared expert
   bool moe = false, moe_std = false;  // moe_std: standard GGUF expert tensors (not GSQ)
   int n_expert = 0, n_expert_used = 0, n_ff_exp = 0, n_ff_shexp = 0;
   int n_ff_exp_pad = 0;  // expert FFN width as the down projection reads it (Flash Next: 640 padded to 768)
@@ -782,8 +782,9 @@ class Engine {
       e.spec_ = false;
       e.dfl_cap_lo_ = e.dfl_cap_base_ = e.dfl_cap_end_ = 0;
       if (parked) e.unpark(bound);
-      else if (e.slot_ != bound) {  // (bind or flush_mtp_pending threw in the loop before park)
-        try { e.bind(bound); } catch (...) {}
+      else if (e.slot_ != bound) {  // (bind or flush_mtp_pending threw in the loop before park: host work only,
+        e.park();                   // no queue wait or pending-drafts check that could throw again)
+        e.unpark(bound);
       }
     }
   };
@@ -846,11 +847,13 @@ class Engine {
       if (dfl_)
         CL_CHECK(clEnqueueCopyBuffer(cl_.queue, dfl_acc_[0], dfl_vrows_, (size_t)q.row * E4, 0, (size_t)q.n * E4, 0, nullptr, nullptr));
     }
+    std::vector<std::vector<int>> pend(B);  // (allocated before any slot changes: the commit below cannot throw)
+    for (int b = 0; b < B; ++b) pend[b].assign(rows[b].begin() + 1, rows[b].end());
     clFinish(cl_.queue);
     for (int b = 0; b < B; ++b) {  // (the slots advance once the pass is done)
       SlotHost& h = slot_host_[seqs[b].slot];
       h.pos = seqs[b].pos + seqs[b].n;
-      h.last_drafts.assign(rows[b].begin() + 1, rows[b].end());  // (now pending: verify_done settles it)
+      h.last_drafts.swap(pend[b]);  // (now pending: verify_done settles it)
       h.vrows = true;
     }
     dfl_cap_lo_ = dfl_cap_end_ = 0;
@@ -1493,7 +1496,7 @@ class Engine {
       hp.n_expert_used = I("expert_used_count");
       hp.n_ff_exp = I("expert_feed_forward_length");
       hp.n_ff_shexp = I("expert_shared_feed_forward_length");
-      // experts: GSQ 2-bit (tools/convert_gsq.py, kernels/moe.cl) or standard GGUF types (decode.cl moe_*_q)
+      // experts: GSQ 2-bit (tools/convert_gsq.py, zero/kernels/moe.cl) or standard GGUF types (decode.cl moe_*_q)
       hp.moe_std = f_.get_str("arcinfer.expert_format", "") != "gsq2-v1";
       hp.n_ff_exp_pad = padded_k(hp.n_ff_exp);
       // (Flash Next: FFN widths of 640, its down projections padded to 768 and its shared expert to 768 rows)
@@ -1824,7 +1827,7 @@ class Engine {
     mems_.push_back(cl_.buffer(CL_MEM_READ_WRITE, bytes, host));
     return mems_.back();
   }
-  // Raw GGUF rows uploaded with each superblock zero-padded to a multiple of 8 bytes (kernels/decode.cl BBP),
+  // Raw GGUF rows uploaded with each superblock zero-padded to a multiple of 8 bytes (zero/kernels/decode.cl BBP),
   // written in parallel straight into a host-visible buffer (zero-copy on an integrated GPU).
   // Zero bytes after the last superblock: gemv reads two superblocks per step (rounded up to 64-byte block reads),
   // so with an odd superblock count its last row reads up to one superblock + 63 bytes past the data (lanes whose
@@ -3003,7 +3006,7 @@ class Engine {
     snprintf(b, sizeof b, " -DSOFTCAP=%.9ef", hp.softcap);
     return b;
   }
-  // gemv_v / gemv_mt_v (kernels/decode.cl: weights loaded straight into registers, bit-identical to gemv): for IQ4_XS,
+  // gemv_v / gemv_mt_v (zero/kernels/decode.cl: weights loaded straight into registers, bit-identical to gemv): for IQ4_XS,
   // whose codebook decoding made gemv compute-bound, and Q6_K output heads; other types are as fast or faster in gemv.
   static bool gemv_v_ok(const GpuWeight& w) {
     static const bool off = getenv("ARC_NO_GEMV_V") != nullptr;  // (A/B tests: the gemv / gemv_mt path)
@@ -3039,7 +3042,7 @@ class Engine {
       // with more sub-groups again
       const bool vk = gemv_v_ok(w);
       const int grows = vk ? gemv_v_rows(w) : w.N <= 4096 ? 1 : w.N <= 8192 ? 2 : w.N <= 65536 ? 4 : 2;
-      // split-K for matrices with few rows (kernels/decode.cl SPLITK; experiment, off: ARC_SPLITK=S / ARC_SPLITK_ROWS).
+      // split-K for matrices with few rows (zero/kernels/decode.cl SPLITK; experiment, off: ARC_SPLITK=S / ARC_SPLITK_ROWS).
       // Qwen3.6 35B: 512-row matrices 10-15 % faster including the extra splitk_sum launch, larger ones slower, 18.6 vs
       // 18.8 tok/s overall: the small GEMVs lose time to the fixed cost of a launch, not to too few sub-groups
       static const int sk_env = getenv("ARC_SPLITK") ? atoi(getenv("ARC_SPLITK")) : -1;
@@ -4264,7 +4267,7 @@ class Engine {
     const bool use_rg = rg_ok && gemm_ok && T < rg_max, rg_down = rg_ok && (T < rg_max || !gemm_ok);
     const bool use_gemm = !use_rg && gemm_ok && tm == 16 && T >= gemm_min;
     const std::string xdef = xc_ ? " -DXCACHE" : "";
-    // standard expert types, per tile (kernels/decode.cl moe_gateup_q / moe_down_q): the tiles in `tiles`
+    // standard expert types, per tile (zero/kernels/decode.cl moe_gateup_q / moe_down_q): the tiles in `tiles`
     auto gateup_q = [&](cl_mem tiles) {
       const int grows = gr_gu;
       cl_kernel k = kernel("decode", grf_env("ARC_MOE_GRF") + "-DMOE_Q -DQT=" + std::to_string(L.ex_type[0]) + " -DGROWS=" +
@@ -4410,7 +4413,7 @@ class Engine {
       if (!moe_rg_type(L.ex_type[i])) return false;
     return true;
   }
-  // Experts of a prompt chunk through kernels/decode.cl moe_rg (the int8 GEMM of kernels/gemm.cl on the raw rows,
+  // Experts of a prompt chunk through zero/kernels/decode.cl moe_rg (the int8 GEMM of zero/kernels/gemm.cl on the raw rows,
   // decoded in registers): part 0 = gate, then up with the fused SwiGLU into mh_; part 2 = down, routing-weighted,
   // into my_. All the chunk's tiles in one launch per matrix (work-groups past the tile count exit at once).
   void moe_rg(Layer& L, int part, int Mp, size_t max_tiles) {
@@ -5110,6 +5113,17 @@ class Engine {
   std::vector<int> mtp_draft(int tok, int max_drafts) {
     dfl_used_ = dfl_ && (!mtp_block_ || dfl_pick());
     if (dfl_used_) {
+      if (mtp_block_) {  // the MTP block's KV row of `tok` too (and of the pending accepted drafts), as its own drafts
+        // would write it: the block attends to every position once it drafts again (without the row: stale memory)
+        const size_t E4 = (size_t)hp.n_embd * 4;
+        std::vector<int> toks = pend_toks_;
+        const int np = (int)toks.size();
+        if (np) CL_CHECK(clEnqueueCopyBuffer(cl_.queue, hpend_, hfin_, 0, 0, np * E4, 0, nullptr, nullptr));
+        CL_CHECK(clEnqueueCopyBuffer(cl_.queue, hlast_, hfin_, 0, np * E4, E4, 0, nullptr, nullptr));
+        toks.push_back(tok);
+        pend_toks_.clear();
+        mtp_rows(toks.data(), hfin_, np + 1, pos - np, false);
+      }
       max_drafts = std::clamp(max_drafts, 1, std::clamp(opt.mtp_drafts, 1, std::min(kMaxDrafts, dfl_B_ - 1)));
       if (pos + 1 + max_drafts > ctx) max_drafts = std::max(1, ctx - pos - 1);
       return dflash_draft(tok, max_drafts);

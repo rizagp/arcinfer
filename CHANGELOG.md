@@ -15,6 +15,10 @@
   (requests waiting for it to lead their step no longer wait for good) and starts their conversations over. The
   estimated memory per slot equals the allocation exactly (`ARC_SLOT_BYTES=1` prints both; `runz --slots-check`
   and `tests\run_tests.ps1` fail when it counts less).
+- MTP block + DFlash2: a step drafted by DFlash2 now also writes its token's row of the MTP block's KV cache; the
+  MTP drafts after DFlash2 steps read stale memory there (output was always right; drafts depended on what the
+  slot held before). Speed unchanged (35B / 27B, prose and code).
+- A failed generation step (alone or batched) fails its request(s) and starts the slot's conversation over.
 - The expert cache's prefetch thread passes its errors to the caller instead of ending the process; the expert
   file is written to a `.tmp` and renamed only when complete.
 - JSON nested more than 256 deep is a 400 (it overflowed the connection thread's stack); the build uses `/utf-8`.

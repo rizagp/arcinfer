@@ -8,7 +8,7 @@
 // Matches llama.cpp tools/mtmd (models/gemma4v.cpp, bicubic dyn-size preprocessing) except the FFN activation:
 // Google's config says gelu_pytorch_tanh, which this follows (llama.cpp falls back to gelu_quick for these files).
 //
-// As VisionQwen3VL: f16 weights, f32 activations and accumulation (kernels/ops.cl vit_gemm_f16), f32 attention
+// As VisionQwen3VL: f16 weights, f32 activations and accumulation (zero/kernels/ops.cl vit_gemm_f16), f32 attention
 // (vit_attn_rows); the CPU only decodes, resizes and lays out the image. Weights are uploaded on the first image.
 #pragma once
 #include "engine.h"
