@@ -596,7 +596,8 @@ setup.cmd   setup.ps1: checks, builds, downloads models, connects Pi;  build.ps1
 ## Validation
 
 - `bench/gemv_bench` and `bench/attn_dec_bench` check the generation kernels against a CPU reference on real
-  model tensors; `tests/test_quant_rows` checks the weight decoders.
+  model tensors. `tests/test_quant_rows` (manual) prints one dequantized row of a tensor, to compare with another
+  decoder; with `PAD=1` it checks the padding of IQ4_NL / Q2_0 rows.
 - `tools/ref_forward` is an independent f32 CPU implementation of the model; `runz --kl-ref` reports the KL
   divergence of the engine's next-token distributions against it (averaged over the prompt positions), and
   `--kl-decode` does the same through the token-by-token generation path.
