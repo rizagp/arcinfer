@@ -14,7 +14,7 @@ and compared byte for byte with the run before the change, or the generated gree
 character. "Bit-identical" below means exactly that, not "close". Changes that are allowed to change the numbers
 (new quantization, 4-bit V) are measured as KL divergence against a reference instead.
 
-## Where it stands (2026-10-18)
+## Where it stands (2026-10-20)
 
 | Model | Prompt | Generation | Accuracy |
 |---|---|---|---|
@@ -24,6 +24,10 @@ character. "Bit-identical" below means exactly that, not "close". Changes that a
 | Qwen3.5 4B | 911 tok/s (2K prompt) | 17.6 tok/s | KL 0.0021; perplexity 6.056 (llama.cpp 6.141) |
 | Gemma 4 12B (Google QAT) | 240 tok/s (2K prompt) | 7.5 tok/s | KL 0.021; greedy text equal to llama.cpp |
 | Gemma 4 26B-A4B (Google QAT Q4_0, MoE, experts on the SSD) | 450 tok/s (4K prompt), 410 (8K) | 19.6-20.6 tok/s | KL 0.068-0.073 against the CPU reference (440 tokens); the reference's own int8-input copy differs by 0.063 |
+
+Two conversations at once (`--slots 2`), both writing their answers, their next tokens in one engine pass (tok/s of
+the two together): 27B prose 7.3 -> 10.5, code 11.6 -> 15.4; 35B 20.2 -> 24.7, 29.0 -> 30.7; Gemma 4 26B 19.8 -> 26.2
+(taking turns -> batched; logits bit-identical to each slot alone).
 
 Against llama.cpp on the same files and laptop (10 October, arcinfer's OpenCL engine; arcinferzero gives the same
 logits as that engine and the newer numbers in the table above):

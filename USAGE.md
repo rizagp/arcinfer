@@ -168,7 +168,7 @@ little more GPU memory for the expert cache), e.g. `35b`, `35b-nodf`, `35b-df`; 
 server like another model does. On the command line: `--draft auto|mtp|dflash` (server and `runz`). Which one to
 use: `-df` for code, `-nodf` for Indonesian and other prose (the drafter was trained mostly on English text and
 code), the default (both) when the text is mixed. Speeds of each variant:
-[docs/before-after.md, "Where it stands"](docs/before-after.md#where-it-stands-2026-10-18).
+[docs/before-after.md, "Where it stands"](docs/before-after.md#where-it-stands-2026-10-20).
 
 **4-bit V copy for long answers at long contexts (`--v4`, arcinferzero, Qwen models, experimental).**
 `arc-server start -Model 35b -V4` (or `serverz.exe ... --v4`) keeps the normal int8 attention cache for reading
@@ -295,7 +295,7 @@ Qwen3.5/3.8 keep a state that cannot "forget" individual tokens.
 ## 6. How fast
 
 Current numbers, measured on this laptop with arcinferzero (every model, how it was measured, and llama.cpp for
-comparison: [docs/before-after.md, "Where it stands"](docs/before-after.md#where-it-stands-2026-10-18)):
+comparison: [docs/before-after.md, "Where it stands"](docs/before-after.md#where-it-stands-2026-10-20)):
 
 - Qwen3.6 35B-A3B (UD-IQ4_XS): reads a 32K prompt at 604 tokens/s, 128K at 324; writes 20.6 tokens/s, Python code
   ~50 with DFlash2, Indonesian ~22 with MTP; 12.6-13.0 tokens/s deep in a 128K context.

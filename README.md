@@ -405,7 +405,7 @@ test uses port 8091 and needs the GPU memory.
   `<id>-df` with DFlash2 only (the MTP block is not loaded); `--draft auto|mtp|dflash` (server, `runz`) does the
   same, default `auto` = both. The drafters are trained mostly on English and code: `-df` is the fastest for code,
   `-nodf` for Indonesian and other prose. Speeds of each variant:
-  [docs/before-after.md](docs/before-after.md#where-it-stands-2026-10-18).
+  [docs/before-after.md](docs/before-after.md#where-it-stands-2026-10-20).
 - Images (`image_url` content parts, data URLs) and audio (`input_audio`, `/v1/audio/transcriptions`) when the
   model's `mmproj-*.gguf` is next to it (or given with `--mmproj`): images on Gemma 4 12B / E4B, Qwen3.5 4B / 9B and
   Qwen3.6 35B, audio on Gemma 4 12B / E4B; the encoders run on the GPU.
@@ -418,7 +418,7 @@ test uses port 8091 and needs the GPU memory.
   must sit next to it. Generation ~6-7 tok/s; prompts 166 tok/s (4K) to 123 (125K); context up to 262,144 with
   `--ctx`. KL vs the CPU reference: 0.0014 on a short chat prompt, 0.020 on a 3,566-token prompt with QSA; accuracy
   at longer prompts is not measured. No MTP block, no image input. Details:
-  [docs/before-after.md](docs/before-after.md#where-it-stands-2026-10-18).
+  [docs/before-after.md](docs/before-after.md#where-it-stands-2026-10-20).
 
 ## Using Pi
 

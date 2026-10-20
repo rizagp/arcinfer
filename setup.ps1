@@ -43,15 +43,15 @@ STEPS
                    pip after asking; the free disk space is checked. Then: every model the server finds, with
                    its context for the current GPU memory.
   5 Pi             scripts\install-pi.ps1: the pi-arc and arc-server commands, Pi's model list
-  6 tests          with -Tests: tests\run_tests.ps1 (kernels, tokenizer, templates, accuracy vs f32, MTP, API)
+  6 tests          with -Tests: tests\run_tests.ps1 (unit tests, templates, accuracy vs f32, MTP / DFlash2, slots, API)
 
 MODELS
   27b  Qwen3.8 27B (ISTA-DASLab GSQ-RCO IQ3_S, MTP)        12.1 GB
   35b  Qwen3.6 35B-A3B 2-bit GSQ (converted)              12.6 GB download, 11.7 GB converted
   9b   Qwen3.5 9B (Unsloth UD-Q4_K_XL, MTP)                6.1 GB
   4b   Qwen3.5 4B (Unsloth UD-Q4_K_XL, MTP)                3.0 GB
-  g12  Gemma 4 12B QAT Q4_K_M + image projector + drafter  7.9 GB
-  e4b  Gemma 4 E4B IQ4_XS + drafter                        5.2 GB
+  g12  Gemma 4 12B (Google QAT Q4_0) + image projector + drafter  7.4 GB
+  e4b  Gemma 4 E4B (Google QAT Q4_0) + drafter                     5.2 GB
 
 Not installed by setup: the graphics driver, Visual Studio Build Tools, Python and Pi (vendor installers).
 '@

@@ -196,13 +196,15 @@ Options for start / restart:
                                  of a model, remembered, recomputed when the GPU memory changes). Not given:
                                  a running server keeps its context, a new one starts with auto. -Ctx auto
                                  also restarts a server that runs a fixed context.
-  -Chunk <N>                     prompt chunk size (default 4096; 35B 8192, Flash Next 2048; smaller = less GPU
-                                 memory, more context)
+  -Chunk <N>                     prompt chunk size (default per model: 27B 4096; 35B and Gemma 4 26B 8192; Flash
+                                 Next 2048; 4B / 9B / E4B 512; Gemma with images at least 2048); smaller = less
+                                 GPU memory, more context
   -SessionCacheGb <N>            save conversations to disk when switching sessions (default 8 GB, 0 = off)
   -NoMtp                         no speculative decoding
-  -Slots <N>                     hold N conversations at once (arcinferzero; default 1): two Pi sessions each
-                                 keep their own KV cache and states and take turns step by step (a prompt piece,
-                                 a token), so neither waits for the other's whole answer. Each slot gets the
+  -Slots <N>                     hold N conversations at once (default 1): two Pi sessions each keep their own
+                                 KV cache and states and take turns step by step (a prompt piece, a token), so
+                                 neither waits for the other's whole answer; while both write, their next tokens
+                                 run in one pass. Each slot gets the
                                  context that fits N of them (-Ctx auto; 27B: 2 x 49,152, 35B: 2 x 65,536, g26 2 x 32,768)
   -NoStream                      every expert on the GPU: no expert file, no SSD reads; MoE models then get a
                                  smaller context. Without it, MoE models (35B, Flash Next, Gemma 4 26B) keep their
@@ -215,13 +217,13 @@ Options for start / restart:
   -Vision on|off                 image / audio input (default on). off: the projector (mmproj) is not loaded and
                                  --ctx auto keeps no GPU memory for it, so the context is longer
   -Port <N>                      port (default 8090; also for status / stop)
-  -MtpDrafts <1..7>              drafts per step (default arcinferzero: 7 for Qwen 27B-class and with DFlash2, 5
+  -MtpDrafts <1..7>              drafts per step (default: 7 for Qwen 27B-class and with DFlash2, 5
                                  for MoE, 3 for 4B, 2 otherwise)
   -ThinkBudget <N>               default reasoning budget in tokens (default 8192; requests can override it)
   -ImageMinTokens / -ImageMaxTokens <N>  tokens per image (defaults: Qwen 256..2048, Gemma 4 12B 1120..2048)
   -BudgetGb <GB>                 keep decoded weights resident up to GB (default: chosen with the context)
   -AttnF32                       f32 attention (tests)
-  -V4                            + a 4-bit copy of V for generation (arcinferzero, Qwen; experimental): faster long
+  -V4                            + a 4-bit copy of V for generation (Qwen; experimental): faster long
                                  answers deep in long contexts (100K+ tokens), ~25 % more attention-cache memory
   -PreserveThinking              earlier turns keep their reasoning (Qwen3.6 35B; Qwen3.8 27B always does)
   -NoPrefixCache                 do not keep system prompts on disk;  -PrefixCacheGb <N>  their disk space (8)

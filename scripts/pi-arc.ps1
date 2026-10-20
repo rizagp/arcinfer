@@ -73,7 +73,8 @@ MODEL
                                  shortcuts, as the first argument: Qwen3.8 27B; Qwen3.6 35B-A3B (35b: UD-IQ4_XS
                                  from Unsloth's MTP repository, or UD-Q3_K_M / the GSQ file when that is the one
                                  downloaded; 35b-s: UD-Q3_K_S, longer context; 35b-mtp: UD-Q3_K_M of the MTP
-                                 repository); flash: Qwen3.8 Flash Next; Qwen3.5 9B / 4B; Gemma 4 12B / E4B
+                                 repository); flash: Qwen3.8 Flash Next; Qwen3.5 9B / 4B; Gemma 4 12B / E4B /
+                                 26B-A4B (g26: mixture of experts on the SSD, reads images)
   <shortcut>-mtp / -vision / -std  a variant of the same file: MTP without images, images without MTP, neither
                                  (e.g. 9b-std: the most context, 27b-std, 35b-mtp-std). A shortcut must come
                                  before Pi's options and message; any model's id from --pick works too.
@@ -110,8 +111,9 @@ LAUNCHER OPTIONS
                                  Without --ctx: a running server keeps its context, a new one starts with auto.
                                  --ctx auto also restarts a server that runs a fixed context (e.g. one started
                                  with --ctx 32768).
-  --chunk <N>, -Chunk            prompt chunk size in tokens (default per model: 4096; 35B 8192, Flash Next 2048;
-                                 512 when the decoded weights stay resident, as on the 4B / 9B / E4B). Smaller chunks need less GPU
+  --chunk <N>, -Chunk            prompt chunk size in tokens (default per model: 27B 4096; 35B and Gemma 4 26B
+                                 8192; Flash Next 2048; 512 when the decoded weights stay resident, as on the 4B /
+                                 9B / E4B; Gemma with images at least 2048). Smaller chunks need less GPU
                                  memory, which the auto context turns into more context: 27B with
                                  --chunk 1024 -> ~65K tokens at 17.4 GiB, 118,784 at 18.3 GiB; ~11K-token
                                  prompts ~4 % slower, long prompts the same speed.
@@ -123,8 +125,10 @@ LAUNCHER OPTIONS
                                  context (100K+ tokens), ~25 % more attention-cache memory; opt-in
   --slots <N>, -Slots            the server holds N conversations at once (default 1): start the first Pi with
                                  --slots 2, a second Pi (another terminal, plain pi-arc) shares the server; each
-                                 keeps its own KV cache and they take turns step by step. Each slot gets the
-                                 context that fits N of them (27B: 2 x 49,152 tokens, 35B: 2 x 65,536, g26: 2 x 32,768)
+                                 keeps its own KV cache and they take turns step by step; while both write their
+                                 answers, their next tokens run in one pass (27B prose 7.3 -> 10.5 tok/s together,
+                                 35B 20.2 -> 24.7). Each slot gets the context that fits N of them (27B: 2 x 49,152
+                                 tokens, 35B: 2 x 65,536, g26: 2 x 32,768)
   --help, -h, -?, /?, help       the short help;  --help-all: this text
 
   A launcher option that differs from what the running server uses restarts the server (loading takes
@@ -172,7 +176,7 @@ bin\serverz.exe --help)
   -m, --model <model.gguf>       model file              --port <N>          port (default 8080)
   -c, --ctx <N|auto>             context                 --chunk <N>         prompt chunk size
   --alias <name>                 model id in the API     --mtp               speculative decoding
-  --mtp-drafts <N>               drafts per step (arcinferzero: 27B 7, 35B 5, 4B 3, else 2; 7 with DFlash2)
+  --mtp-drafts <N>               drafts per step (27B 7, 35B 5, 4B 3, else 2; 7 with DFlash2)
   --draft auto|mtp|dflash        with a DFlash2 drafter: both (auto), the MTP block only, DFlash2 only (the
                                  -nodf / -df variants)
   --think-budget <N>             close reasoning after N tokens
@@ -184,8 +188,8 @@ bin\serverz.exe --help)
   --no-swap                      keep the loaded model (requests for another model are not switched to)
   --host <addr>                  listen address (default 127.0.0.1)
   --attn-f32                     f32 attention (tests)   --budget <GB>       keep decoded weights resident up to GB
-  --slots <N>                    hold N conversations at once, taking turns step by step (arcinferzero)
-  --v4                           4-bit V copy for generation (arcinferzero, Qwen): faster long answers at long
+  --slots <N>                    hold N conversations at once, taking turns step by step
+  --v4                           4-bit V copy for generation (Qwen): faster long answers at long
                                  contexts, ~25 % more attention-cache memory (experimental)
   --webui <dir>                  web UI folder           --kernels <dir>     kernel folder (zero\kernels)
   --list-models                  the models arc-server's list shows, as JSON

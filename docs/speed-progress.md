@@ -8,10 +8,34 @@ The story behind the numbers: [review.md](review.md); what helped and what did n
 
 ## Current speed
 
-The current numbers for every model are in one place: [before-after.md](before-after.md#where-it-stands-2026-10-18)
-("Where it stands"). In short (18 Oct): 35B UD-IQ4_XS prompt 604 tok/s (32K), generation 20.6 tok/s; 27B prompt
-~135 tok/s (4K), generation 4.9 tok/s; Flash Next prompt 166 tok/s (4K), generation 6-7 tok/s. The sections below
-keep what was measured on each date.
+The current numbers for every model are in one place: [before-after.md](before-after.md#where-it-stands-2026-10-20)
+("Where it stands"). In short (20 Oct): 35B UD-IQ4_XS prompt 604 tok/s (32K), generation 20.6 tok/s; 27B prompt
+~135 tok/s (4K), generation 4.9 tok/s; Flash Next prompt 160 tok/s (4K), generation 6-7 tok/s; Gemma 4 26B-A4B
+prompt 450 tok/s (4K), generation ~20 tok/s. The sections below keep what was measured on each date.
+
+## 2026-10-19 / 20: two conversations at once, Gemma 4 26B-A4B, Flash Next accuracy
+
+Batched decoding over slots (`--slots 2`): while two requests write their answers, their next tokens and drafts run
+in one engine pass, so the weights are read once for both. Tok/s of the two together, taking turns -> batched:
+
+| Model | Prose | Code |
+|---|---|---|
+| Qwen3.8 27B (MTP / DFlash2) | 7.32 -> 10.48 (1.43x) | 11.63 -> 15.42 (1.33x) |
+| Qwen3.6 35B-A3B (MTP / DFlash2) | 20.24 -> 24.65 (1.22x) | 28.97 -> 30.73 (1.06x) |
+| Gemma 4 26B-A4B (no drafter) | 19.80 -> 26.15 (1.32x) | 19.60 -> 26.47 (1.35x) |
+
+Engine steps without drafts (`runz --bench-batch`): 27B 2 / 3 / 4 slots 1.78 / 2.43 / 3.04x one slot's speed, 35B
+1.35 / 1.67 / 1.91x, Gemma 26B 2 / 3 slots 1.30 / 1.58x. A question in one slot while another processes a 46K-token
+prompt (35B) is answered after 9.6 s (49 s when the turns were every step).
+
+Gemma 4 26B-A4B (19 Oct, experts on the SSD, expert file 13.2 GB): prompt 4K 450 tok/s, 8K 410; generation
+19.6-20.6 tok/s.
+
+Flash Next (20 Oct): the two-pass int8 input of the hyper-connection mixers' up projection is the default: prompt 4K
+168.4 -> 159.8 tok/s, 9,000 tokens 148.3 -> 138.6; KL 0.0647 -> 0.0483.
+
+The MTP block's KV rows of DFlash2 steps (20 Oct, a bug fix) left the speed unchanged: 256-token answers, best of two,
+35B prose 20.56 -> 21.01 tok/s, code 37.45 -> 38.65; 27B prose 8.91 -> 8.78, code 15.76 -> 16.29.
 
 ## 2026-10-18 (later): deep prefetch, 35B chunk 8192, drafter variants
 

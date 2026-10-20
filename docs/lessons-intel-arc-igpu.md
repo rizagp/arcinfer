@@ -17,7 +17,7 @@ SSD.
 Qwen3.8 27B (IQ3_S GSQ, dense) prompt ~135 tok/s (llama.cpp Vulkan pp2048: 23), generation 4.91 plain, 18.1 with
 DFlash2 + MTP on code; Qwen3.8 Flash Next (512 experts on the SSD) prompt 166 tok/s at 4K, generation 6-7 tok/s. On
 Indonesian prose the drafters help far less (27B 4.88 / 7.0 / 6.8 tok/s plain / MTP / both; 35B 21.9 with MTP
-only): they are trained mostly on English and code. Every model, kept current: [before-after.md](before-after.md#where-it-stands-2026-10-18).
+only): they are trained mostly on English and code. Every model, kept current: [before-after.md](before-after.md#where-it-stands-2026-10-20).
 
 ## 1. Know the hardware first (measured)
 
@@ -288,7 +288,7 @@ predicating the loads gave 905 -> 843 ms, bit-identical. Check bit identity afte
   (35B + MTP 11.9 vs 26.5 tok/s, identical logs): wait a few seconds between runs. A 32K-context E4B run once read
   10.8 instead of 17.9 tok/s, seven repeats 18.5–19.0. Treat a single slow or fast run as noise until it repeats.
 - **Do not measure next to another GPU process.** A CPU reference running alongside, a second server, or an idle
-  loaded server (an E4B load took 13–43 s instead of 2 s) all distorted numbers. `run.exe` warns when it sees one.
+  loaded server (an E4B load took 13–43 s instead of 2 s) all distorted numbers. `runz.exe` warns when it sees one.
 - **The first run after a kernel source change includes JIT compiles.** A 27B generation right after a 32K prompt
   took 18.4 s for its first step (a dozen decode-attention variants compiled), then 238 ms per step; after an
   update, the 27B with DFlash2 needed 37 s for a 27-token prompt and then ran 1–3 tok/s while kernels compiled; a
@@ -347,7 +347,11 @@ predicating the loads gave 905 -> 843 ms, bit-identical. Check bit identity afte
 - A single-position or 20-position KL is not a metric: one near-tied position swung a Gemma test between 0.009 and
   0.043 across builds whose intermediate values differed by at most 1e-6. Raw-text perplexity did not rank engines
   on Gemma either (130 / 120 / 113 / 111 across four engines).
-- Per-kernel tests on real model tensors against the CPU dequantization (`tools/test_gemm`, `bench/gemv_bench`).
+- Per-kernel tests on real model tensors against the CPU dequantization (`bench/gemv_bench`, `bench/attn_dec_bench`).
+- Run the same conversation alone and interleaved with another one in a second slot, and compare every logit bit for
+  bit (`runz --slots-check`): a buffer read before it is written shows up as a difference, because the leftover memory
+  differs. That is how the MTP block was found reading KV rows that DFlash2 steps never wrote (its drafts after those
+  steps changed with what the slot held before; the output was still right, the drafts were verified).
 
 ## 9. Serving an agent (Pi) on this laptop
 

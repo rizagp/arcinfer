@@ -4,12 +4,12 @@ arcinfer is a from-scratch LLM inference engine for Intel's integrated Arc graph
 the wait before a model starts answering a long prompt. It runs Qwen3.5, Qwen3.6 and Qwen3.8 (dense and mixture of
 experts) and Gemma 4 with image and audio input, serves an OpenAI-, Anthropic- and Ollama-compatible API, and plugs
 into the Pi coding agent. This page tells the story of the build from the first working forward pass to
-18 October 2026, with the emphasis on how prompt and generation speed developed and what caused each step.
+20 October 2026, with the emphasis on how prompt and generation speed developed and what caused each step.
 
-Two engines share the kernels and the server code: **arcinfer** (`src/`, OpenCL), which the work up to 15 October was
-done on, and **arcinferzero** (`zero/`), which runs the same kernels through Level Zero, is bit-identical to the
-OpenCL engine on every model, streams mixture-of-experts weights from the SSD, and has been the default since
-16 October.
+The work up to 15 October was done on an OpenCL engine (`src/`). **arcinferzero** (`zero/`) runs the same kernels
+through Level Zero, gave bit-identical logits to the OpenCL engine on every model, streams mixture-of-experts weights
+from the SSD, and became the default on 16 October; the OpenCL engine was removed on 20 October. Measurements dated
+before 14 October below are from the OpenCL engine.
 
 Sources: [CHANGELOG.md](../CHANGELOG.md), [review_notes.md](archive/review_notes.md) (working notes),
 [arcinferzero-log.md](archive/arcinferzero-log.md), [speed-progress.md](speed-progress.md) (the speed tables by date),
@@ -67,11 +67,13 @@ CHANGELOG.md and the working notes. The first ten stages are recorded only as "b
 | 16 Oct | arcinferzero default; Flash Next; DFlash2 | register-spill fixes, GEMM with 16 tokens side by side (27B prompt 2K 110 → 130 tok/s), Qwen3.8 Flash Next running, DFlash2 block drafter (27B code 4.85 → 11.5 tok/s), token-outer verification GEMVs |
 | 17 Oct | Speculative decoding and MoE prompts | more drafts by default (27B 7, 35B 5), DFlash2 drafter in Q4_0, `moe_rg`, Flash Next 7.3 tok/s and 8K prompt 165 tok/s, kernel warm-up |
 | 18 Oct | Long contexts and MoE prompts | automatic context 131,072 for the MoE models, 35B prompt chunks 8,192 (32K prompt 533 → 604 tok/s), deep expert prefetch (Flash Next 4K prompt 107 → 166 tok/s), `qsa_score_rt`, `--v4`, drafter variants `-nodf` / `-df` |
+| 19 Oct | Two conversations at once; Gemma 4 26B-A4B | conversation slots (`--slots N`): a question during another slot's 46K-token prompt answered after 9.6 s; batched decoding over slots (27B prose 7.3 → 10.5 tok/s together, 35B 20.2 → 24.7, Gemma 26B 19.8 → 26.2); Gemma 4 26B-A4B with its experts on the SSD (prompt 450 tok/s, generation ~20 tok/s) and images |
+| 20 Oct | Accuracy, robustness, one engine | Flash Next hyper-connection mixers in two int8 passes by default (KL 0.0647 → 0.0483, prompts 5-7 % slower); five DeepSeek audit rounds (slot and batch error paths, memory per slot counted exactly); MTP block KV rows written on DFlash2 steps (its later drafts read stale memory); the OpenCL engine removed |
 
 ## Speed now
 
-The current numbers for every model are kept in one place: [before-after.md](before-after.md#where-it-stands-2026-10-18)
-("Where it stands", 18 October). The model tables below end at their last milestone. The 17 October speculative
+The current numbers for every model are kept in one place: [before-after.md](before-after.md#where-it-stands-2026-10-20)
+("Where it stands", 20 October). The model tables below end at their last milestone. The 17 October speculative
 decoding numbers (27B code 4.91 / 15.5 / 18.1 tok/s plain / MTP / DFlash2 + MTP; 35B UD-Q3_K_M 21.2 / 39.3 / 49.8)
 were `runz` runs with 96-token greedy answers and warm kernels, not server runs. All speed tables by date:
 [speed-progress.md](speed-progress.md).
@@ -230,6 +232,17 @@ Community IQ4_XS file first, Google's QAT Q4_0 from 12 October.
 | 15 Oct (Level Zero) | 2K 733, 16K 571, 131K 209 tok/s | 21.0 / 19.6 / 9.5; server 21.6, drafter 39.6 | — |
 | 16 Oct | 2K 733 → 827, 16K 571 → 625 | 21.5 / 20.1 | register spills removed |
 
+### Gemma 4 26B-A4B (Google QAT Q4_0, mixture of experts)
+
+A dense FFN beside 128 routed experts (8 active, GELU, a scale per expert); the router runs in f32 on its own input
+norm (an int8 router gave KL 0.079 instead of 0.073). The experts are streamed from the SSD like the 35B's (expert file
+13.2 GB, written in 73 s); its image encoder has 72-dim heads.
+
+| Date | Prompt | Generation | Main change |
+|---|---|---|---|
+| 19 Oct | 4K 450 tok/s, 8K 410 | 19.6–20.6 (expert cache 85–93 % in `runz`, 72 % at the server's 106K context) | first version; KL 0.073 prompt / 0.068 decode path against the CPU reference |
+| 19 Oct | — | two conversations 19.8 → 26.2 together | batched decoding over slots; 2 slots get 32,768 tokens each (was 8,192) |
+
 ### Qwen3.8 Flash Next (ISTA-DASLab GSQ-RCO IQ3_S, arcinferzero only)
 
 A new architecture (`qwen4exp`): 4 hyper-connection residual streams with mixers before every block, Gated DeltaNet
@@ -245,7 +258,8 @@ experts fit in the GPU cache.
 | 17 Oct | 8K prompt 98 → 127 tok/s | — | the prompt mixer's gated mean with vector loads (45 → 3.7 ms per 2,048-row chunk) |
 | 17 Oct | 8K prompt 145 → 165 tok/s | 7.3 | down projection through `moe_rg` |
 | 18 Oct | 125K prompt 78.6 → 123.4 tok/s; 32K 131-146 → 153-154 | — | QSA block scores for 8 query rows per work-group (`qsa_score_rt`) |
-| 18 Oct (now) | 4,096 tokens 107 → 166, 9,000 tokens 116.9 → 144.5, 32K 131.7 → 162.6 tok/s | 5.85 code / 6.44 Indonesian at ctx 131K | deep expert prefetch (see the 35B section); automatic context 131,072 |
+| 18 Oct | 4,096 tokens 107 → 166, 9,000 tokens 116.9 → 144.5, 32K 131.7 → 162.6 tok/s | 5.85 code / 6.44 Indonesian at ctx 131K | deep expert prefetch (see the 35B section); automatic context 131,072 |
+| 20 Oct (now) | 4,096 tokens 168.4 → 159.8, 9,000 148.3 → 138.6 tok/s | — | the hyper-connection mixers' up projection takes its input as two int8 passes: KL 0.0647 → 0.0483, top token 324 → 331 of 363 |
 
 The SSD reads random 2 MB records at 3.6–3.8 GB/s at any queue depth (`zero/ssd_bench.cpp`), and the engine is at
 that limit.
@@ -458,9 +472,9 @@ The ones that shaped the design:
 - **Flash Next**: no MTP block and no image input; generation depends on the SSD (cache 12–22 % of the experts);
   the README still lists long-context QSA as not validated beyond the 3,566-token check.
 - **Register spills left**: `gdn_conv` 1 KB and `moe_gateup_q` 2 KB (256 registers remove them but are not faster).
-- **Not done yet**: cheaper MTP drafts (dynamic token list or draft tree), several conversations at once and batched
-  decoding, `/v1/embeddings`, a 4-bit KV cache (since 18 Oct an opt-in 4-bit V copy for generation, `--v4`), removing the OpenCL engine (arcinferzero is the default; the OpenCL
-  path is kept with `--opencl` until it has been used daily for a while).
+- **Not done yet**: cheaper MTP drafts (dynamic token list or draft tree), `/v1/embeddings`, a 4-bit KV cache (since
+  18 Oct an opt-in 4-bit V copy for generation, `--v4`), batched decoding for Flash Next (its hyper-connection
+  streams), prompts of different slots in one pass.
 - From the OpenCL-era review, not re-investigated: on the 27B each request took ~3 s before the first token even for a
   handful of new tokens (15 tokens: 2.8–3.8 s); a cancelled Gemma 4 prompt can only be rolled back while its
   sliding-window rings still hold the positions before the block (blocks up to ~8K tokens).
