@@ -25,7 +25,7 @@
   20.2 -> 24.7, 29.0 -> 30.7. Logits bit-identical to each slot alone; `runz --bench-batch N` times it (27B, no
   drafts: 2 / 3 / 4 slots 1.78 / 2.43 / 3.04x).
 
-- `ARC_HC_F32` (arcinferzero, Flash Next prompts; opt-in): the hyper-connection mixers of prompt chunks with more
+- `ARC_HC_F32` (arcinferzero, Flash Next prompts; `4` the default since 20 Oct, `0` the old single int8 pass): the hyper-connection mixers of prompt chunks with more
   precision. `4` takes the up projection's input as two int8 passes (values, then their rounding residual): KL
   against the f32 reference 0.0647 -> 0.0483, top token 324 -> 331 of 363, prompts 5-7 % slower. `1` f32 for both
   projections (KL 0.0369, about 22 % slower), `2` / `3` the down / up projection only. The default (int8) is unchanged.

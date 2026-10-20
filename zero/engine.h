@@ -3617,10 +3617,11 @@ class Engine {
     // (ARC_HC_F32=1: the prompt chunk's mixers with f32 activations as single tokens have them, hc_gemm_f32; Flash Next
     //  is sensitive there: the f32 reference with int8 mixer inputs drifts by KL 0.06 on its own)
     // (1: both projections, 2: the down projection only, 3: the up projection only)
-    // (4: the up projection's input as two int8 passes, the values then their rounding residual, accumulated)
-    static const int f32_mode = getenv("ARC_HC_F32") ? atoi(getenv("ARC_HC_F32")) : 0;
+    // (4, the default since 20 Oct: the up projection's input as two int8 passes, the values then their rounding
+    //  residual, accumulated: KL 0.0647 -> 0.0483 against the f32 reference, prompts 5-7 % slower; 0: one int8 pass)
+    static const int f32_mode = getenv("ARC_HC_F32") ? atoi(getenv("ARC_HC_F32")) : 4;
     static bool hc_logged = false;
-    if (f32_mode && !hc_logged) {
+    if (!hc_logged) {
       hc_logged = true;
       static const char* names[] = {"int8", "f32 down + up", "f32 down", "f32 up", "two-pass int8 up"};
       fprintf(stderr, "HC mixers of prompt chunks: %s (ARC_HC_F32=%d)\n", f32_mode >= 0 && f32_mode <= 4 ? names[f32_mode] : "int8", f32_mode);

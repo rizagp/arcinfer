@@ -29,7 +29,7 @@ engines.
 |---|---|---|---|
 | Qwen3.6 35B-A3B UD-IQ4_XS (MoE, experts on the SSD) | 604 tok/s (32K prompt), 324 (128K) | 20.6 tok/s; code 49.9 with DFlash2; 12.6 at 128K depth | 0.004-0.008 |
 | Qwen3.8 27B IQ3_S (dense) | ~135 tok/s | 4.9 tok/s; code 18.1 with DFlash2 + MTP | 0.0003-0.0004 |
-| Qwen3.8 Flash Next IQ3_S (512 experts on the SSD) | 166 tok/s (4K), 163 (32K), 123 (125K) | 6-7 tok/s | 0.020 |
+| Qwen3.8 Flash Next IQ3_S (512 experts on the SSD) | ~159 tok/s (4K), 163 (32K), 123 (125K) | 6-7 tok/s | 0.020 (3.5K prompt); 0.048 on README text (was 0.065) |
 | Qwen3.5 4B | 911 tok/s (2K) | 17.6 tok/s | 0.0021 |
 | Gemma 4 12B (Google QAT) | 240 tok/s (2K) | 7.5 tok/s | 0.021 (greedy text equal to llama.cpp) |
 | Gemma 4 26B-A4B (Google QAT, MoE, experts on the SSD) | 450 tok/s (4K), 410 (8K) | 19.6-20.6 tok/s | 0.068-0.073 (int8 activations; the reference with int8 inputs: 0.063) |
