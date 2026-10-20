@@ -274,6 +274,11 @@ docs/before-after.md and a local commit (push only when asked).
 
 ## F21: optimize Gemma 4 26B-A4B, target KL < 0.01 (requested 2026-10-20)
 
+**Start: 2026-10-21 17:00.** Target (2026-10-21): **KL < 0.01 against the f32 reference for Gemma 4 26B, 12B and
+E4B** (now 26B 0.0985, 12B 0.0206, E4B not measured: `tools/ref_forward` has no PLE yet). Accuracy first, a slower
+model is fine ("yang penting akurat"); other models (Qwen) stay bit-identical. Order: 21.10 (references for the 12B
+and E4B), then 21.3 / 21.4 for all three, then the speed items checked against the same KL.
+
 The user: optimize the 26B "until done", MTP as other 26B builds have, tiling and sub-grouping too, and an
 acceptable KL divergence below 0.01. Measured on the package (`%LOCALAPPDATA%\arcinfer\zero\models\gemma-4-26B_q4_0-it`,
 experts once on disk), 480 tokens of `bench/prompts/gemma-code-11k.ids.txt` against `tools/ref_forward` (f32, now
@@ -314,3 +319,4 @@ So both are needed (each alone leaves 0.07-0.09); with both the KL is at the mod
 | 21.7 | Vision encoder | ⏳ | 11.8 s per 1,092-token image (9,828 patches, 27 layers of 1152): vit_attn 53 % (f32, head 72), vit_gemm 42 % (f16 weights, ~2.2 TFLOPS); tiling / sub-groups for HD 72. The image token budget stays 1,120 (Gemma 4 also takes 70-560: the user's choice) |
 | 21.8 | MoE kernels: tiling and sub-grouping | ⏳ | generation: moe_gateup ~50 GB/s, moe_down ~37 GB/s; GROWS sweeps gave only noise (default 22.4 tok/s); a variant for 704-wide experts without the 768 padding (9 % of the reads); prompt tile size (ARC_MOE_TM) |
 | 21.9 | Context of g26 | ⏳ | the auto context keeps 3/4 of the free memory for the expert cache (57K with images); the user runs 131K by hand: measure generation at 57K / 131K / 262K, then loosen the floor for this model |
+| 21.10 | KL references for the 12B and E4B | ⏳ first | 12B: a 480-token code reference (as the 26B's) and the two-pass simulation (REF_Q2 / REF_ATTQ2) to see how far it can fall; E4B: per-layer embeddings (PLE) in `tools/ref_forward` first, then the same. The 12B / E4B take 21.3 / 21.4 only where the simulation and the engine show KL < 0.01 (or clearly lower) without breaking their drafters' identity |
