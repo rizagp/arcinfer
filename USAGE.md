@@ -54,7 +54,6 @@ and the DFlash2 drafters are not downloaded by setup.
 | `pi-arc g26` | Gemma 4 26B-A4B (Google QAT Q4_0): mixture of experts (~4B active), ~20 tokens/s, reads images; 57K context with images, 106K with `--vision off` |
 | `pi-arc 9b` | Qwen3.5 9B: faster, medium quality |
 | `pi-arc 4b` | Qwen3.5 4B: fastest |
-| `pi-arc qwen3.5-4b-quasar-q4_0` | Another file of a model, by its id (`pi-arc --pick` lists them). QUASAR-QAT's 4B is about as accurate as `4b`; its Gemma 4 E4B is clearly worse than Google's `e4b` (README, step 6) |
 | `pi-arc --think off` | No thinking (reasoning) phase: much faster answers |
 | `pi-arc --think medium` | Thinks longer for hard tasks (`off` / `minimal` / `low` / `medium` / `high`; default `low`) |
 | `pi-arc 9b --think off` | A fast combination for everyday questions |
@@ -130,8 +129,7 @@ arc-server help                # every option
 
 The server log is `%LOCALAPPDATA%\arcinfer\server.log`. The server uses port 8090.
 
-**arcinferzero (the engine):** the server runs through Level Zero (Intel's GPU driver). The older OpenCL engine,
-whose output it matched on every model, was removed on 20 Oct 2026 (`-OpenCL` / `--opencl` now stop with a message). For
+**arcinferzero (the engine):** the server runs through Level Zero (Intel's GPU driver). For
 MoE models (Qwen3.6 35B) the experts are kept on the SSD and only the frequently used experts are in GPU memory (a
 cache): the context can reach 262K together with images and MTP, and Windows still keeps at least 14 GB of RAM.
 The automatic context reserves 128K tokens, then sizes the expert cache (35B: 131,072 tokens with ~76-81 % of the
@@ -142,8 +140,6 @@ arc-server start -Model 35b          # experts streamed from the SSD
 pi-arc 35b
 pi-arc 35b --no-stream               # without the SSD cache: every expert on the GPU (a smaller context)
 ```
-
-`-Zero` / `--zero` are still accepted (they change nothing).
 
 On first use, arcinferzero writes the expert file once (35B UD-IQ4_XS: 16 GB, about 2.5 minutes; Flash Next: 56 GB, about 9.5 minutes) to
 `%LOCALAPPDATA%\arcinfer\zero\`. This file can be deleted at any time; when it is missing, it is written again

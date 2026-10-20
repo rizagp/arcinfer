@@ -52,9 +52,7 @@ consistency checks (56 of 56 regression runs bit-identical): **[docs/before-afte
 **arcinferzero** (`zero/`, `bin\serverz.exe`, `bin\runz.exe`) runs OpenCL-compiled kernels through **Level
 Zero**. It streams mixture-of-experts weights from the SSD (only the experts in use stay in GPU memory; the next
 layer's missing experts are read while the GPU computes the current one), and drafts with the MTP block, a DFlash2
-drafter or both. The automatic context gives the 35B and Flash Next 131,072 tokens. The original OpenCL engine
-(`bin\server.exe`, `bin\run.exe`; arcinferzero matched its output bit for bit on every model) was removed on
-2026-10-20; `arc-server -OpenCL` / `pi-arc --opencl` now stop with a message.
+drafter or both. The automatic context gives the 35B and Flash Next 131,072 tokens.
 
 ### Read more
 
@@ -199,20 +197,6 @@ lists them). `35b` is the UD-IQ4_XS file above, or UD-Q3_K_M / the GSQ file when
 downloaded (with several, the first found keeps the shortcut); `35b-s` is Unsloth's UD-Q3_K_S. Variant suffixes:
 `-mtp` (MTP, no images), `-vision` (images, no MTP), `-std` (neither), and for a model with a DFlash2 drafter
 `-nodf` / `-df` (see `--dflash` below).
-
-Other quantizations of these models load as well. QUASAR-QAT's Q4_0 files, checked on 2026-10-20 against the files
-above (perplexity over 40 chunks of 512 tokens of this repository's docs, the second half of each scored; lower is
-better):
-
-| File | Size | Perplexity | Compared with |
-|---|---|---|---|
-| `QUASAR-QAT/Qwen3.5-4B-QUASAR-Q4_0-GGUF` (MTP block, image projector) | 2.74 GB | 14.93 | Unsloth UD-Q4_K_XL (`4b`): **14.83**, 2.79 GB |
-| `QUASAR-QAT/gemma-4-E4B-it-QUASAR-Q4_0-GGUF` (image projector, no drafter) | 4.87 GB | 48.03 | Google QAT Q4_0 (`e4b`): **30.41**, 4.80 GB |
-
-llama.cpp (Vulkan) gives the same E4B numbers (47.92 / 30.33), so the gap is the file's, not the engine's (Gemma's
-raw-text perplexity is a rough measure, but a 58 % gap is not noise). The QUASAR 4B's MTP drafts give the plain
-greedy text. They have no shortcut: `pi-arc --pick`, or their ids `qwen3.5-4b-quasar-q4_0` /
-`gemma-4-e4b-it-quasar-q4_0`.
 
 ### 7. Qwen3.6-35B-A3B (optional): convert the GSQ checkpoint
 
