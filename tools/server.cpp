@@ -1896,6 +1896,7 @@ struct ModelInfo {
   // once per combination (expand_variants): the full one under the file's id, the others with -mtp (MTP, no
   // vision), -vision (vision, no MTP) and -std (neither). base: the file's id; tags: "MTP + vision", ...
   bool supported = false, vision = false, mtp = false;
+  bool moe = false;  // routed experts (arcinferzero streams them from the SSD)
   bool audio = false;  // the image projector also holds a Gemma 4 audio encoder (loaded with it: vision variants only)
   // arcinferzero, a file with a DFlash2 drafter: 0 both drafters, picked per step (the file's id); 1 the MTP block
   // only (-nodf); 2 DFlash2 only, the MTP block not loaded (-df)
@@ -2052,6 +2053,7 @@ static std::vector<ModelInfo> scan_models() {
       gsq = g.get_str("arcinfer.expert_format", "") == "gsq2-v1";
       m.ctx_train = g.get_int(m.arch + ".context_length", 0);
       nextn = g.get_int(m.arch + ".nextn_predict_layers", 0);
+      m.moe = g.get_int(m.arch + ".expert_count", 0) > 0;
     } catch (const std::exception&) {
     }
     bool mmproj = false, drafter = false, audio = false;
@@ -2431,6 +2433,7 @@ static int list_models() {
     j.set("ctx_train", (double)m.ctx_train);
     j.set("vision", m.vision);
     j.set("mtp", m.mtp);
+    j.set("moe", m.moe);
     j.set("alias", m.alias);
     j.set("short", m.shortcut);
     j.set("base", m.base);

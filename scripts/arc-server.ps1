@@ -59,10 +59,10 @@ New-Item -ItemType Directory -Force $stateDir | Out-Null
 # the engine: arcinferzero (Level Zero); -NoStream keeps every expert on the GPU
 if ($OpenCL) { throw "-OpenCL: the OpenCL engine (bin\server.exe) was removed on 2026-10-20; arcinferzero is the engine" }
 $Engine = if ($NoStream) { "zero-nostream" } else { "zero" }
-# ($arch: the model's architecture; only mixture-of-experts models keep their experts on the SSD)
-function Engine-Text([string]$e, [string]$arch = "") {
+# ($moe: the model has routed experts, from serverz --list-models; only those keep their experts on the SSD)
+function Engine-Text([string]$e, [bool]$moe = $false) {
   switch ($e) {
-    "zero" { if ($arch -like "*moe*" -or $arch -eq "qwen4exp") { "arcinferzero (Level Zero; experts on the SSD with a GPU cache)" } else { "arcinferzero (Level Zero)" } }
+    "zero" { if ($moe) { "arcinferzero (Level Zero; experts on the SSD with a GPU cache)" } else { "arcinferzero (Level Zero)" } }
     "zero-nostream" { "arcinferzero without the SSD cache (Level Zero; every weight on the GPU)" }
     default { "an older server ($e)" }
   }
@@ -341,14 +341,14 @@ $same = $running -eq $m.alias -and (-not $Ctx -or ($st -and "$($st.ctx)" -eq $ct
   (-not $st -or "$(if ($st.engine) { $st.engine } else { 'arcinfer' })" -eq $Engine)
 if ($Action -eq "start" -and $same) {
   Say "Server already running: $running on $base"
-  Say "  engine: $(Engine-Text $Engine $m.arch)"
+  Say "  engine: $(Engine-Text $Engine ([bool]$m.moe))"
   Sync-PiModels
   return
 }
 if ($running) {
   $was = if ($st -and $st.engine) { $st.engine } else { "arcinfer" }
   Say "Switching the server: $running ($(Engine-Text $was))"
-  Say "                  to: $($m.alias) ($(Engine-Text $Engine $m.arch))"
+  Say "                  to: $($m.alias) ($(Engine-Text $Engine ([bool]$m.moe)))"
   Stop-Arc | Out-Null
 }
 elseif ($Action -eq "restart") { Stop-Arc | Out-Null }
@@ -362,7 +362,7 @@ if ($Chunk -gt 0) { $srvArgs += @("--chunk", $Chunk) }
 if ($SessionCacheGb -gt 0) { $srvArgs += @("--session-cache-gb", $SessionCacheGb) }  # saved conversations on disk (default 8 GB, 0 = off)
 if ($novision -eq "1") { $srvArgs += "--no-mmproj" }
 Say "Starting $(if ($NoStream) { 'arcinferzero (no SSD cache)' } else { 'arcinferzero' }): $($m.name) as $($m.alias), context $ctxArg, port $Port$(if ($useMtp) { ', speculative decoding' })"
-Say "  engine: $(Engine-Text $Engine $m.arch)"
+Say "  engine: $(Engine-Text $Engine ([bool]$m.moe))"
 if (-not $NoStream) {
   Say "  (MoE models: the first start writes the expert file to $stateDir\zero, 35B: 16 GB / ~2.5 min, Flash Next: 56 GB / ~9.5 min, once)"
 }
@@ -387,7 +387,7 @@ while ($true) {
 }
 $nctx = (Invoke-RestMethod "$base/props" -TimeoutSec 5).n_ctx
 Say ("Ready after {0:N0} s: {1}, context {2:N0} (web UI {3}/)" -f ((Get-Date) - $t0).TotalSeconds, $m.alias, $nctx, $base)
-Say "  engine: $(Engine-Text $Engine $m.arch)"
+Say "  engine: $(Engine-Text $Engine ([bool]$m.moe))"
 if ($true) {
   # the engine's own lines: the expert cache (MoE) or that the model has no experts to stream
   $zl = @(Get-Content $log -ErrorAction SilentlyContinue | Where-Object { $_ -match "^arcinferzero: (expert cache|cache filled|expert file written|memory limit)" })

@@ -19,6 +19,10 @@
   MTP drafts after DFlash2 steps read stale memory there (output was always right; drafts depended on what the
   slot held before). Speed unchanged (35B / 27B, prose and code).
 - A failed generation step (alone or batched) fails its request(s) and starts the slot's conversation over.
+- QUASAR-QAT's Q4_0 files load (ids from their file names): the Qwen3.5 4B is about as accurate as Unsloth's
+  UD-Q4_K_XL (perplexity 14.93 vs 14.83), its Gemma 4 E4B clearly worse than Google's QAT file (48.0 vs 30.4;
+  llama.cpp the same). `serverz --list-models` marks mixture-of-experts files (`moe`), which `arc-server` uses for
+  its engine line (Gemma 4 26B was described as dense).
 - The expert cache's prefetch thread passes its errors to the caller instead of ending the process; the expert
   file is written to a `.tmp` and renamed only when complete.
 - JSON nested more than 256 deep is a 400 (it overflowed the connection thread's stack); the build uses `/utf-8`.

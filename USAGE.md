@@ -54,6 +54,7 @@ and the DFlash2 drafters are not downloaded by setup.
 | `pi-arc g26` | Gemma 4 26B-A4B (Google QAT Q4_0): mixture of experts (~4B active), ~20 tokens/s, reads images; 57K context with images, 106K with `--vision off` |
 | `pi-arc 9b` | Qwen3.5 9B: faster, medium quality |
 | `pi-arc 4b` | Qwen3.5 4B: fastest |
+| `pi-arc qwen3.5-4b-quasar-q4_0` | Another file of a model, by its id (`pi-arc --pick` lists them). QUASAR-QAT's 4B is about as accurate as `4b`; its Gemma 4 E4B is clearly worse than Google's `e4b` (README, step 6) |
 | `pi-arc --think off` | No thinking (reasoning) phase: much faster answers |
 | `pi-arc --think medium` | Thinks longer for hard tasks (`off` / `minimal` / `low` / `medium` / `high`; default `low`) |
 | `pi-arc 9b --think off` | A fast combination for everyday questions |
