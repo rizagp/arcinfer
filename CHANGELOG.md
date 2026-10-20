@@ -18,7 +18,10 @@
 - MTP block + DFlash2: a step drafted by DFlash2 now also writes its token's row of the MTP block's KV cache; the
   MTP drafts after DFlash2 steps read stale memory there (output was always right; drafts depended on what the
   slot held before). Speed unchanged (35B / 27B, prose and code).
-- A failed generation step (alone or batched) fails its request(s) and starts the slot's conversation over.
+- A failed generation step (alone or batched) fails its request(s) and starts the slot's conversation over; a
+  streamed request ends with an error event (`data: {"error": ...}`) instead of a cut stream, and a 500's message is
+  escaped as JSON. Tested by `tests/fail_inject.ps1` (in `run_tests`): `ARC_FAIL_PASS=N` makes the engine's N-th
+  verification or batched pass throw after its layers.
 - QUASAR-QAT's Q4_0 files load (ids from their file names): the Qwen3.5 4B is about as accurate as Unsloth's
   UD-Q4_K_XL (perplexity 14.93 vs 14.83), its Gemma 4 E4B clearly worse than Google's QAT file (48.0 vs 30.4;
   llama.cpp the same). `serverz --list-models` marks mixture-of-experts files (`moe`), which `arc-server` uses for

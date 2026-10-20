@@ -384,6 +384,18 @@ foreach ($eng in $engines) {
     if (-not $srv.HasExited) { Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue }
   }
 }
+
+# 6. error paths of generation steps (tests\fail_inject.ps1: a pass made to fail, alone / batched / streamed; the
+#    requests get an error, the server stays up, the next answers equal a reference)
+if (-not $SkipGpu) {
+  Section "error paths (injected failures, 2 slots)"
+  if (-not (Have $Model4B)) { Skip "error paths" (Why $Model4B "4B model") }
+  else {
+    $o = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "fail_inject.ps1") -Model $Model4B 2>&1 | Out-String
+    $o -split "`r?`n" | Where-Object { $_ -match "^\[(PASS|FAIL)\]" } | ForEach-Object { Write-Host "   $_" }
+    Check "error paths: failed passes end their requests, the slots start over" ($o -match "error paths: all passed") (($o -split "`r?`n" | Where-Object { $_ -match "^\[FAIL\]" }) -join "; ")
+  }
+}
 } finally {
   Pop-Location
 }

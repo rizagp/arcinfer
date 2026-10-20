@@ -715,6 +715,7 @@ class Engine {
     dfl_cap_lo_ = dfl_cap_base_ = 0;
     dfl_cap_end_ = B;
     for (auto& L : layers_) run_layer(L, B, Mp);
+    fail_point();
     const std::vector<BatchSeq> seqs = batch_;
     batch_.clear();
     head_rows(0, B, out_norm_, nullptr);
@@ -754,6 +755,12 @@ class Engine {
     return batch_logits_host_;
   }
   int batch_rows() const { return batch_rows_; }
+  // (tests of the error paths: the fail_after-th verification or batched pass from now throws after its layers have
+  //  written their state; 0 = never. The server sets it from ARC_FAIL_PASS)
+  long fail_after = 0;
+  void fail_point() {
+    if (fail_after > 0 && --fail_after == 0) throw std::runtime_error("injected failure (ARC_FAIL_PASS)");
+  }
   size_t slot_real_bytes_ = 0, slot_est_bytes_ = 0;  // (add_slots: one slot's buffers, and what slot_bytes() counted)
  private:
   // a batch's slots: in range, each once, none with a verification pass not settled, n[b] more positions within ctx
@@ -828,6 +835,7 @@ class Engine {
     dfl_cap_end_ = R;
     spec_ = true;
     for (auto& L : layers_) run_layer(L, R, Mp);
+    fail_point();
     spec_ = false;
     const std::vector<BatchSeq> seqs = batch_;
     batch_.clear();
@@ -5177,6 +5185,7 @@ class Engine {
     if (dfl_) dfl_window(pos, T);
     spec_ = !gemma_mtp_;
     for (auto& L : layers_) run_layer(L, T, 16);
+    fail_point();
     spec_ = false;
     pos += T;
     head_rows(0, T, out_norm_, hver_);

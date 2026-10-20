@@ -608,7 +608,11 @@ setup.cmd   setup.ps1: checks, builds, downloads models, connects Pi;  build.ps1
   `--kl-decode` does the same through the token-by-token generation path.
 - `tests/run_tests.ps1` runs all of the above plus chat-template rendering against the GGUF Jinja templates and an
   OpenAI API test (streaming tool calls, prefix reuse); with `-ModelGemma` / `-Model35B` also the Gemma 4 and
-  35B-A3B paths (KL vs the f32 reference, greedy equal to llama.cpp, drafter output identical).
+  35B-A3B paths (KL vs the f32 reference, greedy equal to llama.cpp, drafter output identical). Every model found also
+  runs `runz --slots-check` (two conversations alone, interleaved and batched: bit-identical; misuse refused; a
+  slot's memory counted exactly), and `tests/fail_inject.ps1` makes a generation pass fail on purpose
+  (`ARC_FAIL_PASS=N`): the requests of that pass get an error (a streamed one an error event), the server stays up,
+  and the next answers are the same as before the failure.
 - Mean KL of the next-token distributions vs the f32 reference: Qwen3.5-4B 0.0021; Qwen3.6-35B-A3B 0.0008 with the
   GSQ file, 0.004-0.008 with UD-IQ4_XS (generation path); Gemma 4 12B 0.021 with Google's QAT file (0.029 with the
   older Q4_K_M file). Gemma 4 is about 7x more sensitive to int8 rounding: int8 activations alone give ~0.009.

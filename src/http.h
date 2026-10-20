@@ -257,7 +257,19 @@ class HttpServer {
         try {
           handler(rq, rs);
         } catch (const std::exception& e) {
-          if (!rs.done() && !rs.streaming()) rs.send(500, "application/json", std::string("{\"error\":{\"message\":\"") + e.what() + "\"}}");
+          std::string m;  // (the message as a JSON string)
+          for (const char* p = e.what(); *p; ++p) {
+            const unsigned char ch = (unsigned char)*p;
+            if (ch == '"' || ch == '\\') { m += '\\'; m += (char)ch; }
+            else if (ch < 0x20) { char u[8]; snprintf(u, sizeof u, "\\u%04x", ch); m += u; }
+            else m += (char)ch;
+          }
+          const std::string body = "{\"error\":{\"message\":\"" + m + "\",\"type\":\"server_error\"}}";
+          if (!rs.done() && !rs.streaming()) rs.send(500, "application/json", body);
+          else if (rs.streaming() && !rs.done()) {  // (a stream that broke off: an error event, as OpenAI sends one)
+            try { rs.sse_event(body); } catch (...) {}
+            rs.sse_end();
+          }
         }
         if (!rs.done() && !rs.streaming()) rs.send(404, "application/json", "{\"error\":{\"message\":\"not found\"}}");
       }

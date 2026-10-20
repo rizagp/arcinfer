@@ -2597,6 +2597,7 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
       fprintf(stderr, "kernels warmed up for this model in %.1f s (once after an update)\n",
               std::chrono::duration<double>(std::chrono::steady_clock::now() - tw).count());
   }
+  if (const char* f = getenv("ARC_FAIL_PASS")) eng.fail_after = atol(f);  // (tests: a pass that throws, see Engine)
   L->srv = std::make_unique<Server>(eng, *L->tok, alias, so.webui);
   Server& srv = *L->srv;
   srv.model_bytes_ = gguf_bytes(model);
