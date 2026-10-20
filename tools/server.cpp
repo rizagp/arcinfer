@@ -3,19 +3,13 @@
 // usage: arcinfer-server -m model.gguf [--host 127.0.0.1] [--port 8080] [--ctx 40960] [--alias name] [--webui dir]
 //                       [--chunk N] [--budget GB] [--mtp] [--think-budget N] [--attn-f32] [--kernels dir]
 //                       [--session-cache-gb N] [--session-dir dir]   (saved conversations; default 0 = off)
-// ARC_ZERO (zero/serverz.cpp includes this file with it defined): the arcinferzero server, on zero/engine.h (Level
-// Zero, MoE experts streamed from the SSD), with its own data folder (%LOCALAPPDATA%\arcinfer\zero: context
-// cache, saved prompts and conversations) and the expert cache options.
-#ifdef ARC_ZERO
+// Built as bin\serverz.exe (zero/serverz.cpp includes this file): the arcinferzero engine, zero/engine.h (Level Zero,
+// MoE experts streamed from the SSD), with its data folder %LOCALAPPDATA%\arcinfer\zero (context cache, saved
+// prompts and conversations). (The OpenCL engine and its bin\server.exe were removed on 20 Oct 2026.)
 #include "../zero/engine.h"
 #include "../zero/gguf_pack.h"
 #define ARC_DATA "/arcinfer/zero/"
 #define ARC_DATA_HELP "%%LOCALAPPDATA%%\\arcinfer\\zero\\"  // (the same folder, as --help prints it)
-#else
-#include "../src/engine.h"
-#define ARC_DATA "/arcinfer/"
-#define ARC_DATA_HELP "%%LOCALAPPDATA%%\\arcinfer\\"
-#endif
 #include "../src/tokenizer.h"
 #include "../src/chat.h"
 #include "../src/chat_gemma4.h"
@@ -24,15 +18,9 @@
 #include "../src/audio.h"
 #include "../src/audio_gemma4.h"
 #include "../src/vision_gemma4.h"
-#ifdef ARC_ZERO
 #include "../zero/vision_gemma4v.h"
 #include "../zero/audio_gemma4a.h"
 #include "../zero/vision_qwen3vl.h"
-#else
-#include "../src/vision_gemma4v.h"
-#include "../src/audio_gemma4a.h"
-#include "../src/vision_qwen3vl.h"
-#endif
 #include "../src/http.h"
 #include "../src/full_speed.h"
 #include "api_compat.h"
@@ -213,11 +201,7 @@ class Server {
       Json r = Json::object();
       r.set("model", model_id_);
       r.set("n_ctx", eng_.ctx);
-#ifdef ARC_ZERO
       r.set("engine", "arcinferzero");
-#else
-      r.set("engine", "arcinfer");
-#endif
       r.set("chunk", eng_.max_chunk);
       r.set("weights", eng_.w8_resident ? "w8-resident" : "w8-just-in-time");
       r.set("vision", has_vision());
@@ -418,9 +402,7 @@ class Server {
     slots_[k].since = clk::now();
     slots_[k].busy = true;
     slots_[k].used = ++slot_clock_;
-#ifdef ARC_ZERO
     if (cont < 0) eng_.reset_drafter_choice();  // (another conversation: its own DFlash2 / MTP choice)
-#endif
     return k;
   }
   // ---- batched generation steps (--slots, Qwen models on arcinferzero: QUEUE 20.4). A request at a generation step
@@ -434,6 +416,7 @@ class Server {
     bool dflash = false, batched = false;
     std::vector<int> drafts;
     std::vector<float> rows;  // logits of the token and of each draft
+    std::string failed;       // the pass that ran it threw (its request fails too)
   };
   std::vector<GenStep*> gen_wait_;  // steps waiting for another request to run them
   int gen_active_ = 0;              // requests in their generation loop
@@ -445,9 +428,7 @@ class Server {
       GenStep& g = *st[0];
       if (g.max_drafts > 0) {
         g.drafts = eng_.mtp_draft(g.tok, g.max_drafts);
-#ifdef ARC_ZERO
         g.dflash = eng_.last_draft_dflash();
-#endif
         const auto& lv = eng_.verify(g.tok, g.drafts);
         g.rows.assign(lv.begin(), lv.begin() + (1 + g.drafts.size()) * V);
       } else {
@@ -456,9 +437,31 @@ class Server {
       g.done = true;
       return;
     }
-#ifdef ARC_ZERO
     std::vector<int> sl;
     for (GenStep* g : st) sl.push_back(g->slot);
+    try {
+      run_batch(st, sl);
+    } catch (const std::exception& e) {
+      // every request of the pass fails (the waiting ones would otherwise wait for good), and their slots start
+      // over: the engine left their positions as they were, but part of their device state may be written
+      try { eng_.bind(cur_slot_); } catch (...) {}
+      for (GenStep* g : st) {
+        g->failed = e.what();
+        g->done = true;
+        if (g->slot == cur_slot_) {
+          cached_.clear();
+          try { eng_.reset(); } catch (...) {}
+        } else {
+          slots_[g->slot].cached.clear();  // (prepare_prefix resets the engine when the slot is next used)
+        }
+      }
+      gen_cv_.notify_all();
+      throw;
+    }
+    for (GenStep* g : st) g->done = g->batched = true;
+  }
+  void run_batch(const std::vector<GenStep*>& st, const std::vector<int>& sl) {
+    const int V = eng_.hp.n_vocab;
     if (st[0]->max_drafts > 0) {
       const int nd = eng_.batch_rows() / (int)st.size() - 1;  // (the rows of every slot within one pass)
       std::vector<std::vector<int>> rows;
@@ -482,18 +485,12 @@ class Server {
       const std::vector<float>& lv = eng_.forward_batch(sl, tk);
       for (size_t b = 0; b < st.size(); ++b) st[b]->rows.assign(lv.begin() + b * V, lv.begin() + (b + 1) * V);
     }
-    for (GenStep* g : st) g->done = g->batched = true;
-#endif
   }
   // the step `me` of the request in slot `slot` (the engine lock held, the slot bound; bound again on return)
   void gen_step(std::unique_lock<std::mutex>& lk, GenStep& me, int slot) {
     bool can = slots_.size() > 1;
-#ifdef ARC_ZERO
     static const bool off = getenv("ARC_NO_BATCH") && atoi(getenv("ARC_NO_BATCH")) != 0;  // (A/B: turns only)
     can = can && !off && (me.max_drafts == 0 ? eng_.batch_ok() : eng_.batch_verify_ok() && eng_.batch_rows() >= 4);
-#else
-    can = false;
-#endif
     for (;;) {
       if (!can) break;
       if (!gen_wait_.empty()) {  // lead: this step and the waiting ones of the same kind that fit one pass
@@ -514,6 +511,11 @@ class Server {
       gen_wait_.erase(std::remove(gen_wait_.begin(), gen_wait_.end(), &me), gen_wait_.end());
       use_slot(slot);
       eng_.cancel = nullptr;  // (a prompt step of another request may have set its own)
+      if (!me.failed.empty()) {  // (this slot starts over, as the leader did with its own)
+        cached_.clear();
+        try { eng_.reset(); } catch (...) {}
+        throw std::runtime_error("batched step: " + me.failed);
+      }
       if (me.done) return;
       if (me.alone) break;
       // (every generating request waits: the next one leads)
@@ -1438,9 +1440,7 @@ class Server {
     std::vector<int> gen;
     std::string text, dr, dc;
     std::string finish = "length";
-#ifdef ARC_ZERO
     if (getenv("ARC_PROF_REQ")) eng_.profile = true;  // (the generation's kernels; printed after the request)
-#endif
     const auto t_gen = clk::now();
     Json lp_all = Json::array(), lp_pending = Json::array();  // logprobs entries: all, and not yet streamed
     auto lp_json = [&](const Json& entries) {
@@ -1759,7 +1759,6 @@ class Server {
     if (n_tool_fixed) fprintf(stderr, " | tool call: %d of %d tokens corrected", n_tool_fixed, n_tool_tok);
     if (n_batched) fprintf(stderr, " | %d steps batched with other slots", n_batched);
     fprintf(stderr, "\n");
-#ifdef ARC_ZERO
     // (ARC_PROF_REQ=1: the GPU time by kernel of each request, for diagnosis; every kernel is timed, which costs time)
     static const bool prof_req = getenv("ARC_PROF_REQ") != nullptr;
     if (prof_req) {
@@ -1774,7 +1773,6 @@ class Server {
       eng_.prof_ms.clear();
       eng_.prof_n.clear();
     }
-#endif
     if (n_drafts) {
       timings.set("draft_n", n_drafts);
       timings.set("draft_n_accepted", n_accepted);
@@ -1891,9 +1889,7 @@ static bool same_file(const std::string& a, const std::string& b) {
 }
 // (defined below) the auto context of a model file with / without its MTP block and image encoders
 static int auto_ctx_tokens(const std::string& model, bool mtp, bool vision);
-#ifdef ARC_ZERO
 static std::string find_dflash(const std::string& model);  // (defined below) a DFlash2 drafter for the file
-#endif
 
 // the Hugging Face cache (HF_HUB_CACHE, HF_HOME\hub or %USERPROFILE%\.cache\huggingface\hub)
 static std::string hf_hub_dir() {
@@ -1985,14 +1981,12 @@ static std::vector<ModelInfo> scan_models() {
   if (const char* la = getenv("LOCALAPPDATA"))
     for (const auto& e : fs::directory_iterator(fs::path(la) / "arcinfer" / "models", ec))
       if (is_model(e.path())) cands.push_back({"arcinfer/" + e.path().stem().string(), e.path().filename().string(), e.path(), e.last_write_time(ec)});
-#ifdef ARC_ZERO
   // arcinferzero packages (zero/gguf_pack.h): %LOCALAPPDATA%\arcinfer\zero\models\<name>\<name>.gguf
   for (const auto& d : fs::directory_iterator(zpack::packages_dir(), ec)) {
     const fs::path g = d.path() / (d.path().filename().string() + ".gguf");
     if (d.is_directory(ec) && fs::exists(g, ec))
       cands.push_back({"arcinferzero/" + d.path().filename().string(), g.filename().string(), g, fs::last_write_time(g, ec)});
   }
-#endif
   // the same file in several snapshots (revisions) or folders: the first folder, then the newest
   std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
     return a.name != b.name ? a.name < b.name : a.file != b.file ? a.file < b.file : a.prio != b.prio ? a.prio < b.prio : a.t > b.t;
@@ -2042,13 +2036,9 @@ static std::vector<ModelInfo> scan_models() {
         try {
           const GgufFile g(s.path().string());
           const std::string pt = g.get_str("clip.vision.projector_type", "");
-          // (gemma4v: the head sizes the GPU encoder takes, 64 and 72 (26B-A4B); the OpenCL engine's 64 only)
+          // (gemma4v: the head sizes the GPU encoder takes, 64 and 72 (26B-A4B))
           const int64_t ve = g.get_int("clip.vision.embedding_length", 0), vh = g.get_int("clip.vision.attention.head_count", 0);
-#ifdef ARC_ZERO
           const bool g4v_ok = vh > 0 && ve % vh == 0 && VisionGemma4V::head_ok((int)(ve / vh));
-#else
-          const bool g4v_ok = vh > 0 && ve % vh == 0 && ve / vh == 64;
-#endif
           mmproj = m.arch == "gemma4" ? pt == "gemma4uv" || (pt == "gemma4v" && g4v_ok)
                                       : (m.arch == "qwen35" || m.arch == "qwen35moe") && VisionQwen3VL::usable(g);
           // (audio: the encoders load_model loads, AudioGemma4A for gemma4a, AudioGemma4 for gemma4ua)
@@ -2060,9 +2050,7 @@ static std::vector<ModelInfo> scan_models() {
       drafter = drafter || f.rfind("mtp-", 0) == 0;
     }
     m.supported = m.arch == "qwen35" || m.arch == "qwen35moe" || m.arch == "gemma4";  // (MoE: GSQ or standard experts)
-#ifdef ARC_ZERO
     m.supported = m.supported || m.arch == "qwen4exp";  // (Qwen3.8 Flash Next: arcinferzero only, experts streamed)
-#endif
     (void)gsq;
     m.vision = mmproj;  // (Gemma 4 12B: gemma4uv; E2B / E4B: gemma4v)
     m.audio = audio;
@@ -2088,7 +2076,6 @@ static std::vector<ModelInfo> scan_models() {
     }
     out.push_back(m);
   }
-#ifdef ARC_ZERO
   // which copy of a model keeps its id and shortcut: a package first (--pack moved the GGUF's expert file into it, so
   // loading the GGUF it was made from would write that file again), then the Hugging Face cache, then the extra
   // folders (a backup on another drive); the others get -2, -3, ...
@@ -2105,7 +2092,6 @@ static std::vector<ModelInfo> scan_models() {
     std::stable_sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     for (size_t i = 0; i < out.size(); ++i) out[i] = std::move(ranked[i].second);
   }
-#endif
   // every downloaded file selectable on its own: a repeated id gets -2, -3, ..., a repeated shortcut is dropped
   for (size_t i = 0; i < out.size(); ++i) {
     const std::string base = out[i].alias;
@@ -2150,7 +2136,6 @@ static std::vector<ModelInfo> scan_models() {
       e.tags = v.mtp && v.vision ? "MTP + vision" : v.mtp ? "MTP" : v.vision ? "vision" : "standard";
       all.push_back(e);
     }
-#ifdef ARC_ZERO
     // a file with a DFlash2 drafter: its main variant also with one drafter only (to pick in Pi's /model)
     if (m.supported && all.back().base == m.alias && all[all.size() - vs.size()].mtp && !find_dflash(m.path).empty()) {
       const ModelInfo main = all[all.size() - vs.size()];
@@ -2164,12 +2149,10 @@ static std::vector<ModelInfo> scan_models() {
         all.push_back(e);
       }
     }
-#endif
   }
   return all;
 }
 
-#ifdef ARC_ZERO
 // A DFlash2 block drafter for a model file: a *DFlash2* repository (z-lab, incoai: config.json + model.safetensors)
 // in the Hugging Face cache or an extra model folder whose config is a DFlash2DraftModel of the model's width
 // (hidden_size = <arch>.embedding_length) and depth (num_target_layers = <arch>.block_count without the MTP layers);
@@ -2218,7 +2201,6 @@ static std::string find_dflash(const std::string& model) {
   }
   return "";
 }
-#endif
 
 // ---------------------------------------------------------------- --ctx auto
 // The largest context (a multiple of 4096, at most the trained one) for which the server's GPU memory, the ~0.22 GiB
@@ -2245,12 +2227,10 @@ static std::string ctx_key(const std::string& model, const EngineOptions& eo) {
   std::string p = fs::absolute(model, ec).lexically_normal().make_preferred().string();  // one spelling per file
   for (auto& c : p) c = (char)tolower((unsigned char)c);
   return p + "|" + std::to_string(fs::file_size(model, ec)) + "|" + std::to_string(eo.chunk) +
-#ifdef ARC_ZERO
          "|z" + std::to_string((int)(eo.windows_reserve_gb * 10)) + (eo.stream_experts ? "s" : "n") +
          (eo.dflash.empty() ? std::string() : eo.mtp_block ? "|dflash" : "|dflash-only") + (eo.v4 ? "|v4" : "") +
          (eo.slots > 1 ? "|slots" + std::to_string(eo.slots) + "/" + std::to_string(Engine::kSlotCtxFloor) : std::string()) +
          "|md" + std::to_string(eo.mtp_drafts) + "|" +  // (DFlash2 drafter: its weights and buffers; 4-bit V)
-#endif
          (eo.min_chunk ? "/" + std::to_string(eo.min_chunk) : std::string()) + "|" + (eo.mtp ? "mtp" : "-") + "|" + (eo.attn_int8 ? "i8" : "f32") + "|" + std::to_string(device_global_mem()) +
          "|m14";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
                  // for 27B, m6: MoE prompt GEMM staging, m7: MoE buffers shared, m8: MoE MTP 1 draft, Q3_K experts, m9: memory parts in the cache,
@@ -2337,9 +2317,7 @@ static AutoCtx auto_ctx(const std::string& model, EngineOptions eo, bool budget_
     EngineOptions e2 = eo;
     e2.ctx = std::min(16384, trained);
     e2.dry = true;
-#ifdef ARC_ZERO
     e2.stream_reserve = std::max(e2.stream_reserve, reserve);  // (streamed experts: the cache leaves room for the encoders)
-#endif
     e2.w8_budget_gb = budget_gb;
     Engine probe(model, e2);
     res = probe.w8_resident;
@@ -2415,9 +2393,7 @@ static int auto_ctx_tokens(const std::string& model, bool mtp, bool vision) {
 // for this GPU memory (with --mtp when the model has a drafter, default chunk), computed now if not known yet.
 static int list_models() {
   Json out = Json::array();
-#ifdef ARC_ZERO
   std::map<std::string, std::string> dflash;  // model file -> its DFlash2 drafter (one search per file, not per variant)
-#endif
   for (const ModelInfo& m : scan_models()) {
     Json j = Json::object();
     j.set("name", m.name);
@@ -2435,7 +2411,6 @@ static int list_models() {
     j.set("tags", m.tags);
     EngineOptions eo;
     eo.mtp = m.mtp;
-#ifdef ARC_ZERO
     // dflash: a DFlash2 drafter for this model was found (dflash_path); variants with MTP draft with it as well (the
     // server picks it up with --mtp, see load_model), so their context and defaults count it
     std::string dfl;
@@ -2449,21 +2424,18 @@ static int list_models() {
     j.set("draft", m.draft == 1 ? "mtp" : m.draft == 2 ? "dflash" : "auto");
     if (m.mtp) eo.dflash = dfl;
     eo.mtp_block = m.draft != 2;
-#endif
     AutoCtx a;  // computed now (dry load) if not known yet; per variant (MTP block, encoders' memory)
     a.ctx = 0;
     if (m.supported)
       try {
         const size_t enc = m.vision ? encoder_reserve(m.path, "", 0) : 0;
         a = auto_ctx(m.path, eo, false, enc);
-#ifdef ARC_ZERO
         // (the drafter only where it leaves kDflashMinCtx tokens of context: the server drops it there too)
         if (!eo.dflash.empty() && eo.mtp_block && a.ctx < kDflashMinCtx) {
           eo.dflash.clear();
           a = auto_ctx(m.path, eo, false, enc);
           j.set("dflash", false);
         }
-#endif
       } catch (const std::exception&) {}
     j.set("ctx", a.ctx);
     if (m.supported) {  // the values the server picks for this variant when not given (the launcher fills them in)
@@ -2485,19 +2457,11 @@ static int list_models() {
             break;
           }
       }
-#ifdef ARC_ZERO
       // (the engine's default: streamed experts 8192, Flash Next 2048, resident decoded weights 512)
       int chunk = m.arch == "qwen4exp" ? 2048 : moe ? 8192 : a.resident ? 512 : 4096;  // (streamed MoE first, as the engine)
-#else
-      int chunk = moe ? 2048 : a.resident ? 512 : 4096;
-#endif
       if (gemma && m.vision) chunk = std::max(chunk, 2048);  // (an image is one chunk)
       d.set("chunk", chunk);
-#ifdef ARC_ZERO
       d.set("mtp_drafts", !m.mtp ? 0 : !eo.dflash.empty() ? 7 : gemma ? 2 : moe ? 5 : n_embd >= 5120 ? 7 : n_embd <= 2560 ? 3 : 2);
-#else
-      d.set("mtp_drafts", !m.mtp ? 0 : moe ? 1 : !gemma && n_embd >= 5120 ? 3 : 2);
-#endif
       d.set("image_min", !m.vision ? 0 : gemma ? 1120 : 256);
       d.set("image_max", !m.vision ? 0 : pt == "gemma4v" ? 1120 : 2048);
       d.set("think_budget", 8192);
@@ -2552,7 +2516,6 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
   L->path = model;
   fprintf(stderr, "arcinfer-server: loading %s\n", model.c_str());
   EngineOptions eo = so.eo;
-#ifdef ARC_ZERO
   bool dfl_auto = false;
   if (eo.mtp && eo.dflash.empty() && so.dflash_auto) {  // (before --ctx auto: the drafter takes GPU memory)
     eo.dflash = find_dflash(model);
@@ -2565,7 +2528,6 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
   }
   if (eo.mtp && !eo.dflash.empty())
     fprintf(stderr, "drafting: %s\n", eo.mtp_block ? "DFlash2 and the MTP block, picked per step" : "DFlash2 only (no MTP block)");
-#endif
   // Gemma 4 with an image projector: an image's tokens attend to each other both ways, so one image is one forward
   // step; the steps must hold the largest image (resident E4B weights otherwise step through prompts in 512s)
   if (so.mmproj != "-") {
@@ -2585,35 +2547,27 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
     const size_t enc = encoder_reserve(model, so.mmproj, so.img_max);
     if (enc) fprintf(stderr, "--ctx auto: %.2f GiB kept for the image / audio encoders\n", enc / 1073741824.0);
     AutoCtx a = auto_ctx(model, eo, so.budget_given, enc);
-#ifdef ARC_ZERO
     if (dfl_auto && eo.mtp_block && a.ctx < kDflashMinCtx) {  // (a drafter that leaves little context: the MTP block only)
       fprintf(stderr, "DFlash2 drafter not used: it would leave %d tokens of context (--dflash DIR: use it anyway)\n", a.ctx);
       eo.dflash.clear();
       a = auto_ctx(model, eo, so.budget_given, enc);
     }
-#endif
     eo.ctx = a.ctx;
     if (!so.budget_given) eo.w8_budget_gb = a.resident ? 1e9 : eo.w8_budget_gb;
   }
-#ifdef ARC_ZERO
   if (so.mmproj != "-") eo.stream_reserve = encoder_reserve(model, so.mmproj, so.img_max);  // (streamed experts' cache)
-#endif
   L->eng = std::make_unique<Engine>(model, eo);
   Engine& eng = *L->eng;
   L->tok = std::make_unique<Tokenizer>(eng.gguf());
   fprintf(stderr, "loaded in %.1f s | %d layers | ctx %d%s | chunk %d | GPU %.2f GiB | weights %s\n", eng.load_ms / 1000,
           eng.hp.n_layer, eng.ctx, eng.slot_count() > 1 ? (" in each of " + std::to_string(eng.slot_count()) + " slots").c_str() : "",
           eng.max_chunk, eng.gpu_bytes / 1073741824.0, eng.w8_resident ? "W8 resident" : "W8 just-in-time");
-#ifdef ARC_ZERO
   {  // compile kernels before serving (all of the generation's after an update)
     const auto tw = std::chrono::steady_clock::now();
     if (eng.warm_up_once(L->tok->encode("Hi", false)[0]))
       fprintf(stderr, "kernels warmed up for this model in %.1f s (once after an update)\n",
               std::chrono::duration<double>(std::chrono::steady_clock::now() - tw).count());
   }
-#else
-  { int w = L->tok->encode("Hi", false)[0]; eng.forward(&w, 1); eng.reset(); }  // compile kernels before serving
-#endif
   L->srv = std::make_unique<Server>(eng, *L->tok, alias, so.webui);
   Server& srv = *L->srv;
   srv.model_bytes_ = gguf_bytes(model);
@@ -2690,10 +2644,8 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
   // no state of its own, its context rings start empty after a load — give it a suffix once that changes)
   std::string layout;
   if (!eo.mtp) layout += "-std";
-#ifdef ARC_ZERO
   if (eo.mtp && !eo.dflash.empty() && !eo.mtp_block) layout += "-nomtp";
   if (eo.v4) layout += "-v4";
-#endif
   if (so.prefix_cache && eo.attn_int8) {  // %LOCALAPPDATA%\arcinfer\prefix\<model>-<size>[<layout>]
     std::error_code ec;
     const std::filesystem::path mp(model);
@@ -2738,7 +2690,6 @@ int main(int argc, char** argv) {
       else so.eo.ctx = std::stoi(v);
     }
     else if (a == "--chunk") so.eo.chunk = std::stoi(next());
-#ifdef ARC_ZERO
     else if (a == "--expert-cache-gb") so.eo.expert_cache_gb = std::stod(next());
     else if (a == "--expert-cache-pct") so.eo.expert_cache_pct = std::stod(next());
     else if (a == "--windows-reserve-gb") so.eo.windows_reserve_gb = std::stod(next());
@@ -2759,16 +2710,12 @@ int main(int argc, char** argv) {
         return 1;
       }
     }
-#endif
     else if (a == "--alias") alias = next();
     else if (a == "--webui") so.webui = next();
     else if (a == "--budget") { so.eo.w8_budget_gb = std::stod(next()); so.budget_given = true; }
     else if (a == "--attn-f32") so.eo.attn_int8 = false;
-#ifdef ARC_ZERO
     else if (a == "--v4") so.eo.v4 = true;  // (4-bit V cache, Qwen, experimental)
-#endif
     else if (a == "--mtp") so.eo.mtp = true;
-#ifdef ARC_ZERO
     else if (a == "--dflash") { so.eo.dflash = next(); so.eo.mtp = true; }
     else if (a == "--no-dflash") { so.eo.dflash.clear(); so.dflash_auto = false; }
     else if (a == "--draft") {  // (the drafter of the -nodf / -df variants)
@@ -2778,7 +2725,6 @@ int main(int argc, char** argv) {
       else if (d == "auto") so.dflash_auto = true, so.eo.mtp_block = true;
       else throw std::runtime_error("--draft: auto, mtp or dflash");
     }
-#endif
     else if (a == "--mmproj") so.mmproj = next();
     else if (a == "--no-mmproj") so.mmproj = "-";
     else if (a == "--image-min-tokens") so.img_min = atoi(next().c_str());
@@ -2789,19 +2735,15 @@ int main(int argc, char** argv) {
     else if (a == "--kernels") so.eo.kernel_dir = next();
     else if (a == "--session-cache-gb") so.sess_gb = std::stod(next());
     else if (a == "--session-dir") so.sess_dir = next();
-#ifdef ARC_ZERO
     else if (a == "--slots") so.eo.slots = std::clamp(std::stoi(next()), 1, 8);
-#endif
     else if (a == "--no-swap") swap = false;
     else if (a == "--no-prefix-cache") so.prefix_cache = false;
     else if (a == "--prefix-cache-gb") so.prefix_gb = std::stod(next());
     else if (a == "--help" || a == "-h") help = true;
   }
-#ifdef ARC_ZERO
   // (ARC_V4=1 turns the engine's 4-bit V copy on as --v4 does: the server must know it too, for its context key and
   //  the folders of saved states)
   if (getenv("ARC_V4") && atoi(getenv("ARC_V4")) > 0) so.eo.v4 = true;
-#endif
   if (model.empty() || help) {
     fprintf(stderr,
             "usage: arcinfer-server -m model.gguf [options]   OpenAI-compatible server (API at /v1, web UI at /)\n"
@@ -2821,7 +2763,6 @@ int main(int argc, char** argv) {
             "  --slots N             arcinferzero: hold N conversations at once (default 1), each with its own KV cache\n"
             "                        and states of --ctx tokens (auto: the context that fits N of them); requests in\n"
             "                        different slots take turns step by step (a prompt piece, a generated token)\n"
-#ifdef ARC_ZERO
             "  --dflash DIR          speculative decoding with a DFlash2 block drafter instead (z-lab, Qwen3.8 27B;\n"
             "                        7 drafts per step); default with --mtp: a *DFlash2* drafter for the model in the\n"
             "                        Hugging Face cache or the extra model folders, if there is one\n"
@@ -2829,7 +2770,6 @@ int main(int argc, char** argv) {
             "  --draft auto|mtp|dflash  with --mtp and a DFlash2 drafter: both, picked per step (auto, default), the MTP\n"
             "                        block only (= --no-dflash), or DFlash2 only (the MTP block is not loaded: more\n"
             "                        expert cache); the catalog's -nodf / -df variants\n"
-#endif
             "  --think-budget N      default reasoning budget in tokens (requests can override it)\n"
             "  --preserve-thinking   earlier turns keep their reasoning (Qwen3.6 template option; requests can override it\n"
             "                        with chat_template_kwargs.preserve_thinking; Qwen3.8 always keeps it)\n"
@@ -2839,7 +2779,6 @@ int main(int argc, char** argv) {
             "  --image-max-tokens N  at most N tokens per image (larger images are scaled down; Qwen default 2048, Gemma\n"
             "                        4 12B 2048, above the 1120 it was trained with)\n"
             "  --budget GB           keep decoded weights resident up to GB\n"
-#ifdef ARC_ZERO
             "arcinferzero (MoE models: experts read from the SSD into a GPU cache; expert file in\n"
             "%%LOCALAPPDATA%%\\arcinfer\\zero, made on the first start, safe to delete):\n"
             "  --expert-cache-gb N   expert cache size in GiB (default: automatic, see --windows-reserve-gb)\n"
@@ -2848,12 +2787,11 @@ int main(int argc, char** argv) {
             "  --pack FILE.gguf      make a package of a MoE model (its first part when split): the non-expert\n"
             "                        weights + an expert file under %%LOCALAPPDATA%%\\arcinfer\\zero\\models; afterwards\n"
             "                        the original GGUF can be moved away (e.g. to a USB disk)\n"
-            "  --no-stream           experts on the GPU as in arcinfer (no SSD streaming)\n"
+            "  --no-stream           every expert on the GPU (no SSD streaming; MoE models then get less context)\n"
             "  --v4                  + a 4-bit copy of V for generation (Qwen, experimental): faster long answers deep in\n"
             "                        long contexts, ~25 %% more attention-cache memory\n"
-#endif
             "  --attn-f32            f32 attention (tests)\n"
-            "  --kernels DIR         OpenCL kernel folder;  --webui DIR  web UI folder\n"
+            "  --kernels DIR         kernel folder (default zero\\kernels);  --webui DIR  web UI folder\n"
             "  --session-cache-gb N  disk space for saved conversations (default 0 = off): switching between\n"
             "                        conversations loads the other one's state instead of processing its prompt again\n"
             "  --session-dir DIR     where they are kept (default " ARC_DATA_HELP "sessions)\n"
@@ -3158,16 +3096,12 @@ int main(int argc, char** argv) {
           ServeOpts s2 = so;
           s2.ctx_auto = true;  // the --ctx given at start was for the first model
           s2.eo.mtp = m->mtp;  // the variant's settings: MTP block / drafter, image projector
-#ifdef ARC_ZERO
           s2.dflash_auto = m->draft != 1;  // (-nodf: the MTP block only; -df: DFlash2 only)
           s2.eo.mtp_block = m->draft != 2;
           if (m->draft == 1) s2.eo.dflash.clear();
-#endif
           s2.mmproj = m->vision ? "" : "-";
-#ifdef ARC_ZERO
           // (a --dflash drafter is for the first model, and only with MTP; other models find their own)
           if (!m->mtp || !same_file(m->path, model)) s2.eo.dflash.clear();
-#endif
           try {
             cur = load_model(m->path, m->alias, s2);
             fprintf(stderr, "switched to %s in %.1f s\n", m->alias.c_str(), ms_since(t0) / 1000);
@@ -3180,16 +3114,12 @@ int main(int argc, char** argv) {
             for (const ModelInfo& pm : catalog)  // (the previous variant's settings)
               if (pm.alias == prev_alias) {
                 s3.eo.mtp = pm.mtp;
-#ifdef ARC_ZERO
                 s3.dflash_auto = pm.draft != 1;
                 s3.eo.mtp_block = pm.draft != 2;
                 if (pm.draft == 1) s3.eo.dflash.clear();
-#endif
                 s3.mmproj = pm.vision ? "" : "-";
               }
-#ifdef ARC_ZERO
             if (!s3.eo.mtp || !same_file(prev_path, model)) s3.eo.dflash.clear();
-#endif
             cur = load_model(prev_path, prev_alias, s3);
             Json err = Json::object(), r = Json::object();
             err.set("message", std::string("could not load model ") + want + ": " + e.what());

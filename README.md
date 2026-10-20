@@ -46,15 +46,14 @@ KL is the divergence of the next-token distributions from the f32 reference (0 =
 rounding noise is ~0.0003. How each number was measured, every change with its before and after, and the
 consistency checks (56 of 56 regression runs bit-identical): **[docs/before-after.md](docs/before-after.md)**.
 
-### Two engines, one server
+### The engine
 
-- **arcinferzero** (`zero/`, `bin\serverz.exe`, `bin\runz.exe`; the default since 2026-10-16) runs the
-  OpenCL-compiled kernels through **Level Zero**, with output bit-identical to the OpenCL engine on every model. On
-  top it streams mixture-of-experts weights from the SSD (only the experts in use stay in GPU memory; the next
-  layer's missing experts are read while the GPU computes the current one), and drafts with the MTP block, a
-  DFlash2 drafter or both. The automatic context gives the 35B and Flash Next 131,072 tokens.
-- **arcinfer** (`src/`, `bin\server.exe`, `bin\run.exe`): the original OpenCL engine, still available with
-  `arc-server start -OpenCL` / `pi-arc --opencl` (launcher: Engine "arcinfer").
+**arcinferzero** (`zero/`, `bin\serverz.exe`, `bin\runz.exe`) runs OpenCL-compiled kernels through **Level
+Zero**. It streams mixture-of-experts weights from the SSD (only the experts in use stay in GPU memory; the next
+layer's missing experts are read while the GPU computes the current one), and drafts with the MTP block, a DFlash2
+drafter or both. The automatic context gives the 35B and Flash Next 131,072 tokens. The original OpenCL engine
+(`bin\server.exe`, `bin\run.exe`; arcinferzero matched its output bit for bit on every model) was removed on
+2026-10-20; `arc-server -OpenCL` / `pi-arc --opencl` now stop with a message.
 
 ### Read more
 
@@ -96,7 +95,7 @@ Once the graphics driver, Visual Studio Build Tools (C++), Python and optionally
 .\setup.cmd -Tests             # also build the test tools and run the regression tests (needs the 4B)
 ```
 
-It checks the requirements (and says where to get what is missing), builds `bin\server.exe`, `run.exe` and
+It checks the requirements (and says where to get what is missing), builds `bin\serverz.exe`, `runz.exe` and
 `clinfo.exe` when they are missing or older than the sources, checks the GPU (OpenCL 3.0, DP4a, sub-groups, GPU
 memory), downloads the chosen models into the Hugging Face cache (Gemma with its drafter and image projector; the
 35B is downloaded and converted), installs `huggingface_hub` / `numpy` with pip when needed (it asks first), and
@@ -139,14 +138,13 @@ already contains everything it needs to build (`third_party\` holds minja and nl
 ### 5. Build
 
 ```powershell
-.\build.ps1 zero\serverz.cpp zero\runz.cpp tools\server.cpp tools\run.cpp tools\clinfo.cpp
+.\build.ps1 zero\serverz.cpp zero\runz.cpp tools\clinfo.cpp
 ```
 
 This takes a few minutes and writes `bin\serverz.exe` / `bin\runz.exe` (arcinferzero: the HTTP server and the
-command-line tool for runs, benchmarks and accuracy checks), `bin\server.exe` / `bin\run.exe` (the same on the
-OpenCL engine) and `bin\clinfo.exe`. `zero\serverz.cpp` compiles `tools\server.cpp` on the Level Zero engine, so
-both servers have the same API. Run the programs from the project folder, because they read `zero\kernels\*.cl`
-(arcinferzero), `kernels\*.cl` (OpenCL engine) and `webui\` from there.
+command-line tool for runs, benchmarks and accuracy checks) and `bin\clinfo.exe`. `zero\serverz.cpp` compiles
+`tools\server.cpp` (the HTTP API) on the Level Zero engine. Run the programs from the project folder, because they
+read `zero\kernels\*.cl` and `webui\` from there.
 
 Check that the GPU is usable:
 
@@ -160,7 +158,7 @@ It should list `Intel(R) Arc(TM) Graphics`, `OpenCL 3.0 NEO`, `cl_khr_integer_do
 Optional tools (tests and benchmarks):
 
 ```powershell
-.\build.ps1 tools\test_gemm.cpp tools\tok_test.cpp tools\chat_render.cpp tools\ref_forward.cpp tools\gguf_dump.cpp tools\tool_stream_test.cpp
+.\build.ps1 tools\tok_test.cpp tools\chat_render.cpp tools\ref_forward.cpp tools\gguf_dump.cpp tools\tool_stream_test.cpp
 .\build.ps1 bench\gemv_bench.cpp bench\attn_dec_bench.cpp bench\attn_bench.cpp bench\bw_bench.cpp
 ```
 
@@ -216,7 +214,7 @@ python tools\convert_gsq.py $snap "$env:LOCALAPPDATA\arcinfer\models\Qwen3.6-35B
 ```
 
 The int8 matrices become Q8_0 with the same int8 values (f16 scales), the experts keep their exact 2-bit codes in
-the layout of `kernels/moe.cl`, and the tensor transforms follow llama.cpp's converter (DeltaNet V-head order,
+the layout of `zero/kernels/moe.cl`, and the tensor transforms follow llama.cpp's converter (DeltaNet V-head order,
 norm weights + 1, A = -exp(A_log)). The checkpoint's MTP block has no routed experts, so this model runs without
 speculative decoding. `arc-server` / `pi-arc` find the converted file in `%LOCALAPPDATA%\arcinfer\models`.
 
@@ -226,7 +224,7 @@ speculative decoding. `arc-server` / `pi-arc` find the converted file in `%LOCAL
 .\scripts\arc-server.ps1 start -Model e4b      # or 27b, 35b, flash, 9b, 4b, g12
 ```
 
-This starts arcinferzero; add `-OpenCL` for the OpenCL engine. The first start of each model compiles its GPU
+This starts arcinferzero. The first start of each model compiles its GPU
 kernels (up to a minute or two); they are cached in `%LOCALAPPDATA%\arcinfer\kernels`, so later starts take 5–40 s
 (mostly reading the model file). The first arcinferzero start of a mixture-of-experts model also writes its expert
 file once (35B UD-IQ4_XS: 16 GB, about 2.5 minutes; Qwen3.8 Flash Next: 56 GB, about 9.5 minutes; later loads through the
@@ -252,14 +250,14 @@ is running and `arc-server stop` frees the GPU memory.
 - **Start / Stop server**, refresh, web UI, log. Start and Stop go through `arc-server`, so the server keeps running
   after the window is closed.
 
-The same numbers come from `server.exe --list-models` ("memory", "defaults") and the server's `/props` ("memory",
+The same numbers come from `serverz.exe --list-models` ("memory", "defaults") and the server's `/props` ("memory",
 "stats").
 
 ### 9. Pi (optional)
 
 1. Install Pi by following the instructions on https://pi.dev and run it once, so that `%USERPROFILE%\.pi\agent`
    exists (with `bin` on the PATH).
-2. Add arcinfer to Pi (one time, `setup.cmd` does it too; it builds `bin\server.exe` if it is missing, adds the
+2. Add arcinfer to Pi (one time, `setup.cmd` does it too; it builds `bin\serverz.exe` if it is missing, adds the
    `arcinfer` provider with every model it finds and its context for the current GPU memory to
    `~/.pi/agent/models.json` (the previous file is kept as `models.json.bak`; `pi-arc` refreshes the list), and
    installs the `pi-arc` and `arc-server` commands):
@@ -298,8 +296,7 @@ powershell -ExecutionPolicy Bypass -File tests\run_tests.ps1 -ListModels   # whi
 ```
 
 It runs the model-free checks first, then per model found (27B, 35B, Flash Next, 4B, Gemma 4 12B) the KL and greedy
-checks and MTP / DFlash2 = plain decoding, then a server smoke test; a missing model is a SKIP, not a failure
-(`-Engine opencl` or `both` for the OpenCL engine). It ends with `ALL TESTS PASSED`. Stop `arc-server` first: the
+checks and MTP / DFlash2 = plain decoding, then a server smoke test; a missing model is a SKIP, not a failure. It ends with `ALL TESTS PASSED`. Stop `arc-server` first: the
 test uses port 8091 and needs the GPU memory.
 
 ### Troubleshooting
@@ -326,10 +323,6 @@ test uses port 8091 and needs the GPU memory.
 .\bin\serverz.exe --help           # every option with its default
 .\bin\serverz.exe --list-models    # the models it can load (Hugging Face cache, %LOCALAPPDATA%\arcinfer\models), as JSON
 ```
-
-`bin\server.exe` (OpenCL engine) takes the same options except the arcinferzero ones (`--mtp-drafts` above 3,
-`--expert-cache-gb`, `--expert-cache-pct`, `--windows-reserve-gb`, `--no-stream`, `--dflash`) and does not load
-Qwen3.8 Flash Next.
 
 - Web UI: http://127.0.0.1:8080/
 - OpenAI API: `POST /v1/chat/completions` (streaming, `reasoning_content`, tool calls streamed while they are
@@ -392,7 +385,7 @@ Qwen3.8 Flash Next.
   reads the main model's KV cache. The drafts are verified in one main-model pass and the next token is still
   sampled from the model's distribution, so the output is unchanged (checked: identical answers at every draft
   count). `--mtp-drafts N`: arcinferzero 1–7 (default 7 for the 27B and whenever DFlash2 drafts, 5 for the 35B,
-  3 for the 4B, 2 for the 9B and Gemma), the OpenCL engine up to 2 (Qwen) / 3 (Gemma).
+  3 for the 4B, 2 for the 9B and Gemma).
 - `--v4` (arcinferzero, Qwen; experimental, off by default): a 4-bit copy of the attention cache's V half that
   generation and draft verification read, next to the int8 cache that prompts read. Prompts keep their speed;
   generation deep in a long context is ~7 % faster (35B after 125K tokens: median step 72.8 -> 67.5 ms); the
@@ -506,16 +499,15 @@ effort the Qwen3.8 template thinks at `xhigh`, which can take very long on a lap
 
 ## CLI
 
-`bin\runz.exe` (arcinferzero) and `bin\run.exe` (OpenCL engine) take the same arguments; `runz --bench-pp` also
-prints the time of each generation step.
+`bin\runz.exe` runs the engine without the server; `--bench-pp` also prints the time of each generation step.
 
 ```powershell
-.\bin\run.exe model.gguf --bench-pp 2048 --n 64                       # prompt-processing and generation speed
-.\bin\run.exe model.gguf --tokens-file ids.txt --n 64 --show --prof   # time to first token + kernel profile
-.\bin\run.exe model.gguf --text-file prompt.txt --n 128 --prof-gen    # generation speed + per-kernel profile
-.\bin\run.exe model.gguf --perplexity corpus.txt --ppl-chunks 40      # perplexity (llama-perplexity method)
-.\bin\run.exe model.gguf --tokens-file ids.txt --kl-ref ref.bin       # KL vs an f32 reference (tools\ref_forward)
-.\bin\run.exe model.gguf --tokens-file ids.txt --kl-ref ref.bin --kl-decode   # the same, token by token
+.\bin\runz.exe model.gguf --bench-pp 2048 --n 64                       # prompt-processing and generation speed
+.\bin\runz.exe model.gguf --tokens-file ids.txt --n 64 --show --prof   # time to first token + kernel profile
+.\bin\runz.exe model.gguf --text-file prompt.txt --n 128 --prof-gen    # generation speed + per-kernel profile
+.\bin\runz.exe model.gguf --perplexity corpus.txt --ppl-chunks 40      # perplexity (llama-perplexity method)
+.\bin\runz.exe model.gguf --tokens-file ids.txt --kl-ref ref.bin       # KL vs an f32 reference (tools\ref_forward)
+.\bin\runz.exe model.gguf --tokens-file ids.txt --kl-ref ref.bin --kl-decode   # the same, token by token
 ```
 
 `--mtp` turns on speculative decoding, `--ctx N` sets the context; with `ARC_PROF_LAYERS=8` the profile is split
@@ -544,7 +536,7 @@ into groups of 8 layers.
   quantization are one kernel.
 - **Gated DeltaNet** recurrence: each SIMD8 lane keeps a full 128-float state column in registers; q/k are
   block-read and broadcast, so no reductions are needed.
-- **Mixture of experts** (`kernels/moe.cl`): the router GEMM gives the top-8 experts per token (softmax,
+- **Mixture of experts** (`zero/kernels/moe.cl`): the router GEMM gives the top-8 experts per token (softmax,
   renormalized) and the sigmoid gate of the shared expert; the (token, expert) pairs are grouped by expert with a
   counting sort, and tiles of 16 pairs of one expert run DP4a GEMMs straight on the 2-bit codes (decoded to int8
   in registers, SwiGLU in the epilogue, routing weight on the down projection). A single token skips the sort.
@@ -578,19 +570,18 @@ into groups of 8 layers.
 ## Layout
 
 ```
-src/        engine.h (forward passes), quants.h (GGUF decoding/repacking), tokenizer.h, chat.h (Qwen),
-            chat_gemma4.h + chat_jinja.h (Gemma 4, minja templates), image.h + vision_gemma4.h / vision_qwen3vl.h (image input),
-            audio.h + audio_gemma4.h (audio input), json.h, http.h, gguf.h, clrt.h / cl_min.h (OpenCL loader,
-            kernel cache)
-kernels/    gemm.cl (DP4a GEMM), decode.cl (JIT decode + GEMV), ops.cl (norms, DeltaNet, attention, quantization),
-            moe.cl (mixture-of-experts routing and 2-bit expert GEMMs)
-zero/       arcinferzero: engine.h (Level Zero engine), clrt.h (OpenCL-style calls on Level Zero), xcache.h +
-            expert_store.h (MoE experts on the SSD, GPU cache), serverz.cpp / runz.cpp, kernels/ (its own copy of the
-            kernels), vision / audio encoders, grf_probe.cpp (register-spill probe)
-tools/      server.cpp, run.cpp, test_gemm.cpp (kernel validation), ref_forward.cpp (f32 CPU reference: Qwen3.5,
+src/        shared code: quants.h (GGUF decoding/repacking), tokenizer.h, chat.h (Qwen), chat_gemma4.h +
+            chat_jinja.h (Gemma 4, minja templates), image.h + vision_gemma4.h (image input), audio.h +
+            audio_gemma4.h (audio input), json.h, http.h, gguf.h, clrt.h / cl_min.h (OpenCL loader for clinfo, the
+            benchmarks and tests)
+zero/       the engine: engine.h (forward passes on Level Zero), clrt.h (OpenCL-style calls on Level Zero), xcache.h +
+            expert_store.h (MoE experts on the SSD, GPU cache), serverz.cpp / runz.cpp, vision_gemma4v.h /
+            vision_qwen3vl.h / audio_gemma4a.h (encoders), kernels/ (gemm.cl DP4a GEMM, decode.cl JIT decode + GEMV,
+            ops.cl norms / DeltaNet / attention / quantization, moe.cl expert routing and GEMMs), grf_probe.cpp
+tools/      server.cpp (the HTTP API, built by zero/serverz.cpp), ref_forward.cpp (f32 CPU reference: Qwen3.5,
             Qwen3.5-MoE, Gemma 4), convert_gsq.py (ISTA GSQ checkpoint -> GGUF), tok_test.cpp, chat_render.cpp,
             gguf_dump.cpp, clinfo.cpp
-bench/      micro-benchmarks (gemv_bench, attn_dec_bench, attn_bench, gemm_bench, bw_bench, ...), run_bench.ps1
+bench/      micro-benchmarks (gemv_bench, attn_dec_bench, attn_bench, bw_bench, peak_bench, ...), run_bench.ps1
             (comparison with llama.cpp), prompt_bench.py, review_data.py (review data)
 scripts/    arc-server.ps1 (server in the background), arc-launcher.ps1 (launcher window, arc-launcher.cmd),
             pi-arc.ps1 (Pi launcher), install-pi.ps1 (commands and Pi's model list), pi-models.ps1 (writes that list)
@@ -604,9 +595,9 @@ setup.cmd   setup.ps1: checks, builds, downloads models, connects Pi;  build.ps1
 
 ## Validation
 
-- `tools/test_gemm` checks every weight type and kernel path (native, JIT W8, GEMV) against a CPU reference on
-  real model tensors; `bench/gemv_bench` and `bench/attn_dec_bench` check the generation kernels the same way.
-- `tools/ref_forward` is an independent f32 CPU implementation of the model; `run --kl-ref` reports the KL
+- `bench/gemv_bench` and `bench/attn_dec_bench` check the generation kernels against a CPU reference on real
+  model tensors; `tests/test_quant_rows` checks the weight decoders.
+- `tools/ref_forward` is an independent f32 CPU implementation of the model; `runz --kl-ref` reports the KL
   divergence of the engine's next-token distributions against it (averaged over the prompt positions), and
   `--kl-decode` does the same through the token-by-token generation path.
 - `tests/run_tests.ps1` runs all of the above plus chat-template rendering against the GGUF Jinja templates and an
@@ -622,8 +613,8 @@ setup.cmd   setup.ps1: checks, builds, downloads models, connects Pi;  build.ps1
 - `tools/tok_test` compares tokenization with reference token ids.
 - `tools/tool_stream_test` checks the streamed tool calls: for every prefix of a response the arguments sent so far
   are a prefix of the final ones, and the final ones equal the whole-response parse.
-- Speeds measured while another GPU process runs (an arcinfer server, a stray `run.exe`, llama.cpp) are not
-  representative: they share the iGPU and its memory. `run.exe` prints a note when it finds one.
+- Speeds measured while another GPU process runs (a serverz, a stray `runz.exe`, llama.cpp) are not
+  representative: they share the iGPU and its memory. `runz.exe` prints a note when it finds one.
 
 ## License
 

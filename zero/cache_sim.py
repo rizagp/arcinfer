@@ -1,4 +1,4 @@
-"""Expert-cache simulation for arcinferzero from routes recorded with ARC_DUMP_ROUTES (src/engine.h layer_moe).
+"""Expert-cache simulation for arcinferzero from routes recorded with ARC_DUMP_ROUTES (zero/engine.h layer_moe).
 
 Each record: int32 layer, int32 tokens, then tokens x NU int32 expert ids. Records with tokens > 1 are prompt chunks,
 tokens == 1 single-token generation steps. The cache holds (layer, expert) entries; capacity is a fraction of all

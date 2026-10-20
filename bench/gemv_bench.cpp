@@ -1,4 +1,4 @@
-// Times and validates the single-token GEMV (kernels/decode.cl "gemv" or a variant with the same arguments) on real
+// Times and validates the single-token GEMV (zero/kernels/decode.cl "gemv" or a variant with the same arguments) on real
 // weights of a GGUF model. A name with %d runs every layer that has the tensor in turn, so the weights stream from
 // memory as in token generation instead of staying in the cache.
 // usage: gemv_bench model.gguf tensor [defines] [kernel] [lanes_per_rowgroup] [iters] [kernel_file]
@@ -18,7 +18,7 @@ int main(int argc, char** argv) {
   if (argc < 3) { fprintf(stderr, "usage: gemv_bench model.gguf tensor [defines] [kernel] [lanes] [iters] [file]\n"); return 1; }
   const std::string tname = argv[2], defs = argc > 3 ? argv[3] : "", kname = argc > 4 ? argv[4] : "gemv";
   const int lanes = argc > 5 ? atoi(argv[5]) : 16, iters = argc > 6 ? atoi(argv[6]) : 10;
-  const std::string file = argc > 7 ? argv[7] : "kernels/decode.cl";
+  const std::string file = argc > 7 ? argv[7] : "zero/kernels/decode.cl";
   int grows = 4;
   if (auto p = defs.find("-DGROWS="); p != std::string::npos) grows = atoi(defs.c_str() + p + 8);
   const bool mt = kname.rfind("gemv_mt", 0) == 0;

@@ -17,7 +17,7 @@ The setup is safe to run again (steps that are already done are skipped). It:
 
 - checks the requirements: 64-bit Windows, an Intel Arc GPU, Visual Studio Build Tools (C++), Python and Pi, and
   says how to install whatever is missing;
-- builds `bin\server.exe`, `run.exe` and `clinfo.exe` when they are missing or older than their sources, then
+- builds `bin\serverz.exe`, `runz.exe` and `clinfo.exe` when they are missing or older than their sources, then
   checks the GPU (OpenCL 3.0, DP4a, GPU memory);
 - asks which models to download into the Hugging Face cache (`.\setup.cmd -Models 27b,4b` without asking; Gemma
   comes with its drafter and image projector; the 35B is downloaded and then converted). `huggingface_hub` /
@@ -129,20 +129,17 @@ arc-server help                # every option
 
 The server log is `%LOCALAPPDATA%\arcinfer\server.log`. The server uses port 8090.
 
-**arcinferzero (the default engine since 16 Oct 2026):** the server runs through Level Zero (Intel's GPU driver).
-Its output is identical to the old OpenCL engine (tested on every model, images, audio, MTP, tool calls, Pi). For
+**arcinferzero (the engine):** the server runs through Level Zero (Intel's GPU driver). The older OpenCL engine,
+whose output it matched on every model, was removed on 20 Oct 2026 (`-OpenCL` / `--opencl` now stop with a message). For
 MoE models (Qwen3.6 35B) the experts are kept on the SSD and only the frequently used experts are in GPU memory (a
 cache): the context can reach 262K together with images and MTP, and Windows still keeps at least 14 GB of RAM.
 The automatic context reserves 128K tokens, then sizes the expert cache (35B: 131,072 tokens with ~76-81 % of the
-experts cached), because a small cache makes generation pause for SSD reads; 262,144 with `--ctx 262144`. The
-old OpenCL engine is still there: the "Engine" field in the launcher, or:
+experts cached), because a small cache makes generation pause for SSD reads; 262,144 with `--ctx 262144`.
 
 ```powershell
-arc-server start -Model 35b          # arcinferzero (default)
-arc-server start -Model 35b -OpenCL  # old OpenCL engine
-pi-arc 35b                           # arcinferzero
-pi-arc 35b --opencl                  # old OpenCL engine (the running server is replaced)
-pi-arc 35b --no-stream               # Level Zero without the SSD cache: every expert on the GPU (context as small as OpenCL)
+arc-server start -Model 35b          # experts streamed from the SSD
+pi-arc 35b
+pi-arc 35b --no-stream               # without the SSD cache: every expert on the GPU (a smaller context)
 ```
 
 `-Zero` / `--zero` are still accepted (they change nothing).
@@ -154,8 +151,8 @@ automatically. The cache size is set automatically (it can be changed: server op
 Chrome), the cache shrinks itself by 1 GB per step instead of crashing.
 
 arcinferzero notes:
-- The SSD cache is only for MoE models (35B and Qwen3.8 Flash Next; the experts of the 35B's MTP layer are in the same file). Dense models (27B, 9B, 4B, Gemma)
-  only switch engine to Level Zero: context and memory are the same as on the OpenCL engine.
+- The SSD cache is only for MoE models (35B, Qwen3.8 Flash Next and Gemma 4 26B; the experts of the 35B's MTP
+  layer are in the same file). Dense models (27B, 9B, 4B, Gemma 12B / E4B) keep every weight on the GPU.
 - Expert files are never deleted automatically: the next start uses them right away (35B about 10 s, including
   filling the GPU cache from the last list). They are rewritten only when the GGUF changes; files of an old version
   have to be deleted by hand from `%LOCALAPPDATA%\arcinfer\zero\`.
@@ -356,15 +353,14 @@ Only the `pi-arc` / `arc-server` shortcut commands store the folder location; ev
 ## 9. Rebuilding from source
 
 Needs Visual Studio 2026 Build Tools (MSVC). From the arcinfer folder, `.\setup.cmd -Models none` rebuilds only what
-is needed (and stops the server first when `server.exe` is rebuilt too). Or by hand:
+is needed (and stops the server first when `serverz.exe` is rebuilt too). Or by hand:
 
 ```powershell
 arc-server stop
-.\build.ps1 zero\serverz.cpp zero\runz.cpp     # arcinferzero (default)
-.\build.ps1 tools\server.cpp tools\run.cpp     # OpenCL engine
+.\build.ps1 zero\serverz.cpp zero\runz.cpp
 ```
 
-GPU kernels (`zero\kernels\*.cl` for arcinferzero, `kernels\*.cl` for the OpenCL engine) are compiled by the driver
+GPU kernels (`zero\kernels\*.cl`) are compiled by the driver
 when the server starts, so kernel changes do not need a build.
 Compiled kernels are saved in `%LOCALAPPDATA%\arcinfer\kernels`, so only the first use of each variant waits for
 compilation.

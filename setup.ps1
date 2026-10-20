@@ -7,8 +7,8 @@
 #   setup -Yes                   do not ask (pip installs, downloads of the models given with -Models)
 #   setup -Help                  all options
 #
-# Steps: 1 requirements (Windows, Intel Arc GPU, Visual Studio C++ compiler, Python, Pi)  2 build bin\server.exe,
-# run.exe, clinfo.exe when missing or older than the sources  3 GPU check (OpenCL 3.0, DP4a, sub-groups, memory)
+# Steps: 1 requirements (Windows, Intel Arc GPU, Visual Studio C++ compiler, Python, Pi)  2 build bin\serverz.exe,
+# runz.exe, clinfo.exe when missing or older than the sources  3 GPU check (OpenCL 3.0, DP4a, sub-groups, memory)
 # 4 models (Hugging Face cache; the 35B is converted)  5 Pi (pi-arc / arc-server commands, Pi's model list)
 # 6 regression tests (-Tests).
 param([string[]]$Models = @(), [switch]$Tests, [switch]$NoPi, [switch]$Yes, [switch]$Help)
@@ -33,9 +33,9 @@ STEPS
   1 requirements   64-bit Windows, an Intel Arc GPU and its driver, the Visual Studio C++ compiler (vswhere;
                    $env:ARC_VCVARS = a vcvars64.bat overrides), Python 3.10+ (downloads), Pi (optional).
                    Missing ones: where to get them.
-  2 build          bin\server.exe, run.exe, clinfo.exe when missing or older than their sources; the compiler
+  2 build          bin\serverz.exe, runz.exe, clinfo.exe when missing or older than their sources; the compiler
                    output goes to %LOCALAPPDATA%\arcinfer\build.log (shown when a build fails). A running server
-                   is stopped first if server.exe has to be rebuilt.
+                   is stopped first if serverz.exe has to be rebuilt.
   3 GPU check      bin\clinfo.exe: OpenCL device, DP4a (cl_khr_integer_dot_product), Intel sub-groups, GPU memory
   4 models         into the Hugging Face cache (HF_HUB_CACHE / HF_HOME respected): Gemma with its drafter and
                    image projector; the 35B downloaded and converted (tools\convert_gsq.py, with the 4B for its
@@ -138,7 +138,7 @@ $newestHeader = (Get-ChildItem (Join-Path $root "src") -Filter *.h | Measure-Obj
 # (arcinferzero: zero\serverz.cpp is tools\server.cpp on zero\engine.h, so it depends on both and on zero\*.h)
 $newestZero = (Get-ChildItem (Join-Path $root "zero") -Filter *.h | Measure-Object LastWriteTime -Maximum).Maximum
 $need = @()
-foreach ($t in "tools\server", "tools\run", "tools\clinfo", "zero\serverz", "zero\runz") {
+foreach ($t in "tools\clinfo", "zero\serverz", "zero\runz") {  # (bin\server.exe / run.exe: the OpenCL engine, removed 2026-10-20)
   $name = Split-Path $t -Leaf
   $exe = Join-Path $bin "$name.exe"
   $src = Get-Item (Join-Path $root "$t.cpp")
@@ -150,7 +150,7 @@ foreach ($t in "tools\server", "tools\run", "tools\clinfo", "zero\serverz", "zer
 }
 if ($need) {
   $running = @(Get-Process server, serverz -ErrorAction SilentlyContinue | Where-Object { $_.Path -like (Join-Path $bin "server*.exe") })
-  if ($running.Count -and ($need -contains "tools\server.cpp" -or $need -contains "zero\serverz.cpp")) {
+  if ($running.Count -and $need -contains "zero\serverz.cpp") {
     Note "stopping the running arcinfer server to rebuild it"
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "scripts\arc-server.ps1") stop | Out-Null
   }
@@ -268,7 +268,7 @@ if ($todo) {
 }
 # what the server finds, with each model's context for the current GPU memory (computed in seconds, remembered)
 $ErrorActionPreference = "Continue"
-$found = @(& (Join-Path $bin "server.exe") --list-models 2>$null | ConvertFrom-Json | ForEach-Object { $_ }) | Where-Object { $_.supported }
+$found = @(& (Join-Path $bin "serverz.exe") --list-models 2>$null | ConvertFrom-Json | ForEach-Object { $_ }) | Where-Object { $_.supported }
 $ErrorActionPreference = "Stop"
 if ($found) {
   Write-Host "  The server finds:"
@@ -297,7 +297,9 @@ else {
   $m4 = (Get-ChildItem $hub -Recurse -Filter "Qwen3.5-4B-UD-Q4_K_XL.gguf" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
   if (-not $m4) { Note "the tests need the 4B model: setup -Models 4b -Tests" }
   else {
-    [string[]]$tools = @("tools\test_gemm.cpp", "tools\tok_test.cpp", "tools\chat_render.cpp", "tools\ref_forward.cpp", "tools\tool_stream_test.cpp")
+    [string[]]$tools = @("tools\tok_test.cpp", "tools\chat_render.cpp", "tools\ref_forward.cpp", "tools\tool_stream_test.cpp",
+                         "tests\test_http.cpp", "tests\test_api_compat.cpp", "tests\test_xcache_pools.cpp", "tests\test_sampler.cpp",
+                         "tests\test_hc.cpp")
     Write-Host "  building the test tools..."
     Build $tools
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "scripts\arc-server.ps1") stop | Out-Null  # (GPU memory)

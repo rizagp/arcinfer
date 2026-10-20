@@ -3,7 +3,7 @@
 // reference computed from the same int8 values and scales.
 // usage: attn_dec_bench [P=14000] [extra build options...]
 // env: ATT_NH (q heads, 16), ATT_NKV (kv heads, 1), ATT_HD (head dim, 512), ATT_WIN (window, 0 = full),
-//      ATT_SB (scale blocks per row, HD/64), ATT_T (query rows, 1), ATT_FILE (kernel source, kernels/ops.cl),
+//      ATT_SB (scale blocks per row, HD/64), ATT_T (query rows, 1), ATT_FILE (kernel source, zero/kernels/ops.cl),
 //      ATT_ITERS (20), ATT_LAYERS (distinct caches cycled through so they stream from memory, 8),
 //      ATT_DSPLIT=HG,NSUB (attn_dsplit with HG heads per sub-group, NSUB dim groups), ATT_OLD (the attn_split /
 //      attn_decode path: ATT_SPLIT / ATT_DECODE force one, ATT_HS heads per sub-group), ATT_SMAX / ATT_TARGET /
@@ -26,7 +26,7 @@ int main(int argc, char** argv) {
   const int cap = (P + 1 + 255) / 256 * 256, nbc = cap / 16;
   ClRt cl;
   if (!cl.init()) return 1;
-  const std::string src = read_file(getenv("ATT_FILE") ? getenv("ATT_FILE") : "kernels/ops.cl");
+  const std::string src = read_file(getenv("ATT_FILE") ? getenv("ATT_FILE") : "zero/kernels/ops.cl");
   // (ATT_GRF128: the default register file, twice the threads per EU)
   const std::string base = std::string("-cl-std=CL3.0 -cl-mad-enable ") +
                            (getenv("ATT_GRF128") ? "" : "-cl-intel-256-GRF-per-thread ") + "-DHD=" + std::to_string(hd) +

@@ -1,4 +1,4 @@
-// arcinferzero: a copy of src/engine.h on the Level Zero runtime (zero/clrt.h); changes for expert streaming are made here only.
+// arcinferzero: the engine on the Level Zero runtime (zero/clrt.h); it began as a copy of the OpenCL engine's src/engine.h (removed 2026-10-20).
 // arcinfer engine: Qwen3.5 / Qwen3.6 / Qwen3.8 dense (hybrid Gated DeltaNet + gated attention, GGUF arch
 // "qwen35"), their mixture-of-experts variant ("qwen35moe", GSQ 2-bit experts from tools/convert_gsq.py) and
 // Gemma 4 on Intel Xe-LPG integrated GPUs via OpenCL.
@@ -104,7 +104,7 @@ class Engine {
   // the rotary position by max(gw, gh) instead of gw * gh); kept by the caller with the conversation
   int rope_shift = 0;
   bool profile = false, w8_resident = false, has_mtp = false;
-  // weight bytes the GEMVs read (token generation; tools/run.exe reports GB/s against the measured ~75 GB/s)
+  // weight bytes the GEMVs read (token generation; bin/runz.exe reports GB/s against the measured ~75 GB/s)
   uint64_t rd_bytes = 0;
   static uint64_t raw_bytes(const GpuWeight& w) { return (uint64_t)w.N * (w.K / 256) * gguf_sb_bytes(w.type); }
   std::map<std::string, double> prof_ms;
@@ -654,6 +654,8 @@ class Engine {
       size_t per = 0;
       for (cl_mem* r : roles_) per += (*r)->size;
       const size_t est = slot_bytes(ctx) - snapshot_bytes();
+      slot_real_bytes_ = per;
+      slot_est_bytes_ = est;
       if (per > est + est / 100 || getenv("ARC_SLOT_BYTES"))
         fprintf(stderr, "arcinferzero: a slot takes %.1f MiB, slot_bytes() counts %.1f MiB\n", per / 1048576.0, est / 1048576.0);
     }
@@ -742,16 +744,17 @@ class Engine {
         run("rmsnorm_quant", k_rmsnorm_, 2, gws, lws);
       }
       if (dfl_) dfl_commit(0, q.row, 1, q.pos);
-      slot_host_[q.slot].pos = q.pos + 1;
     }
+    clFinish(cl_.queue);
+    for (const BatchSeq& q : seqs) slot_host_[q.slot].pos = q.pos + 1;  // (the slots advance once the pass is done)
     dfl_cap_lo_ = dfl_cap_end_ = 0;
     guard.parked = false;
     unpark(guard.bound);
-    clFinish(cl_.queue);
     collect_profile();
     return batch_logits_host_;
   }
   int batch_rows() const { return batch_rows_; }
+  size_t slot_real_bytes_ = 0, slot_est_bytes_ = 0;  // (add_slots: one slot's buffers, and what slot_bytes() counted)
  private:
   // a batch's slots: in range, each once, none with a verification pass not settled, n[b] more positions within ctx
   void check_batch(const std::vector<int>& slots, const std::vector<int>& n) const {
@@ -766,7 +769,10 @@ class Engine {
       if ((bound ? pos : slot_host_[s].pos) + n[b] > ctx) throw std::runtime_error("context overflow");
     }
   }
-  // a batched pass's state, cleared however the pass ends; slots parked when it threw: the bound one again
+  // a batched pass's state, cleared however the pass ends, and the slot bound before it bound again. A pass that
+  // threw leaves its slots' positions and pending drafts as they were (they change only once it is done), but their
+  // device state (KV rows past the position, DeltaNet states) may be partly written: the caller starts those
+  // conversations over (reset).
   struct BatchGuard {
     Engine& e;
     int bound;
@@ -776,6 +782,9 @@ class Engine {
       e.spec_ = false;
       e.dfl_cap_lo_ = e.dfl_cap_base_ = e.dfl_cap_end_ = 0;
       if (parked) e.unpark(bound);
+      else if (e.slot_ != bound) {  // (bind or flush_mtp_pending threw in the loop before park)
+        try { e.bind(bound); } catch (...) {}
+      }
     }
   };
  public:
@@ -836,15 +845,17 @@ class Engine {
       run("rmsnorm_quant", k_rmsnorm_, 2, gws, lws);
       if (dfl_)
         CL_CHECK(clEnqueueCopyBuffer(cl_.queue, dfl_acc_[0], dfl_vrows_, (size_t)q.row * E4, 0, (size_t)q.n * E4, 0, nullptr, nullptr));
-      SlotHost& h = slot_host_[q.slot];
-      h.pos = q.pos + q.n;
+    }
+    clFinish(cl_.queue);
+    for (int b = 0; b < B; ++b) {  // (the slots advance once the pass is done)
+      SlotHost& h = slot_host_[seqs[b].slot];
+      h.pos = seqs[b].pos + seqs[b].n;
       h.last_drafts.assign(rows[b].begin() + 1, rows[b].end());  // (now pending: verify_done settles it)
       h.vrows = true;
     }
     dfl_cap_lo_ = dfl_cap_end_ = 0;
     guard.parked = false;
     unpark(guard.bound);
-    clFinish(cl_.queue);
     collect_profile();
     return batch_logits_host_;
   }
@@ -915,8 +926,10 @@ class Engine {
     cl_mem& v = views_[{b, off}];
     if (!v) {
       if (off >= b->size) throw std::runtime_error("from: offset past the buffer");
-      for (cl_mem* role : roles_)  // (a view of a slot's buffer would not follow point_to: working buffers only)
-        if (*role == b) throw std::logic_error("from: a view of a slot's state buffer");
+      for (cl_mem* role : roles_) {  // (a view of a slot's buffer would not follow point_to: working buffers only)
+        const ZMem* r = *role;
+        if (b->ptr >= r->ptr && b->ptr < r->ptr + r->size) throw std::logic_error("from: a view of a slot's state buffer");
+      }
       cl_buffer_region r{off, b->size - off};
       cl_int err;
       v = clCreateSubBuffer(b, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &r, &err);
@@ -3251,7 +3264,7 @@ class Engine {
     if (dbg_rows) dbg_row(T - 1);
     if (dfl_) dfl_capture(L, T, Mp);
   }
-  // (tools/bitcheck: the residual stream's row r after each half of every layer, to compare two decode paths)
+  // (debug: the residual stream's row r after each half of every layer, to compare two decode paths)
  public:
   bool dbg_rows = false;
   std::vector<std::vector<float>> dbg_;

@@ -1,6 +1,6 @@
-# Pi's model list for arcinfer (provider "arcinfer" in ~/.pi/agent/models.json): every model server.exe can load,
+# Pi's model list for arcinfer (provider "arcinfer" in ~/.pi/agent/models.json): every model serverz.exe can load,
 # so Pi's /model switches between them (the server loads the requested one). Context window: each model's own, as
-# `server.exe --list-models` computes it for the current GPU memory; the running model's from the server.
+# `serverz.exe --list-models` computes it for the current GPU memory; the running model's from the server.
 # Dot-sourced by pi-arc.ps1 and install-pi.ps1. Other providers in models.json are kept.
 function Update-PiModels([string]$ServerExe, [string]$Base, [string]$RunningId = "", [int]$RunningCtx = 0) {
   $all = @(& $ServerExe --list-models | ConvertFrom-Json | ForEach-Object { $_ }) | Where-Object { $_.supported }  # (unroll)

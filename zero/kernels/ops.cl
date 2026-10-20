@@ -2551,7 +2551,7 @@ __kernel void vit_attn_rows(__global const half* q, __global const half* k, __gl
     for (int d = 0; d < HD; ++d) dst[d] = o[d] * inv;
   }
 }
-// ---- Gemma 4 vision (mmproj gemma4v: the E2B / E4B encoder; src/vision_gemma4v.h). RMS norms throughout, and
+// ---- Gemma 4 vision (mmproj gemma4v: the E2B / E4B encoder; zero/vision_gemma4v.h). RMS norms throughout, and
 // "clippable" linears: each matrix product's input and output are clamped to ranges stored in the mmproj.
 
 // out[m] = clamp(rms(x[m]) * w, lo, hi). grid (256, M_valid), local (256, 1).
@@ -2689,7 +2689,7 @@ __kernel void g4v_pool(__global const float* x, int E, int px, int K, float scal
     for (int dx = 0; dx < K; ++dx) s += x[((size_t)(ty * K + dy) * px + tx * K + dx) * E + e];
   out[(size_t)t * E + e] = s / (float)(K * K) * scale;
 }
-// ---- Gemma 4 audio conformer (mmproj gemma4a: the E2B / E4B audio encoder; src/audio_gemma4a.h)
+// ---- Gemma 4 audio conformer (mmproj gemma4a: the E2B / E4B audio encoder; zero/audio_gemma4a.h)
 
 // x[m][n] = clamp(silu(x[m][n]), lo, hi) for n < N. grid (N, M_valid).
 __kernel void a4_silu(__global float* x, int N, float lo, float hi) {

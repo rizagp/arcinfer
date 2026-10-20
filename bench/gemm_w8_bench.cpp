@@ -1,4 +1,4 @@
-// Times the prompt GEMM (kernels/gemm.cl, W8 weights as the just-in-time decoded IQ/K types use, per-32 activation
+// Times the prompt GEMM (zero/kernels/gemm.cl, W8 weights as the just-in-time decoded IQ/K types use, per-32 activation
 // scales) in isolation, with the engine's launch geometry, and compares a variant bitwise against the original.
 // usage: gemm_w8_bench [M N K qtype iters] [variant defines] [variant kernel file]
 //   qtype 100 = W8 per-16 scales, 101 = per-32 scales (default 100); shapes default to the 27B FFN up projection
@@ -16,7 +16,7 @@ static int env(const char* k, int d) { return getenv(k) ? atoi(getenv(k)) : d; }
 int main(int argc, char** argv) {
   const int M = argc > 1 ? atoi(argv[1]) : 4096, N = argc > 2 ? atoi(argv[2]) : 17408, K = argc > 3 ? atoi(argv[3]) : 5120;
   const int qtype = argc > 4 ? atoi(argv[4]) : 100, iters = argc > 5 ? atoi(argv[5]) : 10;
-  const std::string vdefs = argc > 6 ? argv[6] : "", vfile = argc > 7 ? argv[7] : "kernels/gemm.cl";
+  const std::string vdefs = argc > 6 ? argv[6] : "", vfile = argc > 7 ? argv[7] : "zero/kernels/gemm.cl";
   const int SG = 16, nsb = K / 256, G = N / SG, cool = env("GB_COOL", 5);
   if (K % 256 || N % SG || M % 128) { fprintf(stderr, "bad shape\n"); return 1; }
   std::mt19937 rng(42);
@@ -50,8 +50,8 @@ int main(int argc, char** argv) {
   auto bc = cl.buffer(CL_MEM_READ_WRITE, (size_t)M * N * 4);
 
   struct Variant { std::string name, file, defs; int tm; };
-  std::vector<Variant> vs = {{"original", "kernels/gemm.cl", "", 16}};
-  if (!vdefs.empty() || vfile != "kernels/gemm.cl") vs.push_back({"variant", vfile, vdefs, env("GB_TM", 16)});
+  std::vector<Variant> vs = {{"original", "zero/kernels/gemm.cl", "", 16}};
+  if (!vdefs.empty() || vfile != "zero/kernels/gemm.cl") vs.push_back({"variant", vfile, vdefs, env("GB_TM", 16)});
   std::vector<std::vector<float>> outs;
   for (const Variant& v : vs) {
     const std::string opts = "-cl-std=CL3.0 -cl-mad-enable -cl-intel-256-GRF-per-thread -DACT32 -DQTYPE=" +

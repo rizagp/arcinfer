@@ -1,4 +1,4 @@
-// arcinferzero: a copy of src/vision_qwen3vl.h that builds on zero/engine.h (Level Zero).
+// arcinferzero: the Qwen3-VL vision encoder (once a copy of the OpenCL engine's src/vision_qwen3vl.h, removed 2026-10-20), built on zero/engine.h (Level Zero).
 // Qwen3-VL vision encoder (mmproj projector type qwen3vl_merger: Qwen3.5 / 3.6 / 3.8 with vision) on the GPU.
 // A ViT over 16x16 patches (two temporal patch kernels summed, as for a still image), learned position embeddings
 // resized bilinearly (align corners) to the patch grid, 2-D rotary positions in every attention layer, then a

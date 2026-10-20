@@ -61,7 +61,7 @@ Phase 2 (2026-10-13 onward):
 - F13 13.2 (🟡) Zero becomes the default: exes not renamed yet (`bin\server.exe` from the zero engine, `serverz.exe`
   removed, `runz.exe` → `run.exe`, OpenCL temporarily as `server-opencl.exe`).
 - F13 13.3 (⏳) Daily use for 1–2 weeks.
-- F13 13.4 (⏳) Remove the OpenCL path (src/engine.h OpenCL, old server.exe / run.exe).
+- F13 13.4 (✅ 2026-10-20) Remove the OpenCL path (src/engine.h OpenCL, old server.exe / run.exe): removed with kernels/, the OpenCL encoder copies, bitcheck / test_gemm / vision_test and stable/.
 - F14 Parallel drafting: the drafter (MTP / Gemma drafter) runs on a separate Level Zero queue, overlapping with
   main-model verification; first measure how much can overlap on the iGPU (one compute engine). (F16 E: parallel / tree
   drafts not yet.)

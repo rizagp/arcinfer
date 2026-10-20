@@ -580,7 +580,7 @@ struct XCache {
       }
       pf_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     });
-    } catch (const std::system_error&) {  // (no thread: nothing waits for the event; ensure() reads X itself)
+    } catch (const std::exception&) {  // (no thread: nothing waits for the event; ensure() reads X itself)
       zeEventHostSignal(ev);
       pf_wait_[h] = -1;
       pf_layer_ = -1;
@@ -622,7 +622,7 @@ struct XCache {
         }
         pf_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
       });
-    } catch (const std::system_error&) {
+    } catch (const std::exception&) {  // (no thread: std::system_error, or std::bad_alloc)
       drop_prefetch(-1);
     }
   }

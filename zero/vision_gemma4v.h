@@ -1,4 +1,4 @@
-// arcinferzero: a copy of src/vision_gemma4v.h that builds on zero/engine.h (Level Zero).
+// arcinferzero: the Gemma 4 vision encoder (once a copy of the OpenCL engine's src/vision_gemma4v.h, removed 2026-10-20), built on zero/engine.h (Level Zero).
 // Gemma 4 vision encoder of the small models (mmproj projector type gemma4v: E2B / E4B) on the GPU.
 // A ViT over 16x16 patches (no patch bias; pixels mapped to [-1, 1]), learned position embeddings looked up per
 // column and row, 16 layers with RMS "sandwich" norms, per-head q / k RMS norms (v normed without weight), 2-D

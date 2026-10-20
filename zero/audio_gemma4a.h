@@ -1,4 +1,4 @@
-// arcinferzero: a copy of src/audio_gemma4a.h that builds on zero/engine.h (Level Zero).
+// arcinferzero: the Gemma 4 audio encoder (once a copy of the OpenCL engine's src/audio_gemma4a.h, removed 2026-10-20), built on zero/engine.h (Level Zero).
 // Gemma 4 audio encoder of the small models (mmproj audio projector type gemma4a: E2B / E4B), the conformer on the
 // GPU. Matches llama.cpp tools/mtmd (models/gemma4a.cpp, mtmd_audio_preprocessor_gemma4a):
 //  - CPU: 16 kHz samples in clips of up to 30 s -> log-mel (semicausal padding, 320-sample Hann window in a 512-point

@@ -10,10 +10,8 @@
 #        [-Vision on|off]             image / audio encoders (default on; off: no mmproj, more context)
 #        [-Ctx N|auto] [-Chunk N] [-NoMtp]  context (default: auto, the largest that fits the GPU memory),
 #                                     prompt chunk size, no speculative decoding
-#        [-OpenCL]                    the OpenCL engine (bin\server.exe) instead of arcinferzero (bin\serverz.exe,
-#                                     Level Zero, the default; MoE models such as the 35B stream their experts from
-#                                     the SSD into a GPU cache, dense models keep every weight on the GPU). A running
-#                                     server of the other engine is restarted.
+#        [-NoStream]                  MoE experts on the GPU instead of streamed from the SSD (bin\serverz.exe,
+#                                     Level Zero: the engine; the OpenCL one, bin\server.exe, was removed 2026-10-20)
 #   arc-server stop                   stop the server
 #   arc-server status                 show what is running and the saved conversations
 #   arc-server clear-cache            delete the saved conversations (session cache) of all models
@@ -29,8 +27,8 @@ param(
   [int]$Port = 8090,
   [switch]$NoMtp,
   [ValidateSet("", "on", "off")] [string]$Vision = "",
-  [switch]$Zero,
-  [switch]$OpenCL,
+  [switch]$Zero,    # (accepted for old commands: arcinferzero is the only engine)
+  [switch]$OpenCL,  # (refused: the OpenCL engine was removed)
   [switch]$NoStream,
   [int]$Slots = 0,
   # the other server options (0 / empty / off = the server's default)
@@ -58,27 +56,25 @@ if ($Ctx -and $Ctx -ne "auto" -and $Ctx -notmatch '^\d+$') { throw "-Ctx: a numb
 $root = Split-Path $PSScriptRoot -Parent
 $stateDir = Join-Path $env:LOCALAPPDATA "arcinfer"
 New-Item -ItemType Directory -Force $stateDir | Out-Null
-# the engine: arcinferzero (Level Zero) unless -OpenCL (-Zero: the default, kept for old commands)
-if (-not $OpenCL) { $Zero = $true }
-if ($NoStream) { $Zero = $true }  # (arcinferzero with every expert on the GPU, as arcinfer: no SSD cache)
-if ($Slots -gt 1 -and -not $Zero) { throw "-Slots: arcinferzero only (not with -OpenCL)" }
-$Engine = if ($NoStream) { "zero-nostream" } elseif ($Zero) { "zero" } else { "arcinfer" }
+# the engine: arcinferzero (Level Zero); -NoStream keeps every expert on the GPU
+if ($OpenCL) { throw "-OpenCL: the OpenCL engine (bin\server.exe) was removed on 2026-10-20; arcinferzero is the engine" }
+$Engine = if ($NoStream) { "zero-nostream" } else { "zero" }
 # ($arch: the model's architecture; only mixture-of-experts models keep their experts on the SSD)
 function Engine-Text([string]$e, [string]$arch = "") {
   switch ($e) {
     "zero" { if ($arch -like "*moe*" -or $arch -eq "qwen4exp") { "arcinferzero (Level Zero; experts on the SSD with a GPU cache)" } else { "arcinferzero (Level Zero)" } }
     "zero-nostream" { "arcinferzero without the SSD cache (Level Zero; every weight on the GPU)" }
-    default { "arcinfer (OpenCL; every weight on the GPU)" }
+    default { "an older server ($e)" }
   }
 }
-$exe = Join-Path $root $(if ($Zero) { "bin\serverz.exe" } else { "bin\server.exe" })
+$exe = Join-Path $root "bin\serverz.exe"
 $log = Join-Path $stateDir "server.log"
 $stateFile = Join-Path $stateDir "server.json"
 $base = "http://127.0.0.1:$Port"
-# saved conversations (server --session-cache-gb, default 8 GB): each engine keeps its own (arcinferzero under zero\)
-$sessDir = Join-Path $stateDir $(if ($Zero) { "zero\sessions" } else { "sessions" })
+# saved conversations (server --session-cache-gb, default 8 GB)
+$sessDir = Join-Path $stateDir "zero\sessions"
 
-# The models come from `server.exe --list-models` (Hugging Face cache + %LOCALAPPDATA%\arcinfer\models): name, file,
+# The models come from `serverz.exe --list-models` (Hugging Face cache + %LOCALAPPDATA%\arcinfer\models): name, file,
 # alias (= the model id of the API and Pi), shortcut, the context --ctx auto chose for the current GPU memory. The
 # context is auto unless -Ctx is given: the largest that fits the GPU memory currently set next to ~1 GiB for the
 # desktop and other apps, at most the trained one (Intel Graphics Software can change the GPU memory; it is then
@@ -95,7 +91,7 @@ function Get-Running {
   if ($l.Count) { return $l[0].id } else { return $d[0].id }
 }
 
-# Model files compared by full path: server.exe lists Hugging Face cache paths with mixed separators
+# Model files compared by full path: serverz.exe lists Hugging Face cache paths with mixed separators
 # (C:\Users\me/.cache/huggingface/hub\models--...), a resolved path has only backslashes.
 function Same-Path($a, $b) {
   if (-not $a -or -not $b) { return $false }
@@ -114,6 +110,7 @@ function Stop-Arc {
     Remove-Item $stateFile -Force
   }
   # a server started by hand on the same port
+  # (server.exe: a server started before the OpenCL engine was removed on 2026-10-20)
   Get-CimInstance Win32_Process -Filter "Name = 'server.exe' OR Name = 'serverz.exe'" |
     Where-Object { $_.ExecutablePath -like "$root\bin\server*.exe" -and $_.CommandLine -match "--port\s+$Port\b" } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $stopped = $true }
@@ -129,7 +126,7 @@ function Stop-Arc {
   return $stopped
 }
 
-# The models server.exe finds (Hugging Face cache + arcinfer's model folder), with their alias.
+# The models serverz.exe finds (Hugging Face cache + arcinfer's model folder), with their alias.
 function Get-Models {
   $all = @(& $exe --list-models | ConvertFrom-Json | ForEach-Object { $_ })  # (Windows PowerShell: unroll the array)
   foreach ($m in $all) { $m | Add-Member ctx 0 -Force }  # (only -Ctx sets a fixed context here)
@@ -207,22 +204,20 @@ Options for start / restart:
                                  memory, more context)
   -SessionCacheGb <N>            save conversations to disk when switching sessions (default 8 GB, 0 = off)
   -NoMtp                         no speculative decoding
-  -OpenCL                        arcinfer on OpenCL (bin\server.exe), the engine before arcinferzero became the
-                                 default (2026-10-16); without it arcinferzero runs (-Zero is accepted, the same)
-  -Zero                          arcinferzero (bin\serverz.exe, Level Zero; the default): MoE models keep their
+                                 The engine is arcinferzero (bin\serverz.exe, Level Zero): MoE models keep their
                                  experts (MTP layer included) on the SSD and the most used ones in a GPU cache
                                  and read the next layer's missing experts while the GPU computes (35B and Flash
                                  Next: 131,072 tokens of context by default, up to 262,144 with -Ctx; Windows keeps
-                                 14 GB); dense models only change engine (same context). A running server of the
-                                 other engine is restarted. The first start writes the expert file (35B: 16 GB,
-                                 ~2.5 min; Flash Next: 56 GB, ~9.5 min) to %LOCALAPPDATA%\arcinfer\zero (safe to
-                                 delete: it is written again).
+                                 14 GB). The first start writes the expert file (35B: 16 GB, ~2.5 min; Flash Next:
+                                 56 GB, ~9.5 min; Gemma 4 26B: 13 GB, ~1 min) to %LOCALAPPDATA%\arcinfer\zero (safe
+                                 to delete: it is written again). (-Zero is accepted for old commands; the OpenCL
+                                 engine, -OpenCL, was removed on 2026-10-20)
   -Slots <N>                     hold N conversations at once (arcinferzero; default 1): two Pi sessions each
                                  keep their own KV cache and states and take turns step by step (a prompt piece,
                                  a token), so neither waits for the other's whole answer. Each slot gets the
                                  context that fits N of them (-Ctx auto; 27B: 2 x 49,152, 35B: 2 x 65,536, g26 2 x 32,768)
-  -NoStream                      arcinferzero (Level Zero) with every expert on the GPU, as arcinfer: no expert
-                                 file, no SSD reads; MoE models then get arcinfer's (smaller) context
+  -NoStream                      every expert on the GPU: no expert file, no SSD reads; MoE models then get a
+                                 smaller context
   -Vision on|off                 image / audio input (default on). off: the projector (mmproj) is not loaded and
                                  --ctx auto keeps no GPU memory for it, so the context is longer
   -Port <N>                      port (default 8090; also for status / stop)
@@ -238,14 +233,14 @@ Options for start / restart:
   -NoPrefixCache                 do not keep system prompts on disk;  -PrefixCacheGb <N>  their disk space (8)
   -NoSwap                        the server keeps its model (requests for another model do not switch)
   -ListenHost <addr>             listen address (default 127.0.0.1; 0.0.0.0 = other computers too)
-  -SessionDir <folder>           where saved conversations go (default %LOCALAPPDATA%\arcinfer\zero\sessions; -OpenCL: arcinfer\sessions)
+  -SessionDir <folder>           where saved conversations go (default %LOCALAPPDATA%\arcinfer\zero\sessions)
   -Quiet                         no messages
 A running server is kept when the model and every option given match; otherwise it is restarted with them.
 
 A window for all of this: arc-launcher.cmd in the project folder (models with their memory and automatic
 context, every option filled in with the best value, Start / Stop, the running server's memory and speeds).
 
-The server is started as bin\serverz.exe (bin\server.exe with -OpenCL) with --ctx, --mtp (when the model has
+The server is started as bin\serverz.exe with --ctx, --mtp (when the model has
 an MTP block or a Gemma drafter), --draft for the -nodf / -df variants, --think-budget 8192 and the options above;
 its other options (bin\serverz.exe --help) keep their defaults.
 
@@ -283,7 +278,7 @@ switch ($Action) {
 }
 
 # ---- start / restart
-if (-not (Test-Path $exe)) { throw "$exe not found: build it with .\build.ps1 $(if ($Zero) { 'zero\serverz.cpp' } else { 'tools\server.cpp' })" }
+if (-not (Test-Path $exe)) { throw "$exe not found: build it with .\build.ps1 zero\serverz.cpp (or run setup)" }
 $running = Get-Running
 $st = if ($running -and (Test-Path $stateFile)) { Get-Content $stateFile -Raw | ConvertFrom-Json } else { $null }
 $models = Get-Models
@@ -354,7 +349,6 @@ if ($running) {
   $was = if ($st -and $st.engine) { $st.engine } else { "arcinfer" }
   Say "Switching the server: $running ($(Engine-Text $was))"
   Say "                  to: $($m.alias) ($(Engine-Text $Engine $m.arch))"
-  if ($was -ne $Engine) { Say "  (engine changes: $(if ($Zero) { 'pi-arc without --zero goes back to arcinfer' } else { 'started without --zero' }))" }
   Stop-Arc | Out-Null
 }
 elseif ($Action -eq "restart") { Stop-Arc | Out-Null }
@@ -367,11 +361,10 @@ if ($NoStream) { $srvArgs += "--no-stream" }
 if ($Chunk -gt 0) { $srvArgs += @("--chunk", $Chunk) }
 if ($SessionCacheGb -gt 0) { $srvArgs += @("--session-cache-gb", $SessionCacheGb) }  # saved conversations on disk (default 8 GB, 0 = off)
 if ($novision -eq "1") { $srvArgs += "--no-mmproj" }
-Say "Starting $(if ($NoStream) { 'arcinferzero (no SSD cache)' } elseif ($Zero) { 'arcinferzero' } else { 'arcinfer' }): $($m.name) as $($m.alias), context $ctxArg, port $Port$(if ($useMtp) { ', speculative decoding' })"
+Say "Starting $(if ($NoStream) { 'arcinferzero (no SSD cache)' } else { 'arcinferzero' }): $($m.name) as $($m.alias), context $ctxArg, port $Port$(if ($useMtp) { ', speculative decoding' })"
 Say "  engine: $(Engine-Text $Engine $m.arch)"
-if ($Zero -and -not $NoStream) {
-  Say "  (MoE models: the first start writes the expert file to $stateDir\zero, 35B: 16 GB / ~2.5 min, Flash Next: 56 GB / ~9.5 min, once;"
-  Say "   dense models (27B, 9B, 4B, Gemma) only change engine: same context as arcinfer)"
+if (-not $NoStream) {
+  Say "  (MoE models: the first start writes the expert file to $stateDir\zero, 35B: 16 GB / ~2.5 min, Flash Next: 56 GB / ~9.5 min, once)"
 }
 Say "  (loading takes 5-40 s; log: $log)"
 $p = Start-Process -FilePath $exe -ArgumentList $srvArgs -WorkingDirectory $root -WindowStyle Hidden -PassThru `
@@ -395,13 +388,13 @@ while ($true) {
 $nctx = (Invoke-RestMethod "$base/props" -TimeoutSec 5).n_ctx
 Say ("Ready after {0:N0} s: {1}, context {2:N0} (web UI {3}/)" -f ((Get-Date) - $t0).TotalSeconds, $m.alias, $nctx, $base)
 Say "  engine: $(Engine-Text $Engine $m.arch)"
-if ($Zero) {
+if ($true) {
   # the engine's own lines: the expert cache (MoE) or that the model has no experts to stream
   $zl = @(Get-Content $log -ErrorAction SilentlyContinue | Where-Object { $_ -match "^arcinferzero: (expert cache|cache filled|expert file written|memory limit)" })
   if ($zl.Count) {
     foreach ($l in $zl) { Say ("  " + ($l -replace "^arcinferzero: ", "") -replace ", file .*$", "") }
   } elseif (-not $NoStream) {
-    Say "  dense model: no MoE experts, so no SSD cache (Level Zero only; context as with arcinfer)"
+    Say "  dense model: no MoE experts, so no SSD cache"
   }
 }
 Sync-PiModels

@@ -1,4 +1,4 @@
-// Times the single-token MoE expert kernels (kernels/decode.cl moe_gateup_q / moe_down_q, -DMOE_Q) on the real experts
+// Times the single-token MoE expert kernels (zero/kernels/decode.cl moe_gateup_q / moe_down_q, -DMOE_Q) on the real experts
 // of a standard-type MoE GGUF: each step one token with NU random experts of a layer, layers in turn, so the weights
 // come from memory as in token generation. Reports the effective weight bandwidth.
 // usage: moe_bench model.gguf [first_layer=0] [layers=8] [steps=200] [gateup_defs] [down_defs] [kernel_file]

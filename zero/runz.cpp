@@ -32,7 +32,7 @@ static void top_k(const std::vector<float>& logits, int k, std::vector<std::pair
   for (int i = 0; i < k; ++i) out.push_back({idx[i], (float)(std::exp((double)logits[idx[i]] - mx) / z)});
 }
 
-// Other processes on the iGPU (arcinfer, llama.cpp) share its time and its memory, so speeds measured while one of
+// Other processes on the iGPU (serverz / another runz, llama.cpp) share its time and its memory, so speeds measured while one of
 // them runs are not representative: Gemma 4 E4B generated 8 tok/s with --mtp (23 alone) while a 27B server
 // processed a prompt, and its load took 10-40 s instead of 2 s with an idle 27B server loaded.
 static void warn_gpu_neighbours() {
@@ -45,7 +45,7 @@ static void warn_gpu_neighbours() {
     if (pe.th32ProcessID == GetCurrentProcessId()) continue;
     std::string n;
     for (const wchar_t* c = pe.szExeFile; *c; ++c) n.push_back((char)towlower(*c));
-    if (n == "server.exe" || n == "run.exe" || n.rfind("llama-", 0) == 0)
+    if (n == "serverz.exe" || n == "runz.exe" || n.rfind("llama-", 0) == 0)
       found += (found.empty() ? "" : ", ") + n + " (pid " + std::to_string(pe.th32ProcessID) + ")";
   }
   CloseHandle(snap);
@@ -264,6 +264,11 @@ static int run_main(int argc, char** argv) {
     // logits row read is compared.
     if (toks.size() < 8) { fprintf(stderr, "--slots-check needs a prompt of at least 8 tokens\n"); return 1; }
     eng.add_slots(2);
+    {  // (--ctx auto counts with slot_bytes(): it must not count less than a slot takes)
+      const bool ok = eng.slot_real_bytes_ <= eng.slot_est_bytes_ + eng.slot_est_bytes_ / 100;
+      printf("slot bytes: %zu real, %zu counted: %s\n", eng.slot_real_bytes_, eng.slot_est_bytes_, ok ? "OK" : "MISMATCH");
+      if (!ok) return 1;
+    }
     const int V = eng.hp.n_vocab, n_all = eng.has_mtp ? 2 * n_gen : n_gen;
     // (drafts per step: as many as two slots' rows fit one batched pass, in every run)
     const int nd = std::max(1, std::min(eng.opt.mtp_drafts, eng.batch_rows() / 2 - 1));

@@ -1,5 +1,5 @@
 # Builds one or more arcinfer targets with MSVC (Visual Studio Build Tools with the C++ workload).
-# Usage: .\build.ps1 tools\clinfo.cpp [bench\gemm_bench.cpp ...]
+# Usage: .\build.ps1 tools\clinfo.cpp [bench\gemv_bench.cpp ...]
 # The compiler is found with vswhere (any Visual Studio / Build Tools installation that has vcvars64.bat);
 # $env:ARC_VCVARS = the path of a vcvars64.bat overrides it.
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Sources)
@@ -29,9 +29,9 @@ foreach ($src in $Sources) {
   $full = Join-Path $root $src
   $name = [IO.Path]::GetFileNameWithoutExtension($full)
   # (_CRT_SECURE_NO_WARNINGS: no "getenv / fopen may be unsafe" deprecation notes)
-  # (the f32 references and checks, ref_forward / bitcheck / tests / vision_test(z): /fp:precise; the rest /fp:fast;
+  # (the f32 references and checks, ref_forward / tests / vision_testz: /fp:precise; the rest /fp:fast;
   #  /utf-8: the sources are UTF-8, their string literals stay byte for byte)
-  $fp = if ($name -match '^(ref_forward|bitcheck|test_|vision_test)') { '/fp:precise' } else { '/fp:fast' }
+  $fp = if ($name -match '^(ref_forward|test_|vision_test)') { '/fp:precise' } else { '/fp:fast' }
   $cmd = "`"$vcvars`" >nul && cl /nologo /utf-8 /std:c++20 /O2 /Oi /arch:AVX2 $fp /EHsc /MD /W3 /openmp:llvm /D_CRT_SECURE_NO_WARNINGS /I`"$root\third_party`" " +
          "/Fe`"$out\$name.exe`" /Fo`"$out\\`" `"$full`""
   cmd /c $cmd

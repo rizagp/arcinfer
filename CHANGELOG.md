@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-10-20: the OpenCL engine removed; robustness fixes
+
+- **The OpenCL engine is removed** (`bin\server.exe`, `bin\run.exe`, `src/engine.h`, `kernels/`, the OpenCL copies of
+  the vision / audio encoders, `tools/run.cpp`, `bitcheck`, `test_gemm`, `vision_test`, `bench/gemm_bench`, the old
+  `stable/` server). arcinferzero (`bin\serverz.exe`, `bin\runz.exe`), which matched its output bit for bit on every
+  model, is the only engine: `arc-server -OpenCL` / `pi-arc --opencl` stop with a message, `-Zero` / `--zero` are
+  still accepted, the launcher has no Engine field, `setup` builds serverz / runz / clinfo, `tests\run_tests.ps1`
+  has no `-Engine opencl|both`. The micro-benchmarks read `zero\kernels`. `runz` now warns about a running serverz /
+  runz (it looked for the old names).
+- Slots and batches refuse misuse instead of corrupting state: a slot out of range or given twice, a batch over
+  drafts not yet settled. A batch pass that throws binds the slot it started from again and changes no slot's
+  position or pending drafts (they change once the pass is done); the server fails every request of that pass
+  (requests waiting for it to lead their step no longer wait for good) and starts their conversations over. The
+  estimated memory per slot equals the allocation exactly (`ARC_SLOT_BYTES=1` prints both; `runz --slots-check`
+  and `tests\run_tests.ps1` fail when it counts less).
+- The expert cache's prefetch thread passes its errors to the caller instead of ending the process; the expert
+  file is written to a `.tmp` and renamed only when complete.
+- JSON nested more than 256 deep is a 400 (it overflowed the connection thread's stack); the build uses `/utf-8`.
+- Saved conversations remember the MTP draft count and the slot layout (an older save is not reused).
+
 ## 2026-10-19: two conversations at once, Gemma 4 26B-A4B, Flash Next accuracy knob
 
 - **Gemma 4 26B-A4B** (Google QAT Q4_0; arcinferzero, `pi-arc g26`): the dense FFN and 128 routed experts side by

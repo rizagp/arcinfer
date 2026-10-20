@@ -21,7 +21,7 @@ $ErrorActionPreference = "Stop"
 $shortcuts = @("27b", "35b", "35b-s", "35b-m", "35b-mtp", "flash", "9b", "4b", "g12", "e4b", "g26")
 # (a shortcut with a variant suffix: 27b-std, 9b-vision, 35b-mtp-std, g12-mtp, ...)
 function Test-Shortcut([string]$s) { $s = $s.ToLower(); return ($shortcuts | Where-Object { $s -match "^$([regex]::Escape($_))(-mtp|-vision|-std)?(-df|-nodf)?$" }).Count -gt 0 }
-$model = ""; $pick = $false; $thinking = "low"; $noMtp = $false; $ctx = ""; $chunk = 0; $sessGb = $null; $vision = ""; $zero = $true; $noStream = $false; $preserve = $false; $v4 = $false; $slots = 0
+$model = ""; $pick = $false; $thinking = "low"; $noMtp = $false; $ctx = ""; $chunk = 0; $sessGb = $null; $vision = ""; $noStream = $false; $preserve = $false; $v4 = $false; $slots = 0
 $piArgs = New-Object System.Collections.Generic.List[string]
 for ($i = 0; $i -lt $args.Count; $i++) {
   $a = [string]$args[$i]
@@ -87,16 +87,13 @@ LAUNCHER OPTIONS
                                  (also --thinking, -Thinking; Pi's /thinking changes it later). Pi sends a
                                  thinking budget per level: minimal = reasoning off on arcinfer, low 2,048,
                                  medium 8,192, high / xhigh / max 16,384 tokens; the <think> block is closed there.
-  --opencl                       arcinfer on OpenCL, the engine before arcinferzero became the default
-  --zero                         arcinferzero (Level Zero; the default since 2026-10-16). MoE models (35B,
-                                 Flash Next) keep their experts, MTP layer included, on the SSD and the most used
-                                 ones in a GPU cache, and read the next layer's missing experts while the GPU
-                                 computes: 131,072 tokens of context by default, up to 262,144 with --ctx. Dense
-                                 models (27B, 9B, 4B, Gemma) only change engine: same context. The expert file
-                                 (35B: 16 GB, Flash Next: 56 GB) is written once and reused; a new kernel variant
-                                 or a GPU driver update compiles kernels once (first request slower)
-  --no-stream                    arcinferzero (Level Zero) without the SSD expert cache: every expert on the
-                                 GPU as in arcinfer (MoE: arcinfer's smaller context)
+  --no-stream                    MoE models without the SSD expert cache: every expert on the GPU (a smaller
+                                 context). Normally MoE models (35B, Flash Next, Gemma 4 26B) keep their experts,
+                                 MTP layer included, on the SSD and the most used ones in a GPU cache, and read the
+                                 next layer's missing experts while the GPU computes: 131,072 tokens of context by
+                                 default, up to 262,144 with --ctx. The expert file (35B: 16 GB, Flash Next: 56 GB,
+                                 Gemma 4 26B: 13 GB) is written once and reused. (--zero is accepted for old
+                                 commands; the OpenCL engine, --opencl, was removed on 2026-10-20)
   --vision on|off, --no-vision   image / audio input (default on); off: the projector is not loaded and the
                                  automatic context is longer (Qwen3.5 9B: ~143K -> ~217K tokens)
   --preserve-thinking            Qwen3.6 35B: earlier turns keep their reasoning in the prompt (Qwen3.8 27B always
@@ -162,7 +159,7 @@ SERVER COMMANDS (arc-server)
   arc-server stop                stop the server and free the GPU memory
   arc-server clear-cache         delete all saved conversations (session cache)
   arc-server help                its own options:
-    -Model <shortcut|text|path>  -Ctx <N|auto>  -Chunk <N>  -SessionCacheGb <N>  -NoMtp  -Vision on|off  -OpenCL  -NoStream  -V4
+    -Model <shortcut|text|path>  -Ctx <N|auto>  -Chunk <N>  -SessionCacheGb <N>  -NoMtp  -Vision on|off  -NoStream  -V4
     -Slots <N>
     -Port <N> (default 8090)  -MtpDrafts <1..7>  -ThinkBudget <N>  -ImageMinTokens / -ImageMaxTokens <N>
     -BudgetGb <GB>  -AttnF32  -NoPrefixCache  -PrefixCacheGb <N>  -NoSwap  -ListenHost <addr>  -SessionDir <dir>
@@ -171,7 +168,7 @@ SERVER COMMANDS (arc-server)
                                  field for every option, Start / Stop, and the running server's GPU memory,
                                  requests and speeds (the server keeps running when it is closed)
 
-SERVER DIRECTLY (bin\serverz.exe, bin\server.exe with --opencl; arc-server passes these for you; details:
+SERVER DIRECTLY (bin\serverz.exe; arc-server passes these for you; details:
 bin\serverz.exe --help)
   -m, --model <model.gguf>       model file              --port <N>          port (default 8080)
   -c, --ctx <N|auto>             context                 --chunk <N>         prompt chunk size
@@ -191,7 +188,7 @@ bin\serverz.exe --help)
   --slots <N>                    hold N conversations at once, taking turns step by step (arcinferzero)
   --v4                           4-bit V copy for generation (arcinferzero, Qwen): faster long answers at long
                                  contexts, ~25 % more attention-cache memory (experimental)
-  --webui <dir>                  web UI folder           --kernels <dir>     OpenCL kernel folder
+  --webui <dir>                  web UI folder           --kernels <dir>     kernel folder (zero\kernels)
   --list-models                  the models arc-server's list shows, as JSON
   --help, -h                     every option with its default
   API: http://127.0.0.1:8090/v1 (OpenAI chat completions), web UI http://127.0.0.1:8090/,
@@ -203,7 +200,7 @@ FILES
   %LOCALAPPDATA%\arcinfer\server.json     what arc-server started (model, context, chunk)
   %LOCALAPPDATA%\arcinfer\last-model.txt  the model started last (pi-arc starts it again by default)
   %LOCALAPPDATA%\arcinfer\kernels         compiled GPU kernels (cache)
-  %LOCALAPPDATA%\arcinfer\zero\          arcinferzero's data (--opencl: the same names one folder up):
+  %LOCALAPPDATA%\arcinfer\zero\          arcinferzero's data:
     ctx-auto.txt                          computed contexts per model and GPU memory
     sessions                              saved conversations (--session-cache)
     prefix                                saved system prompts, per project folder (Pi's differs per
@@ -248,11 +245,11 @@ shortens a long conversation (the details it drops are gone for the model).
   elseif ($a -in "--no-mtp", "-NoMtp") { $noMtp = $true }
   elseif ($a -in "--no-vision", "-NoVision") { $vision = "off" }
   elseif ($a -in "--vision", "-Vision" -and $i + 1 -lt $args.Count) { $i++; $vision = ([string]$args[$i]).ToLower() }
-  elseif ($a -in "--zero", "-zero", "-Zero") { $zero = $true }
-  elseif ($a -in "--opencl", "-OpenCL") { $zero = $false }
+  elseif ($a -in "--zero", "-zero", "-Zero") { }  # (the only engine; accepted for old commands)
+  elseif ($a -in "--opencl", "-OpenCL") { Write-Host "pi-arc: the OpenCL engine was removed on 2026-10-20 (arcinferzero is the engine)"; exit 1 }
   elseif ($a -in "--preserve-thinking", "-PreserveThinking") { $preserve = $true }
-  elseif ($a -in "--no-stream", "-NoStream") { $zero = $true; $noStream = $true }
-  elseif ($a -in "--v4", "-V4") { $zero = $true; $v4 = $true }  # (4-bit V copy for generation at long contexts)
+  elseif ($a -in "--no-stream", "-NoStream") { $noStream = $true }
+  elseif ($a -in "--v4", "-V4") { $v4 = $true }  # (4-bit V copy for generation at long contexts)
   elseif ($a -in "--slots", "-Slots") { $slots = [int]$args[++$i] }  # (conversations the server holds at once)
   else { $piArgs.Add($a) }
 }
@@ -275,9 +272,9 @@ if (-not $model -and -not $pick) {
   }
 }
 $sessArg = @{}; if ($null -ne $sessGb) { $sessArg.SessionCacheGb = $sessGb }  # (not given: the server's default, 8 GB)
-if ($preserve) { $sessArg.PreserveThinking = $true }
-if ($slots -gt 0) { $sessArg.Slots = $slots }  # (only when given, as above)  # (only when given: a plain start keeps the running server)
-& (Join-Path $PSScriptRoot "arc-server.ps1") start -Model $model -Ctx $ctx -Chunk $chunk @sessArg -NoMtp:$noMtp -Vision $vision -Zero:$zero -OpenCL:(-not $zero) -NoStream:$noStream -V4:$v4
+if ($preserve) { $sessArg.PreserveThinking = $true }  # (only when given: a plain start keeps the running server)
+if ($slots -gt 0) { $sessArg.Slots = $slots }  # (only when given, as above)
+& (Join-Path $PSScriptRoot "arc-server.ps1") start -Model $model -Ctx $ctx -Chunk $chunk @sessArg -NoMtp:$noMtp -Vision $vision -NoStream:$noStream -V4:$v4
 if (-not $?) { exit 1 }
 
 # (arc-server start has brought Pi's model list up to date: every model on disk, each with its own context)

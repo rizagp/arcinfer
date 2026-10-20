@@ -2,15 +2,15 @@
 #
 # Usage examples:
 #   .\tests\run_tests.ps1 -SkipGpu                       # model-free CPU checks only (no GPU, no model)
-#   .\tests\run_tests.ps1                                # default engine (zero = arcinferzero), auto-detected models
-#   .\tests\run_tests.ps1 -Engine opencl -Model4B D:\models\Qwen3.5-4B-Q4_K_M.gguf
-#   .\tests\run_tests.ps1 -Engine both -Model27B <27b.gguf> -DFlash27B <z-lab Qwen3.8-27B-DFlash2 dir>
+#   .\tests\run_tests.ps1                                # arcinferzero, auto-detected models
+#   .\tests\run_tests.ps1 -Model27B <27b.gguf> -DFlash27B <z-lab Qwen3.8-27B-DFlash2 dir>
 #   .\tests\run_tests.ps1 -Model35B <35b-a3b GSQ gguf> -Ref35B tests\data\ref_35b_capital_all.bin
 #   .\tests\run_tests.ps1 -SkipGpu -PackGguf <small.gguf>  # also round-trips a GGUF through zero/gguf_pack.h
 #   .\tests\run_tests.ps1 -NoAutoDetect -Model4B <4b.gguf> # only the models given on the command line
 #
 # Parameters:
-#   -Engine zero|opencl|both   zero: bin\runz.exe + bin\serverz.exe (default), opencl: bin\run.exe + bin\server.exe
+#   -Engine zero               bin\runz.exe + bin\serverz.exe (the only engine since the OpenCL one was removed,
+#                              2026-10-20; the parameter stays for old commands)
 #   -Model4B / -Model27B / -Model35B / -ModelGemma / -ModelFlashNext   GGUF files (Flash Next: the -00001-of- shard)
 #   -DFlash27B / -DFlash35B    DFlash2 drafter folders (containing model.safetensors), zero engine only
 #   -Ref35B <file>             opt-in 35B KL check. tests\data\ref_35b_capital_all.bin is the f32 reference of the
@@ -26,12 +26,11 @@
 # an unplugged drive, are ignored). A check whose model is missing prints [SKIP] and does not fail.
 #
 # Checks: model-free unit tests (HTTP parser, API compatibility, expert-cache pools, tool-call streaming, chat
-# template rendering vs the GGUF Jinja templates, hyper-connection kernels), every quant type + kernel path of the
-# OpenCL engine against a CPU reference, tokenizer vs reference ids, next-token KL vs the f32 CPU reference, greedy
-# continuation, MTP / DFlash2 speculative decoding = plain greedy, and an OpenAI API smoke test with streaming tool
-# calls, prefix reuse and malformed requests.
+# template rendering vs the GGUF Jinja templates, hyper-connection kernels), tokenizer vs reference ids, next-token
+# KL vs the f32 CPU reference, greedy continuation, MTP / DFlash2 speculative decoding = plain greedy, and an OpenAI
+# API smoke test with streaming tool calls, prefix reuse and malformed requests (also JSON nested too deep).
 param(
-  [ValidateSet("zero", "opencl", "both")] [string]$Engine = "zero",
+  [ValidateSet("zero")] [string]$Engine = "zero",
   [string]$Model4B = "",
   [string]$Model27B = "",
   [string]$Model35B = "",
@@ -151,8 +150,8 @@ if (-not $NoAutoDetect -and (-not $SkipGpu -or $ListModels)) {
 function Have([string]$p) { return $p -and (Test-Path -LiteralPath $p) }
 function Why([string]$p, [string]$what) { if ($p) { return "$what not found: $p" } else { return "no $what" } }
 
-$engines = $(if ($Engine -eq "both") { @("zero", "opencl") } else { @($Engine) })
-$bins = @{ zero = @{ run = ".\bin\runz.exe"; server = ".\bin\serverz.exe" }; opencl = @{ run = ".\bin\run.exe"; server = ".\bin\server.exe" } }
+$engines = @("zero")
+$bins = @{ zero = @{ run = ".\bin\runz.exe"; server = ".\bin\serverz.exe" } }
 Write-Host ("arcinfer tests: engine {0}{1}" -f ($engines -join " + "), $(if ($SkipGpu) { ", model-free CPU checks only (-SkipGpu)" } else { "" }))
 if (-not $SkipGpu -or $ListModels) {
   foreach ($kv in @(@("4B", $Model4B), @("27B", $Model27B), @("35B-A3B", $Model35B), @("Flash Next", $ModelFlashNext),
@@ -201,7 +200,6 @@ else {
 
 # hyper-connection kernels of zero/kernels/ops.cl (Flash Next) vs a CPU computation on random data (uses the GPU)
 if ($SkipGpu) { Skip "hyper-connection kernels (zero)" "-SkipGpu" }
-elseif ($engines -notcontains "zero") { Skip "hyper-connection kernels (zero)" "engine $Engine" }
 else { Unit "hyper-connection kernels (zero)" .\bin\test_hc.exe @() "ALL OK" }
 
 if ($SkipGpu) {
@@ -214,23 +212,6 @@ if ($SkipGpu) {
 
 try {
 # ---------------------------------------------------------------------------------------------------------------
-# 2. OpenCL kernels: GEMM (native + JIT W8), GEMV for every weight type present (bin\test_gemm.exe uses src/clrt.h)
-if ($engines -contains "opencl") {
-  Section "OpenCL kernels"
-  if (-not (Have $Model4B)) { Skip "kernels (4B types) (OpenCL kernels)" (Why $Model4B "4B model") }
-  else {
-    Write-Host "   model: $Model4B"
-    $t4 = Run-Exe .\bin\test_gemm.exe @($Model4B, "64", "blk.0.ffn_gate.weight", "blk.2.ffn_gate.weight", "blk.0.attn_qkv.weight", "blk.0.ssm_out.weight", "token_embd.weight")
-    Check "kernels (4B types) (OpenCL kernels)" ($t4 -match "ALL OK")
-  }
-  if (-not (Have $Model27B)) { Skip "kernels (27B IQ types) (OpenCL kernels)" (Why $Model27B "27B model") }
-  else {
-    Write-Host "   model: $Model27B"
-    $t27 = Run-Exe .\bin\test_gemm.exe @($Model27B, "64", "blk.0.attn_gate.weight", "blk.0.ffn_down.weight", "blk.0.ffn_gate.weight", "blk.0.ffn_up.weight", "blk.1.attn_gate.weight", "blk.1.attn_qkv.weight", "blk.1.ssm_out.weight", "blk.7.attn_q.weight", "blk.13.ffn_gate.weight", "blk.64.ffn_down.weight")
-    Check "kernels (27B IQ types) (OpenCL kernels)" ($t27 -match "ALL OK")
-  }
-}
-
 # 3. tokenizer vs reference ids (llama-tokenize --no-escape); engine independent
 Section "tokenizer"
 $prompts = @(Get-ChildItem $Data -Filter "*.prompt.txt" -ErrorAction SilentlyContinue)
@@ -270,6 +251,11 @@ foreach ($eng in $engines) {
     $o = Run-Exe $run @($Model4B, "--tokens", $ids, "--n", "9", "--mtp")
     $acc = [regex]::Match($o, "MTP: (\d+) drafts, (\d+) accepted")
     Check "$tag MTP speculative decoding (greedy identical)" ($o -match $greedy4b) ("drafts {0}, accepted {1}" -f $acc.Groups[1].Value, $acc.Groups[2].Value)
+    # 4b2. two conversations in slots: alone = interleaved = batched bit for bit, misuse refused, a slot's memory
+    #      counted in full by slot_bytes (what --ctx auto sizes with)
+    $o = Run-Exe $run @($Model4B, "--tokens", $ids, "--n", "9", "--mtp", "--slots-check")
+    Check "$tag slots: interleaved / batched bit-identical, misuse refused" ($o -match "slots check: passed") ([regex]::Match($o, "slots check: \w+").Value)
+    Check "$tag slots: memory of a slot counted" ($o -match "slot bytes: \d+ real, \d+ counted: OK") ([regex]::Match($o, "slot bytes: [^,]*, [^:]*: \w+").Value)
   }
 
   # 4c. Gemma 4 12B: next-token distributions vs its f32 CPU reference (ref_forward), greedy = llama.cpp's, and the
@@ -311,7 +297,6 @@ foreach ($eng in $engines) {
   foreach ($q in $qwen) {
     $n = "$tag $($q.name)"
     if (-not (Have $q.model)) { Skip "$n MTP / DFlash2 = greedy" (Why $q.model "$($q.name) model"); continue }
-    if ($eng -eq "opencl" -and $q.name -eq "Flash Next") { Skip "$n MTP = greedy" "the OpenCL engine has no hyper-connections"; continue }
     Write-Host "   $($q.name): $($q.model)"
     $o = Run-Exe $run @($q.model, "--tokens", $ids, "--n", "16")
     $g0 = Get-Greedy $o
@@ -322,7 +307,6 @@ foreach ($eng in $engines) {
     $g1 = Get-Greedy $o
     Check "$n MTP greedy identical" ($g1 -eq $g0) $(if ($g1 -eq $g0) { [regex]::Match($o, "MTP: [^\r\n]*").Value } else { $g1 })
     if (-not $q.dname) { continue }
-    if ($eng -eq "opencl") { Skip "$n DFlash2 greedy identical" "the OpenCL engine has no DFlash2"; continue }
     if (-not (Have $q.dflash)) { Skip "$n DFlash2 greedy identical" (Why $q.dflash "DFlash2 drafter ($($q.dname))"); continue }
     Write-Host "   $($q.name) DFlash2: $($q.dflash)"
     $o = Run-Exe $run @($q.model, "--tokens", $ids, "--n", "16", "--dflash", $q.dflash)
@@ -383,6 +367,12 @@ foreach ($eng in $engines) {
     $r = Raw-Http $Port "POST /v1/completions HTTP/1.1`r`nHost: 127.0.0.1`r`nContent-Type: application/json`r`nContent-Length: abc`r`n`r`n"
     Check "$tag Content-Length abc -> 400" ((Status-Line $r) -match "^HTTP/1\.[01] 400") (Status-Line $r)
     Check "$tag /health after the malformed Content-Length" (Health $Port)
+
+    # JSON nested past the parser's limit: 400, not a stack overflow of the connection's thread
+    $body = '{"messages":' + ('[' * 100000) + (']' * 100000) + '}'
+    $r = Raw-Http $Port ("POST /v1/chat/completions HTTP/1.1`r`nHost: 127.0.0.1`r`nContent-Type: application/json`r`nContent-Length: {0}`r`n`r`n{1}" -f [System.Text.Encoding]::UTF8.GetByteCount($body), $body)
+    Check "$tag JSON nested 100,000 deep -> 400" ((Status-Line $r) -match "^HTTP/1\.[01] 400") (Status-Line $r)
+    Check "$tag /health after the nested JSON" (Health $Port)
   } finally {
     if (-not $srv.HasExited) { Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue }
   }

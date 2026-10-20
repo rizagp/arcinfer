@@ -1,6 +1,6 @@
 # Benchmark and accuracy prompts (token ids)
 
-Comma-separated token ids, fed with `bin\run.exe <model> --tokens-file <file>`.
+Comma-separated token ids, fed with `bin\runz.exe <model> --tokens-file <file>`.
 
 | File | Tokens | Use |
 |---|---|---|
@@ -16,8 +16,8 @@ once with `tools\ref_forward`):
 $g = (Get-ChildItem "$env:USERPROFILE\.cache\huggingface\hub" -Recurse -Filter "gemma-4-12b-it-qat-q4_0.gguf" | Select-Object -First 1).FullName
 $ids = (Get-Content bench\prompts\gemma-code160.ids.txt -Raw).Trim()
 $env:REF_ALL = "1"; .\bin\ref_forward.exe $g $ids ref_g12_code160.bin; $env:REF_ALL = $null
-.\bin\run.exe $g --tokens-file bench\prompts\gemma-code160.ids.txt --kl-ref ref_g12_code160.bin --n 1        # prompt path
-.\bin\run.exe $g --tokens-file bench\prompts\gemma-code160.ids.txt --kl-ref ref_g12_code160.bin --kl-decode  # generation path
+.\bin\runz.exe $g --tokens-file bench\prompts\gemma-code160.ids.txt --kl-ref ref_g12_code160.bin --n 1        # prompt path
+.\bin\runz.exe $g --tokens-file bench\prompts\gemma-code160.ids.txt --kl-ref ref_g12_code160.bin --kl-decode  # generation path
 ```
 
 Results on 10 October 2026: prompt path 0.018, generation path 0.013 (code); generation path 0.029 (raw text).

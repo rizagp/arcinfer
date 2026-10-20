@@ -26,7 +26,7 @@ $ErrorActionPreference = "Stop"
 # the legacy pool works and is not slower (measured).
 $env:GGML_SYCL_ENABLE_VMM = "0"
 function Cool { if ($Cooldown -gt 0) { Start-Sleep -Seconds $Cooldown } }
-$arc = Join-Path $PSScriptRoot "..\bin\run.exe"
+$arc = Join-Path $PSScriptRoot "..\bin\runz.exe"
 $arcDir = Join-Path $PSScriptRoot ".."
 
 function Emit($obj) {

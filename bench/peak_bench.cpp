@@ -5,7 +5,7 @@
 int main() {
   ClRt cl;
   if (!cl.init()) return 1;
-  auto prog = cl.build(read_file("kernels/peak.cl"), "-cl-std=CL3.0 -cl-mad-enable");
+  auto prog = cl.build(read_file("bench/peak.cl"), "-cl-std=CL3.0 -cl-mad-enable");
   const size_t threads = 112 * 8 * 16 * 4;  // EUs x HW threads x SIMD16 lanes x oversubscription
   const int iters = 4096;
   auto out = cl.buffer(CL_MEM_READ_WRITE, threads * 4);

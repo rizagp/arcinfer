@@ -1,4 +1,4 @@
-// Prefill attention micro-benchmark (kernels/ops.cl attn_q8) at any head shape, with an optional sliding window.
+// Prefill attention micro-benchmark (zero/kernels/ops.cl attn_q8) at any head shape, with an optional sliding window.
 // Runs the int8 attention over an N-token prompt in chunks (like the engine) and checks sampled output rows
 // against a CPU reference computed from the same int8 q/k/v.
 // usage: attn_bench [N=11264] [chunk=4096] [extra build options...]
@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
                      "-cl-std=CL3.0 -cl-mad-enable -DHD=" + std::to_string(hd) + " -DHPG=" + std::to_string(hpg) +
                      " -DHS=" + std::to_string(hs) + " -DTPW=" + std::to_string(tpw) + " -DSB=" + std::to_string(KB) + extra;
   if (pns) opts += " -DPNS=" + std::to_string(pns) + " -DPHG=" + std::to_string(phg) + " -DPTT=" + std::to_string(ptt);
-  auto prog = cl.build(read_file("kernels/ops.cl"), opts);
+  auto prog = cl.build(read_file("zero/kernels/ops.cl"), opts);
   cl_kernel k = cl.kernel(prog, pns ? "attn_ps" : "attn_q8");
   if (pns)
     printf("nh %d nkv %d hd %d win %d | attn_ps dim groups %d, %d heads x %d tokens per sub-group, TPW %d (%d work-items)%s: "
@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
     const std::string o2 = std::string(getenv("ATT_GRF128") ? "" : "-cl-intel-256-GRF-per-thread ") +
                            "-cl-std=CL3.0 -cl-mad-enable -DHD=" + std::to_string(hd) + " -DHPG=" + std::to_string(hpg) +
                            " -DHS=" + std::to_string(hs) + " -DTPW=" + std::to_string(tq) + " -DSB=" + std::to_string(KB);
-    cl_kernel k2 = cl.kernel(cl.build(read_file("kernels/ops.cl"), o2), "attn_q8");
+    cl_kernel k2 = cl.kernel(cl.build(read_file("zero/kernels/ops.cl"), o2), "attn_q8");
     std::vector<float> o_q8((size_t)maxT * nh * hd);
     size_t ndiff = 0, nval = 0;
     double md = 0.0;

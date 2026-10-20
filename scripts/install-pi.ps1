@@ -1,6 +1,6 @@
 # One-time setup of arcinfer for Pi on this laptop (setup.cmd runs it too):
-#   - builds bin\server.exe if it is missing,
-#   - adds the "arcinfer" provider to ~/.pi/agent/models.json: every model server.exe finds (Hugging Face cache and
+#   - builds bin\serverz.exe if it is missing,
+#   - adds the "arcinfer" provider to ~/.pi/agent/models.json: every model serverz.exe finds (Hugging Face cache and
 #     %LOCALAPPDATA%\arcinfer\models) with its context for the current GPU memory (other providers are kept; the
 #     previous file is saved as models.json.bak). pi-arc refreshes the list on every start.
 #   - installs the `pi-arc` and `arc-server` commands into ~/.pi/agent/bin (already on PATH).
@@ -12,10 +12,10 @@ $binDir = Join-Path $piDir "bin"
 if (-not (Test-Path $binDir)) { throw "Pi is not installed ($binDir not found): install it from https://pi.dev and run it once." }
 
 # 1. server binary
-$exe = Join-Path $root "bin\server.exe"
+$exe = Join-Path $root "bin\serverz.exe"
 if (-not (Test-Path $exe)) {
-  Write-Host "Building bin\server.exe..."
-  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "build.ps1") tools\server.cpp
+  Write-Host "Building bin\serverz.exe..."
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "build.ps1") zero\serverz.cpp
   if ($LASTEXITCODE -ne 0) { throw "build failed" }
 }
 

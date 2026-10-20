@@ -8,7 +8,7 @@ int main(int argc, char** argv) {
   const int seconds = argc > 1 ? atoi(argv[1]) : 90;
   ClRt cl;
   if (!cl.init()) return 1;
-  auto prog = cl.build(read_file("kernels/peak.cl"), "-cl-std=CL3.0 -cl-mad-enable");
+  auto prog = cl.build(read_file("bench/peak.cl"), "-cl-std=CL3.0 -cl-mad-enable");
   auto k = cl.kernel(prog, "peak_ss_bc_a");
   const size_t threads = 112 * 8 * 16 * 4;
   const int iters = 4096;

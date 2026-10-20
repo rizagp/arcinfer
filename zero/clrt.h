@@ -1,5 +1,5 @@
 // arcinferzero: the subset of the OpenCL API the arcinfer engine uses, implemented on Level Zero, so that
-// zero/engine.h (a copy of src/engine.h) runs unchanged on top of it. Buffers are device USM allocations (a sub-buffer is
+// zero/engine.h (begun as a copy of the OpenCL engine's src/engine.h) runs unchanged on top of it. Buffers are device USM allocations (a sub-buffer is
 // a pointer into its parent), commands go to one in-order immediate command list (the same order as arcinfer's in-order
 // OpenCL queue, hence the same results), and kernels are the native binaries of the OpenCL compiler: built through
 // OpenCL.dll (loaded under other names) and shared with arcinfer's kernel cache (%LOCALAPPDATA%\arcinfer\kernels).

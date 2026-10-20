@@ -1,7 +1,7 @@
 """f32 reference of the Gemma 4 vision encoder (mmproj gemma4v: E2B / E4B), written from the mmproj and llama.cpp's
 tools/mtmd/models/gemma4v.cpp (FFN: gelu_tanh, as Google's config). Compares with the GPU encoder's output that
-tools/vision_test.exe writes (<image>.g4v.bin, and the resized pixels <image>.g4v.rgb).
-usage: python gemma4v_ref.py mmproj.gguf image.png   (after: vision_test model.gguf mmproj.gguf image.png 70)"""
+bin/vision_testz.exe writes (<image>.g4v.bin, and the resized pixels <image>.g4v.rgb).
+usage: python gemma4v_ref.py mmproj.gguf image.png   (after: vision_testz model.gguf mmproj.gguf image.png 70)"""
 import struct
 import sys
 

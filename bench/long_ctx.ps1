@@ -1,6 +1,6 @@
 # Prompt processing and generation speed at growing context depth, for every model given (or the usual ones in the
 # Hugging Face cache). For each depth N: one N-token prompt (average prompt tok/s), then 32 generated tokens at that
-# depth (generation tok/s). Plain decoding (no MTP), as run.exe --bench-pp.
+# depth (generation tok/s). Plain decoding (no MTP), as runz.exe --bench-pp.
 #   .\bench\long_ctx.ps1 [-Depths 512,16384,32768,65536] [-Models path1,path2] [-Out bench\results\long_ctx.txt]
 param(
   [int[]]$Depths = @(512, 16384, 32768, 65536),
@@ -27,7 +27,7 @@ $env:ARC_BENCH_RUNS = "1"
 foreach ($m in $Models) {
   $name = Split-Path $m -Leaf
   foreach ($d in $Depths) {
-    $o = & .\bin\run.exe $m --bench-pp $d --n $Gen 2>&1 | Out-String
+    $o = & .\bin\runz.exe $m --bench-pp $d --n $Gen 2>&1 | Out-String
     $pp = [regex]::Match($o, "pp\d+ run 0: ([\d.]+) ms\s+->\s+([\d.]+) tokens/s")
     $tg = [regex]::Match($o, "tg\d+: [\d.]+ ms\s+->\s+([\d.]+) tokens/s")
     $line = if ($pp.Success -and $tg.Success) {

@@ -1,4 +1,4 @@
-# arcinfer launcher: a window with every model (and variant) server.exe finds, what each supports, how its automatic
+# arcinfer launcher: a window with every model (and variant) serverz.exe finds, what each supports, how its automatic
 # context was counted (GPU memory by part), every server option, and the running server (state, GPU memory,
 # requests and speeds). Start / Stop go through arc-server.ps1, so the server keeps running after the window closes.
 # Start it with arc-launcher.cmd (project folder) or:  pwsh -STA -File scripts\arc-launcher.ps1
@@ -13,10 +13,9 @@ $root = Split-Path $PSScriptRoot -Parent
 $arcServer = Join-Path $PSScriptRoot "arc-server.ps1"
 $stateDir = Join-Path $env:LOCALAPPDATA "arcinfer"
 New-Item -ItemType Directory -Force $stateDir | Out-Null
-# the engine (arc-server.ps1 -Zero): arcinfer (bin\server.exe) or arcinferzero
-# (bin\serverz.exe: MoE experts streamed from the SSD); the model list and its contexts come from that executable
-$script:engine = "zero"  # (the default engine since 2026-10-16; arcinfer = OpenCL)
-function Exe { Join-Path $root $(if ($script:engine -eq "zero") { "bin\serverz.exe" } else { "bin\server.exe" }) }
+# the engine: arcinferzero (bin\serverz.exe; MoE experts streamed from the SSD); the model list and its contexts come
+# from it (the OpenCL engine, bin\server.exe, was removed on 2026-10-20)
+function Exe { Join-Path $root "bin\serverz.exe" }
 $exe = Exe
 $stateFile = Join-Path $stateDir "server.json"
 $serverLog = Join-Path $stateDir "server.log"
@@ -24,7 +23,7 @@ $shell = (Get-Process -Id $PID).Path  # the PowerShell running this window (pwsh
 function Base { "http://127.0.0.1:$([int]$portBox.Value)" }
 function GiB($b) { if ($null -eq $b) { return "-" }; "{0:N2} GiB" -f ([double]$b / 1GB) }
 
-# background work as processes writing files, collected by a timer: the model list (server.exe --list-models; up to
+# background work as processes writing files, collected by a timer: the model list (serverz.exe --list-models; up to
 # a minute per model the first time, while the automatic context is computed) and arc-server.ps1 start / stop
 $script:listProc = $null
 $script:listOut = Join-Path $env:TEMP "arc-launcher-models.json"
@@ -106,8 +105,6 @@ $noPrefixChk = New-Check "no prefix cache"
 $noSwapChk = New-Check "keep the loaded model (--no-swap: requests do not switch models)"
 $netChk = New-Check "reachable from other computers (0.0.0.0)"
 $f32Chk = New-Check "f32 attention (tests)"
-$engineBox = New-Combo @("arcinfer", "arcinferzero") 120
-$engineBox.SelectedIndex = $(if ($script:engine -eq "zero") { 1 } else { 0 })
 
 $opt = New-Object System.Windows.Forms.TableLayoutPanel
 $opt.Dock = "Fill"; $opt.ColumnCount = 2; $opt.AutoScroll = $true
@@ -127,7 +124,6 @@ $optNote = New-Label "Filled in with the best values for the selected model. Cha
 $optNote.ForeColor = [System.Drawing.Color]::DimGray
 $opt.Controls.Add($optNote); $opt.SetColumnSpan($optNote, 2)
 # the options most people change; the rest behind "Show advanced options"
-Add-Opt "Engine" $engineBox "arcinferzero: Level Zero; MoE models (35B) stream experts from the SSD: 262K with images + MTP"
 Add-Opt "Context (tokens)" $ctxBox "auto: the largest that fits"
 # the addresses other apps connect to (OpenAI / Anthropic / Ollama formats), with a Copy button each
 $apiPanel = New-Object System.Windows.Forms.FlowLayoutPanel
@@ -386,7 +382,7 @@ function Update-Status {
 function Start-List {
   if ($script:listProc -and -not $script:listProc.HasExited) { return }
   $script:exe = Exe
-  if (-not (Test-Path $script:exe)) { $msg.Text = "$(Split-Path $script:exe -Leaf) not found: build it first (.\build.ps1 $(if ($script:engine -eq 'zero') { 'zero\serverz.cpp' } else { 'tools\server.cpp' }))"; return }
+  if (-not (Test-Path $script:exe)) { $msg.Text = "$(Split-Path $script:exe -Leaf) not found: build it first (setup, or .\build.ps1 zero\serverz.cpp)"; return }
   $msg.Text = "Reading the model list (up to a minute per model the first time: the auto context is computed)..."
   Remove-Item $script:listOut -ErrorAction SilentlyContinue
   $script:listProc = Start-Process -FilePath $script:exe -ArgumentList "--list-models" -WindowStyle Hidden -PassThru `
@@ -432,7 +428,6 @@ function Start-Selected {
     [void][System.Windows.Forms.MessageBox]::Show("arcinfer does not support this model yet (architecture $($m.arch)).", "arcinfer"); return
   }
   $a = @("start", "-Model", $m.alias)
-  if ($script:engine -eq "zero") { $a += "-Zero" } else { $a += "-OpenCL" }
   foreach ($k in @($script:over.Keys)) {
     $v = $script:over[$k]
     switch ($k) {
@@ -491,10 +486,6 @@ $resetBtn.Add_Click({
 
 $startBtn.Add_Click({ Start-Selected })
 $grid.Add_CellDoubleClick({ param($s, $e) if ($e.RowIndex -ge 0) { Start-Selected } })
-$engineBox.Add_SelectedIndexChanged({
-  $script:engine = if ($engineBox.SelectedIndex -eq 1) { "zero" } else { "arcinfer" }
-  Start-List
-})
 $grid.Add_SelectionChanged({ Show-Detail; Fill-Defaults; $startBtn.Enabled = -not ($script:actProc -and -not $script:actProc.HasExited) -and $grid.SelectedRows.Count -gt 0 })
 $stopBtn.Add_Click({
     if ([System.Windows.Forms.MessageBox]::Show("Stop the server ($($script:running))? Its GPU memory is freed.", "arcinfer", "YesNo") -eq "Yes") {

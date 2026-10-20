@@ -242,8 +242,8 @@ struct ExpertStore {
       Header h{kMagic, kVersion, fp, layers.size(), (uint64_t)n_expert, file_bytes};
       memcpy(hb, &h, sizeof h);
       memcpy(hb + sizeof h, layers.data(), layers.size() * sizeof(LayerInfo));
+      struct Free { void* p; ~Free() { VirtualFree(p, 0, MEM_RELEASE); } } free_hb{hb};
       put(hb, first);
-      VirtualFree(hb, 0, MEM_RELEASE);
     }
     const int G = 32;  // experts converted per batch (in parallel)
     for (size_t l = 0; l < prefixes.size(); ++l) {
