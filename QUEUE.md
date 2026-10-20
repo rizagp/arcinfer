@@ -271,3 +271,46 @@ docs/before-after.md and a local commit (push only when asked).
 | 20.7 | Flash Next drafting | ✅ checked (2026-10-19), download waits for the user | the original `Qwen/Qwen3.8-Flash-Next` has one MTP layer (`mtp_num_hidden_layers` 1, full attention, hybrid HC), dropped from the ISTA-DASLab GGUF. Candidates: (a) `incoai/Qwen3.8-Flash-Next-DFlash2`, 1.21 GB bf16 safetensors, a 5-layer Qwen3 DFlash2 drafter (hidden 2560, block 8, selector rank 256 / top-k 16, conv kernel 2, target layers 5 / 15 / 25 / 35 / 45, sliding window 2048), the same family as the 27B / 35B drafters; (b) MTP heads as GGUF: `kingjones777/Qwen3.8-Flash-Next-MTP-Heads-GGUF` (Q4_0 variants 2.1 GB, Q4_K_M 2.8 GB, Q8_0 4.1 GB; its card: the qwen4exp MTP graph must combine the HC streams, not mean-pool them, acceptance 0.94 at n-max 1) and `drluoto/Qwen3.8-Flash-Next-MTP-GGUF`. The MTP layer is an MoE layer (its experts are most of the size), so it would stream like the main experts; DFlash2 is dense and small, the better first try. Flash Next decode is SSD-bound, so a drafter pays only when the verification pass reads the union of experts once |
 | 20.8 | Copy 4B / E4B from the D: backups to the C: Hugging Face cache | ⏳ waiting | needed for 20.4 / 20.5 (D:\models is no longer scanned); the user decides when |
 | 20.9 | Gemma 4 26B-A4B (MoE) support | ✅ text and images (2026-10-19) | 30 layers, each the dense FFN (2112, padded to 2304) and 128 experts (704, padded to 768; top 8) side by side, as llama.cpp gemma4: ffn = rmsnorm(mlp) * post_ffw_norm_1 + rmsnorm(experts(rmsnorm(x) * pre_ffw_norm_2)) * post_ffw_norm_2, router rmsnorm(x) / sqrt(E) * scale, softmax top 8 renormalized times ffn_down_exps.scale, GELU experts, gate / up rows in one tensor (ExpertStore::src); through the Qwen MoE machinery (expert file, cache, prefetch, per-tile kernels; -DESCALE, -DMOE_GELU). The router in f32 (gemv_f32): int8 router inputs alone move the reference by KL 0.035. KL against `tools/ref_forward` (now with the experts; REF_Q also rounds their inputs), 440 tokens: 0.073 prompt, 0.068 decode; the reference with every matrix input int8 per 32: 0.063 (attention inputs alone 0.047, experts 0.027, dense FFN 0.020): the model is sensitive to int8 activations, no bug left. Speed: prompt 450 tok/s (4K), 410 (8K); generation 19.6-20.6 tok/s; server ctx auto 106,496 (expert cache 72 %). Qwen 35B / Flash Next logits unchanged. Images: the vision encoder's 72-dim heads (g4v_qkv_hd; vit_attn_rows -DHD=72) and std_bias / std_scale after the pooling; embeddings against tools/gemma4v_ref.py (generalized) cosine min 0.999997, mean error 0.067 % (zero/vision_testz.cpp); the server describes a test picture correctly (1,089 image tokens). Not done: more precise attention inputs, a drafter (none on the disk), `--pack` of the 26B (the package code now knows its tensors, untested) |
+
+## F21: optimize Gemma 4 26B-A4B, target KL < 0.01 (requested 2026-10-20)
+
+The user: optimize the 26B "until done", MTP as other 26B builds have, tiling and sub-grouping too, and an
+acceptable KL divergence below 0.01. Measured on the package (`%LOCALAPPDATA%\arcinfer\zero\models\gemma-4-26B_q4_0-it`,
+experts once on disk), 480 tokens of `bench/prompts/gemma-code-11k.ids.txt` against `tools/ref_forward` (f32, now
+reading packages): engine KL 0.0985 (top token 433 / 480).
+
+Where the KL comes from (the f32 reference with one part rounded to int8 as the engine rounds it):
+
+| Rounded in the reference | KL vs f32 |
+|---|---|
+| attention q / k / v, int8 per 64 dims (the engine's KV cache and query) | **0.0955** |
+| every matrix input, int8 per 32 | 0.0756 |
+| attention matrix inputs (q / k / v / o) | 0.0674 |
+| dense ffn_down input | 0.0551 |
+| expert inputs | 0.0396 |
+| dense ffn_gate / up input | 0.0352 |
+
+Two int8 passes (the value, then its rounding residual: `tools/ref_forward` REF_Q2 / REF_ATTQ2):
+
+| In the reference | KL | top token |
+|---|---|---|
+| as the engine: every matrix input and q / k / v in one int8 pass | 0.0985 (= the engine's) | 430 / 480 |
+| **everything in two passes** | **0.0053** | **474 / 480** |
+| matrix inputs two passes, attention one | 0.0728 | 436 / 480 |
+| matrix inputs one pass, attention two | 0.0876 | 432 / 480 |
+| attention two passes, the rest f32 | 0.0099 | 473 / 480 |
+
+So both are needed (each alone leaves 0.07-0.09); with both the KL is at the model's own floor on this prompt
+(~0.005-0.01).
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 21.1 | Drafter (MTP) | ✅ 2026-10-20 | Unsloth's `mtp-gemma-4-26B-A4B-it.gguf` (gemma4-assistant, 4 blocks, 252 MB) next to the package. Verification rows were not identical to single tokens (Gemma's attn_dsplit split the keys by the last row: greedy text changed after 7 tokens, logits up to 2.2 apart); now one row per launch for every Gemma (12B / E4B were off too, by 1.3 / 0.85; now bit-identical and as fast or faster): bit-identical over 128 tokens, no speed loss at 11K. Default 3 drafts. Server, 400-token answers: code 18.8 -> 27.0 tok/s, Indonesian 19.4 -> 21.7 |
+| 21.2 | Prompt: gate / up experts through moe_rg | ✅ 2026-10-20 | F 704 padded to 768 kept the per-tile kernels; moe_rg with a GELU epilogue (accumulate 3): 4K 451 -> 506 tok/s, 8K 405 -> 457; KL 0.0985 -> 0.0993 (noise). ARC_G4_RG_GU=0: per tile |
+| 21.3 | KL: attention q / k / v in two int8 passes | ⏳ next | K / V: a second int8 array + scales per 64 dims (the KV cache 2x), the query too; scores q1.k1 + q1.k2 + q2.k1, P.(v1 + v2); Gemma's attention kernels (attn_prep_g, attn_dsplit, attn_q8, attn_swa). Gemma 4 only (26B; the 12B / E4B if measured better) |
+| 21.4 | KL: matrix inputs in two int8 passes | ⏳ | with 21.3 (both are needed): the value then its rounding residual (as Flash Next's mixers, ARC_HC_F32=4). Prompts: a second accumulating GEMM. Generation: Q4_0 GEMV / gemv_glu / moe_gateup_q / moe_down_q / lm_head (Q6_K) variants that read the weights once for both passes (two GEMVs would halve the speed) |
+| 21.5 | Prompt attention of the global layers (head 512, 8 q heads per kv head) | ⏳ | 22 % of a 14K prompt on attn_q8 (spills at HD 512); attn_ps with HPG 8, TPW 4: attention 7.9 -> 6.7 s, logits moved up to 1.5: take it after 21.3 with a KL check |
+| 21.6 | Decode attention at long context | ⏳ | attn_dsplit for 8 q heads per kv head; measure 32K-128K |
+| 21.7 | Vision encoder | ⏳ | 11.8 s per 1,092-token image (9,828 patches, 27 layers of 1152): vit_attn 53 % (f32, head 72), vit_gemm 42 % (f16 weights, ~2.2 TFLOPS); tiling / sub-groups for HD 72. The image token budget stays 1,120 (Gemma 4 also takes 70-560: the user's choice) |
+| 21.8 | MoE kernels: tiling and sub-grouping | ⏳ | generation: moe_gateup ~50 GB/s, moe_down ~37 GB/s; GROWS sweeps gave only noise (default 22.4 tok/s); a variant for 704-wide experts without the 768 padding (9 % of the reads); prompt tile size (ARC_MOE_TM) |
+| 21.9 | Context of g26 | ⏳ | the auto context keeps 3/4 of the free memory for the expert cache (57K with images); the user runs 131K by hand: measure generation at 57K / 131K / 262K, then loosen the floor for this model |

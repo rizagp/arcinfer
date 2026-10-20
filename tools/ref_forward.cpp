@@ -86,19 +86,35 @@ static const std::vector<uint8_t>& pack_matrix(int il, int m, int e, int N, int 
 
 static int hp(const std::string& k, int def = -1) { return (int)F->get_int(A + "." + k, def); }
 
+// int8 absmax rounding of v[0..n) in blocks of B; passes = 2: then the rounding residual rounded the same way and
+// added (two int8 passes, values then residual: ~14 bits), as a two-pass engine kernel would see them
+static void round_int8(float* v, size_t n, int B, int passes) {
+  for (size_t b0 = 0; b0 < n; b0 += B) {
+    const size_t b1 = std::min(n, b0 + B);
+    float amax = 0;
+    for (size_t i = b0; i < b1; ++i) amax = std::fmax(amax, std::fabs(v[i]));
+    const float d = amax / 127.0f, inv = amax > 0 ? 127.0f / amax : 0.0f;
+    float ramax = 0;
+    for (size_t i = b0; i < b1; ++i) {
+      const float q = d * std::lrintf(v[i] * inv);
+      ramax = std::fmax(ramax, std::fabs(v[i] - q));
+    }
+    const float d2 = ramax / 127.0f, inv2 = ramax > 0 ? 127.0f / ramax : 0.0f;
+    for (size_t i = b0; i < b1; ++i) {
+      const float q = d * std::lrintf(v[i] * inv);
+      v[i] = passes >= 2 ? q + d2 * std::lrintf((v[i] - q) * inv2) : q;
+    }
+  }
+}
+
 // Optional fake-quantization of matmul inputs (env REF_Q = substring of tensor names or "all",
-// REF_QB = block size): int8 absmax per block, as arcinfer does with 256-element blocks.
+// REF_QB = block size): int8 absmax per block, as arcinfer does with 256-element blocks. REF_Q2=1: two int8 passes.
 static std::vector<float> fake_quant(const std::string& name, const std::vector<float>& X, int K) {
   const char* sel = getenv("REF_Q");
   if (!sel || !(std::string(sel) == "all" || name.find(sel) != std::string::npos)) return X;
   const int B = getenv("REF_QB") ? atoi(getenv("REF_QB")) : 256;
   std::vector<float> q = X;
-  for (size_t b = 0; b < q.size(); b += B) {
-    float amax = 0;
-    for (int i = 0; i < B; ++i) amax = std::fmax(amax, std::fabs(q[b + i]));
-    const float d = amax / 127.0f, inv = amax > 0 ? 127.0f / amax : 0.0f;
-    for (int i = 0; i < B; ++i) q[b + i] = d * std::lrintf(q[b + i] * inv);
-  }
+  round_int8(q.data(), q.size(), B, getenv("REF_Q2") ? 2 : 1);
   (void)K;
   return q;
 }
@@ -218,12 +234,7 @@ static void fq_row(float* v, int n, bool is_v = false) {
   if (!getenv("REF_ATTQ")) return;
   const bool row = is_v ? getenv("REF_ATTQV_ROW") != nullptr : getenv("REF_ATTQQK_ROW") != nullptr;
   const int B = getenv("REF_ATTQB") && !row ? atoi(getenv("REF_ATTQB")) : n;
-  for (int b0 = 0; b0 < n; b0 += B) {
-    float amax = 0;
-    for (int i = b0; i < b0 + B; ++i) amax = std::fmax(amax, std::fabs(v[i]));
-    const float d = amax / 127.0f, inv = amax > 0 ? 127.0f / amax : 0.0f;
-    for (int i = b0; i < b0 + B; ++i) v[i] = d * std::lrintf(v[i] * inv);
-  }
+  round_int8(v, (size_t)n, B, getenv("REF_ATTQ2") ? 2 : 1);  // (REF_ATTQ2=1: two int8 passes)
 }
 static void gemma4_layers(const std::vector<int>& toks, std::vector<float>& x) {
   const int T = (int)toks.size(), nl = hp("block_count"), E = hp("embedding_length"), nh = hp("attention.head_count");
@@ -387,6 +398,19 @@ static void gemma4_layers(const std::vector<int>& toks, std::vector<float>& x) {
       const GgufTensor& tdn = F->get(p + "ffn_down_exps.weight");
       const int K = (int)tgu.dims[0], R2 = (int)tgu.dims[1], Fe = R2 / 2, Kd = (int)tdn.dims[0], Nd = (int)tdn.dims[1];
       const size_t rbu = tgu.nbytes / ((size_t)R2 * NE), rbd = tdn.nbytes / ((size_t)Nd * NE);
+      // row r of expert e's gate_up (gate rows 0 .. Fe-1, then up) or down matrix: from the GGUF, or for a package
+      // from its expert file (gate, up and down there as three matrices of the record)
+      auto gu_row = [&](int e, int r, float* w) {
+        if (tgu.data) return dequant_row(tgu.type, tgu.data + ((size_t)e * R2 + r) * rbu, K, w);
+        const int m = r < Fe ? 0 : 1, rr = r < Fe ? r : r - Fe;
+        const std::vector<uint8_t>& mat = pack_matrix(il, m, e, Fe, K);
+        dequant_row(tgu.type, mat.data() + (size_t)rr * (mat.size() / Fe), K, w);
+      };
+      auto dn_row = [&](int e, int n, float* w) {
+        if (tdn.data) return dequant_row(tdn.type, tdn.data + ((size_t)e * Nd + n) * rbd, Kd, w);
+        const std::vector<uint8_t>& mat = pack_matrix(il, 2, e, Nd, Kd);
+        dequant_row(tdn.type, mat.data() + (size_t)n * (mat.size() / Nd), Kd, w);
+      };
       std::vector<double> ysum((size_t)T * E, 0.0);
       std::mutex mu;
 #pragma omp parallel for schedule(dynamic, 1)
@@ -395,7 +419,7 @@ static void gemma4_layers(const std::vector<int>& toks, std::vector<float>& x) {
         const size_t nt = by_e[e].size();
         std::vector<float> w(std::max(K, Kd)), h(nt * Fe), up(nt * Fe);
         for (int r = 0; r < R2; ++r) {
-          dequant_row(tgu.type, tgu.data + ((size_t)e * R2 + r) * rbu, K, w.data());
+          gu_row(e, r, w.data());
           for (size_t j = 0; j < nt; ++j) {
             const float* xv = &ein[(size_t)by_e[e][j].first * E];
             double acc = 0;
@@ -407,7 +431,7 @@ static void gemma4_layers(const std::vector<int>& toks, std::vector<float>& x) {
         h = fake_quant(p + "ffn_down_exps.weight", h, Fe);
         std::vector<double> y(nt * Nd, 0.0);
         for (int n = 0; n < Nd; ++n) {
-          dequant_row(tdn.type, tdn.data + ((size_t)e * Nd + n) * rbd, Kd, w.data());
+          dn_row(e, n, w.data());
           for (size_t j = 0; j < nt; ++j) {
             double acc = 0;
             for (int k = 0; k < Kd; ++k) acc += (double)w[k] * h[j * Fe + k];

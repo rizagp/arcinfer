@@ -30,8 +30,16 @@ int main(int argc, char** argv) {
     int n_tok, W, H;
     vis.plan(im.w, im.h, W, H);
     std::vector<float> gpu = vis.encode(im, n_tok);
+    eng.profile = getenv("ARC_PROF") != nullptr;  // (ARC_PROF=1: GPU time per kernel of the second run)
     gpu = vis.encode(im, n_tok);  // (the second run: kernels built)
     printf("image %dx%d -> %dx%d, %d tokens, GPU encoder %.1f ms\n", im.w, im.h, W, H, n_tok, vis.encode_ms);
+    if (eng.profile) {
+      double total = 0;
+      std::vector<std::pair<double, std::string>> rows;
+      for (auto& [n, ms] : eng.prof_ms) { total += ms; rows.push_back({ms, n}); }
+      std::sort(rows.rbegin(), rows.rend());
+      for (auto& [ms, n] : rows) printf("  %-14s %9.1f ms  %5.1f%%  (%d launches)\n", n.c_str(), ms, 100 * ms / total, eng.prof_n[n]);
+    }
     const ImageRGB r = img::resize_bicubic(im, W, H);
     FILE* fo = fopen((std::string(argv[3]) + ".g4v.bin").c_str(), "wb");
     int hdr[3] = {n_tok, vis.n_out, 0};

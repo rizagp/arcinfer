@@ -3614,7 +3614,15 @@ class Engine {
         continue;
       }
       if (!drafter && hp.gemma) {
-        const int n = std::min(left, left <= 2 ? left : hpg <= 4 ? 4 : 2), tr = n <= 1 ? 1 : n <= 2 ? 2 : 4;
+        // (one row per launch, as a single token at that position: the key split, the heads per sub-group and the
+        //  partial sums are then those of decoding the row's token alone, so a verification row is bit-identical
+        //  to it. Several rows per launch (ARC_GEMMA_VROWS=1, before 20 Oct) read each K/V byte once for all rows but
+        //  split the keys by the last row's position: drafter logits up to 2.2 (26B) / 1.3 (12B) / 0.85 (E4B) off
+        //  plain decoding, the 26B's greedy text changed after 7 tokens. Speed with the drafter, short / 11K prompt:
+        //  12B 21.3 -> 23.2 / 14.8 -> 14.9, E4B 47.4 -> 48.9 / 30.9 -> 30.0, 26B 21.0 -> 21.0 at 11K)
+        static const bool vrows = getenv("ARC_GEMMA_VROWS") && atoi(getenv("ARC_GEMMA_VROWS")) != 0;
+        const bool one_row = !vrows;
+        const int n = one_row ? 1 : std::min(left, left <= 2 ? left : hpg <= 4 ? 4 : 2), tr = n <= 1 ? 1 : n <= 2 ? 2 : 4;
         int hg = 1;  // q heads per sub-group: at most 4 (row, head) pairs (registers)
         for (int h : {4, 3, 2, 1})
           if (hpg % h == 0 && h * tr <= 4) { hg = h; break; }
@@ -4272,7 +4280,11 @@ class Engine {
     // 0.0230 with both).
     const bool gemm_ok = moe_group_ > 0 && Fp == F && moe_gemm_layer_ok(L);
     const bool rg_ok = !no_rg && hp.moe_std && tm == 16 && T >= rg_min && F % 64 == 0 && moe_rg_layer_ok(L);
-    const bool use_rg = rg_ok && gemm_ok && T < rg_max, rg_down = rg_ok && (T < rg_max || !gemm_ok);
+    // (Gemma 4 26B-A4B, F 704 padded to 768: no decode + GEMM, so gate / up take moe_rg at every chunk size from
+    //  rg_min as the down projection does; ARC_G4_RG_GU=0: per tile)
+    static const bool g4_rg_gu = !getenv("ARC_G4_RG_GU") || atoi(getenv("ARC_G4_RG_GU")) != 0;
+    const bool use_rg = rg_ok && ((gemm_ok && T < rg_max) || (g4 && !gemm_ok && g4_rg_gu)),
+               rg_down = rg_ok && (T < rg_max || !gemm_ok);
     const bool use_gemm = !use_rg && gemm_ok && tm == 16 && T >= gemm_min;
     const std::string xdef = xc_ ? " -DXCACHE" : "";
     // standard expert types, per tile (zero/kernels/decode.cl moe_gateup_q / moe_down_q): the tiles in `tiles`
@@ -4433,7 +4445,8 @@ class Engine {
                            "moe_rg");
       // (Flash Next: h rows of Fp = 768 for F = 640 values; the down projection's rows padded to Fp with zeros)
       const int Fp = hp.n_ff_exp_pad;
-      int N = i == 2 ? E : F, K = i == 2 ? Fp : E, M = i == 2 ? slots_ : Mp, ldc = i == 2 ? E : Fp, acc = i == 1 ? 2 : 0, ne = NE,
+      int N = i == 2 ? E : F, K = i == 2 ? Fp : E, M = i == 2 ? slots_ : Mp, ldc = i == 2 ? E : Fp,
+          acc = i == 1 ? (hp.gemma ? 3 : 2) : 0, ne = NE,
           um = i == 2 ? 0 : 1, us = i == 2 ? 1 : 0;
       cl_mem a = i == 2 ? mhq_ : aq_, as = i == 2 ? mhsc_ : asc_, c = i == 2 ? my_ : mh_;
       int kv = i == 2 ? F : K;
@@ -5113,7 +5126,7 @@ class Engine {
   // default MTP drafts per step (later ones chained while the block is confident, opt.mtp_min_p). With the
   // token-outer verification GEMVs (16 Oct night), code answers: 27B 3 -> 7 drafts 12.6 -> 14.7 tok/s, 35B 3 -> 5
   // 34.2 -> 38.6; Indonesian prose equal (27B 7.0, 35B 23.4 / 23.1). 9B 2, 4B 3 (not re-measured); Gemma's drafter 2.
-  int mtp_block_drafts() const { return hp.gemma ? 2 : hp.moe ? 5 : hp.n_embd >= 5120 ? 7 : hp.n_embd <= 2560 ? 3 : 2; }
+  int mtp_block_drafts() const { return hp.gemma ? (hp.moe ? 3 : 2) : hp.moe ? 5 : hp.n_embd >= 5120 ? 7 : hp.n_embd <= 2560 ? 3 : 2; }
   int max_drafts() const { return gemma_mtp_ ? 3 : std::clamp(opt.mtp_drafts, 2, kMaxDrafts); }
   // `tok` is the next token (sampled, not yet processed; it goes to position pos). Returns up to `max_drafts` greedy
   // drafts of the MTP block for the tokens after it: the second one is chained on the block's own output and only

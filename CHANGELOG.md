@@ -2,6 +2,19 @@
 
 ## 2026-10-20: the OpenCL engine removed; robustness fixes
 
+- **Gemma 4 26B-A4B with its drafter** (Unsloth's `mtp-gemma-4-26B-A4B-it.gguf`, next to the model): 3 drafts per
+  step; server answers of 400 tokens, code 18.8 -> 27.0 tok/s, Indonesian 19.4 -> 21.7.
+- **Gemma 4 drafts verified bit for bit**: a verification pass ran several rows per attention launch with the keys
+  split by the last row's position, so its logits were not those of decoding each token alone (26B: greedy text
+  changed after 7 tokens; 12B / E4B logits up to 1.3 / 0.85 off). One row per launch now: bit-identical over 128
+  tokens on the 26B, 12B and E4B, as fast or faster (12B 21.3 -> 23.2 tok/s with the drafter).
+- Gemma 4 26B prompts: the experts' gate / up through `moe_rg` with a GELU epilogue (they were per tile because of
+  the 704 -> 768 padding): 4K 451 -> 506 tok/s, 8K 405 -> 457; KL unchanged (0.0985 -> 0.0993).
+- `tools/ref_forward` reads the 26B's package (its experts from the expert file) and simulates two int8 passes
+  (`REF_Q2`, `REF_ATTQ2`): with the matrix inputs and the attention's q / k / v in two passes the 26B's KL would fall
+  from 0.0985 to 0.0053 (QUEUE F21: the plan). `runz --dump-logits` also with `--mtp`; `vision_testz` with
+  `ARC_PROF=1` prints the encoder's kernels.
+
 - **The OpenCL engine is removed** (`bin\server.exe`, `bin\run.exe`, `src/engine.h`, `kernels/`, the OpenCL copies of
   the vision / audio encoders, `tools/run.cpp`, `bitcheck`, `test_gemm`, `vision_test`, `bench/gemm_bench`, the old
   `stable/` server). arcinferzero (`bin\serverz.exe`, `bin\runz.exe`), which matched its output bit for bit on every

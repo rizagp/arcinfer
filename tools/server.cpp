@@ -2490,7 +2490,7 @@ static int list_models() {
       int chunk = m.arch == "qwen4exp" ? 2048 : moe ? 8192 : a.resident ? 512 : 4096;  // (streamed MoE first, as the engine)
       if (gemma && m.vision) chunk = std::max(chunk, 2048);  // (an image is one chunk)
       d.set("chunk", chunk);
-      d.set("mtp_drafts", !m.mtp ? 0 : !eo.dflash.empty() ? 7 : gemma ? 2 : moe ? 5 : n_embd >= 5120 ? 7 : n_embd <= 2560 ? 3 : 2);
+      d.set("mtp_drafts", !m.mtp ? 0 : !eo.dflash.empty() ? 7 : gemma ? (moe ? 3 : 2) : moe ? 5 : n_embd >= 5120 ? 7 : n_embd <= 2560 ? 3 : 2);
       d.set("image_min", !m.vision ? 0 : gemma ? 1120 : 256);
       d.set("image_max", !m.vision ? 0 : pt == "gemma4v" ? 1120 : 2048);
       d.set("think_budget", 8192);
@@ -2790,7 +2790,7 @@ int main(int argc, char** argv) {
             "                        Gemma with images at least 2048)\n"
             "  --mtp                 speculative decoding with the model's MTP block or Gemma assistant drafter\n"
             "  --mtp-drafts N        drafts per step: Qwen 1..7, Gemma 1..3 (default: 7 for Qwen 27B-class and with\n"
-            "                        DFlash2, 5 for MoE, 3 for 4B, 2 otherwise and for Gemma)\n"
+            "                        DFlash2, 5 for MoE, 3 for 4B and Gemma 4 26B, 2 otherwise)\n"
             "  --slots N             hold N conversations at once (default 1), each with its own KV cache and states\n"
             "                        of --ctx tokens (auto: the context that fits N of them; MoE with experts on the\n"
             "                        SSD: 128K in all, at least 32K each); requests in different slots take turns step\n"

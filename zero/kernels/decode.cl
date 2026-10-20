@@ -1940,6 +1940,9 @@ __kernel void moe_rg(__global const uchar* raw, int N, int K, __global const uin
       } else if (accumulate == 2) {
         const float g = as_float(intel_sub_group_block_read(cp));
         v *= g / (1.0f + exp(-g));
+      } else if (accumulate == 3) {  // (Gemma 4 experts: gelu_tanh(gate) * up, as moe_gateup_q with -DMOE_GELU)
+        const float g = as_float(intel_sub_group_block_read(cp));
+        v = 0.5f * g * (1.0f + tanh(0.7978845608f * (g + 0.044715f * g * g * g))) * v;
       }
       intel_sub_group_block_write(cp, as_uint(v));
     }

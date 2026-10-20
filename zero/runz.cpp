@@ -684,18 +684,25 @@ static int run_main(int argc, char** argv) {
       auto argmax_row = [&](const std::vector<float>& l, int r) {
         return (int)(std::max_element(l.begin() + r * V, l.begin() + (r + 1) * V) - (l.begin() + r * V));
       };
+      // (--dump-logits: the prompt's logits, then each verification pass's rows that chose a token: the same rows,
+      //  in the same order, as the plain loop below writes, so the two files compare bitwise)
+      FILE* dl = dump_logits.empty() ? nullptr : fopen(dump_logits.c_str(), "wb");
+      struct Close { FILE*& f; ~Close() { if (f) fclose(f); } } close_dl{dl};
+      if (dl) fwrite(lg.data(), sizeof(float), lg.size(), dl);
       while ((int)gen.size() < n_gen) {
         gen.push_back(tok);
         if (tok == vocab.eos || (int)gen.size() >= n_gen) break;
         const std::vector<int> drafts = eng.mtp_draft(tok, eng.opt.mtp_drafts);
         const auto& lv = eng.verify(tok, drafts);
         int acc = 0, next = argmax_row(lv, 0);
+        if (dl) fwrite(lv.data(), sizeof(float), V, dl);
         bool stop = false;
         while (acc < (int)drafts.size() && next == drafts[acc]) {
           gen.push_back(next);
           ++acc;
           if (next == vocab.eos || (int)gen.size() >= n_gen) { stop = true; break; }
           next = argmax_row(lv, acc);
+          if (dl) fwrite(lv.data() + acc * V, sizeof(float), V, dl);
         }
         eng.verify_done(acc);
         ++steps;
