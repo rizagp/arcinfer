@@ -307,6 +307,7 @@ class Server {
   struct SlotSrv {
     std::vector<int> cached;
     bool cur_saved = false, busy = false;
+    bool stale = false;  // a step of its conversation threw: its engine state is reset when it is next bound
     int last_gen_cut = 0;
     uint64_t used = 0;
     double vtime = 0;  // engine time of its request (ms; a new request starts kNewCredit behind the others)
@@ -319,17 +320,32 @@ class Server {
   std::condition_variable slot_cv_, turn_cv_;
   std::atomic<int> waiting_{0};  // requests waiting for the engine lock (to start, or for their next step)
   void use_slot(int s) {
-    if (s == cur_slot_) return;
-    eng_.bind(s);  // (first: if it throws, the server's fields still match the slot the engine holds)
-    SlotSrv& o = slots_[cur_slot_];
-    o.cached = std::move(cached_);
-    o.cur_saved = cur_saved_;
-    o.last_gen_cut = last_gen_cut_;
-    SlotSrv& n = slots_[s];
-    cached_ = std::move(n.cached);
-    cur_saved_ = n.cur_saved;
-    last_gen_cut_ = n.last_gen_cut;
-    cur_slot_ = s;
+    if (s != cur_slot_ || eng_.bound_slot() != s) {  // (the engine can be on another slot after a failed step)
+      eng_.bind(s);  // (first: if it throws, the server's fields still match the slot the engine holds)
+      if (s != cur_slot_) {
+        SlotSrv& o = slots_[cur_slot_];
+        o.cached = std::move(cached_);
+        o.cur_saved = cur_saved_;
+        o.last_gen_cut = last_gen_cut_;
+        SlotSrv& n = slots_[s];
+        cached_ = std::move(n.cached);
+        cur_saved_ = n.cur_saved;
+        last_gen_cut_ = n.last_gen_cut;
+        cur_slot_ = s;
+      }
+    }
+    if (slots_[s].stale) {
+      slots_[s].stale = false;
+      wipe_bound();
+    }
+  }
+  // the bound slot's engine state from scratch: no position, no recurrent-state snapshots
+  void wipe_bound() {
+    try {
+      eng_.reset();
+      for (int k = 0; k < kSnaps; ++k) eng_.drop_snapshot(k);
+    } catch (...) {
+    }
   }
   // the engine lock for a request (counted: the request holding it lets this one start)
   std::atomic<int> starting_{0};
@@ -442,20 +458,20 @@ class Server {
       g->batched = st.size() > 1;
     }
   }
-  // the conversation of slot k is gone (a step that threw): it starts over (prepare_prefix resets the engine there
-  // when the slot is next used; the bound slot is reset now)
+  // the conversation of slot k is gone (a step that threw): it starts over. Its engine state is wiped now when the
+  // engine holds k, else when k is next bound (use_slot)
   void drop_conversation(int k) {
     if (k == cur_slot_) {
       cached_.clear();
       cur_saved_ = false;
       last_gen_cut_ = 0;
-      if (eng_.bound_slot() == k)  // (else the engine holds another slot: prepare_prefix resets k when it is used)
-        try { eng_.reset(); } catch (...) {}
     } else {
       slots_[k].cached.clear();
       slots_[k].cur_saved = false;
       slots_[k].last_gen_cut = 0;
     }
+    if (eng_.bound_slot() == k) wipe_bound();
+    else slots_[k].stale = true;
   }
   void run_batch(const std::vector<GenStep*>& st) {
     const int V = eng_.hp.n_vocab;
