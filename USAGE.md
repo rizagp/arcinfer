@@ -153,6 +153,12 @@ arcinferzero notes:
 - Expert files are never deleted automatically: the next start uses them right away (35B about 10 s, including
   filling the GPU cache from the last list). They are rewritten only when the GGUF changes; files of an old version
   have to be deleted by hand from `%LOCALAPPDATA%\arcinfer\zero\`.
+- Disk space: a MoE model's experts are stored twice, in the GGUF and in the expert file (Gemma 4 26B: 14.4 + 13.2
+  GB). `bin\serverz.exe --pack <model.gguf>` turns them into a package in `%LOCALAPPDATA%\arcinfer\zero\models\`: a
+  small GGUF with the other weights (26B: 1.6 GB) and the expert file (moved, not written again: seconds). Copy the
+  `mmproj` file next to the package for images. The model list then uses the package, and the original GGUF can be
+  moved to a backup disk. The package gives bit-identical logits and the same image answers (checked on the 26B,
+  20 Oct; the 35B and Flash Next run from packages too).
 - GPU kernels are compiled once and then saved (`%LOCALAPPDATA%\arcinfer\kernels`): the first request of a model on
   zero, the first image, or the first use after an Intel driver update feels slower, after that it is normal.
 
