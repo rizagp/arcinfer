@@ -320,3 +320,16 @@ So both are needed (each alone leaves 0.07-0.09); with both the KL is at the mod
 | 21.8 | MoE kernels: tiling and sub-grouping | ⏳ | generation: moe_gateup ~50 GB/s, moe_down ~37 GB/s; GROWS sweeps gave only noise (default 22.4 tok/s); a variant for 704-wide experts without the 768 padding (9 % of the reads); prompt tile size (ARC_MOE_TM) |
 | 21.9 | Context of g26 | ⏳ | the auto context keeps 3/4 of the free memory for the expert cache (57K with images); the user runs 131K by hand: measure generation at 57K / 131K / 262K, then loosen the floor for this model |
 | 21.10 | KL references for the 12B and E4B | ✅ 2026-10-21: 12B 480-token reference (simulated two passes: 0.0436 -> 0.00000); `tools/ref_forward` has the per-layer embeddings now: **E4B already 0.00100 in the default mode** (476 / 480), 0.00003 with ARC_Q2 (479 / 480) | (before:) 12B: a 480-token code reference (as the 26B's) and the two-pass simulation (REF_Q2 / REF_ATTQ2) to see how far it can fall; E4B: per-layer embeddings (PLE) in `tools/ref_forward` first, then the same. The 12B / E4B take 21.3 / 21.4 only where the simulation and the engine show KL < 0.01 (or clearly lower) without breaking their drafters' identity |
+
+## F22: web search / web fetch for the web UI (requested 2026-10-21)
+
+The user wants the web UI to search and fetch the web as Pi does (Pi uses the `pi-unsloth-webtools` package).
+That package is **AGPL-3.0** (a port of Unsloth Studio's backend); arcinfer is Apache-2.0, so **do not copy, port
+or read its code**: write an independent implementation (the user chose this, option B).
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 22.1 | Server tools `web_search` / `web_fetch` | ⏳ | run by `serverz` itself (the browser cannot fetch other sites): search through the HTML result pages of Yandex / Startpage (DuckDuckGo is blocked in Indonesia), engines and order configurable; fetch through WinHTTP with a browser user agent, HTML to readable text / Markdown, size and time limits, http(s) only |
+| 22.2 | Web UI tool loop | ⏳ | the web UI sends the two tool definitions, runs the tool calls through server endpoints, shows each search / fetch in the chat, and continues the answer |
+| 22.3 | Limits and safety | ⏳ | no private / local addresses unless allowed, a per-answer tool-call cap, timeouts; documented in README / USAGE |
+
