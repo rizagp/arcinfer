@@ -3028,7 +3028,7 @@ class Engine {
 
   // Gemma's final logit soft-capping happens in the output head's GEMV (heads only ever see <= 8 rows).
   std::string head_defs(const GpuWeight& w) const {
-    if (&w != &lm_head_ || hp.softcap <= 0.0f) return "";
+    if (&w != &lm_head_ || hp.softcap <= 0.0f || q2_nocap_) return "";
     char b[48];
     snprintf(b, sizeof b, " -DSOFTCAP=%.9ef", hp.softcap);
     return b;
@@ -3070,6 +3070,7 @@ class Engine {
   cl_mem qf_ = nullptr, mh2_ = nullptr;
   size_t q2m_hq_ = 0, q2m_sc_ = 0;  // (the experts' down input: residual offsets in mhq_ / mhsc_, bytes)
   bool q2_off_ = false;
+  bool q2_nocap_ = false;  // (the output head's two passes run without their softcap epilogue)
   bool q2_att_ = !getenv("ARC_Q2_ATT") || atoi(getenv("ARC_Q2_ATT")) != 0;  // (ARC_Q2_ATT=0: the int8 attention with two-pass matrices, for KL studies)
   bool q2_kf32_ = !getenv("ARC_Q2_KF32") || atoi(getenv("ARC_Q2_KF32")) != 0;  // K rows in f32 (0: f16)  // (single pass for now: the Gemma assistant drafter keeps its own arithmetic)
   size_t q2_aq_ = 0, q2_sc_ = 0, q2_ab_ = 0;  // bytes
@@ -3087,6 +3088,10 @@ class Engine {
     fprintf(stderr, "two-pass int8 activations (ARC_Q2): on\n");
   }
   void matmul(const char* name, const GpuWeight& w, int Mp, cl_mem C, int ldc, int c_off, int acc, bool act32) {
+    // (the output head with a logit softcap: the cap applies to the sum of both passes, not to each; the head GEMVs
+    //  cap in their epilogue, so both run without it and softcap_rows caps the sum)
+    const bool cap = q2_ && !q2_off_ && &w == &lm_head_ && hp.softcap > 0.0f;
+    q2_nocap_ = cap;
     matmul1(name, w, Mp, C, ldc, c_off, acc, act32);
     if (!q2_ || q2_off_) return;
     if (acc > 1) throw std::logic_error(std::string("two-pass activations with a fused epilogue: ") + name);
@@ -3098,6 +3103,16 @@ class Engine {
     aq_ = a;
     asc_ = s;
     absum_ = b;
+    if (cap) {
+      q2_nocap_ = false;
+      if (cur_T_ > 8) throw std::logic_error("two-pass output head over more than 8 rows (no softcap there)");
+      cl_kernel k = kernel("ops", "", "softcap_rows");
+      int ld = cur_T_ == 1 ? 0 : ldc, off = c_off, N = w.N;
+      float cp = hp.softcap;
+      set_args(k, 0, C, ld, off, N, cp);
+      size_t gws[2] = {((size_t)N + 255) / 256 * 256, (size_t)cur_T_};
+      run(name, k, 2, gws, nullptr);
+    }
   }
   void matmul1(const char* name, const GpuWeight& w, int Mp, cl_mem C, int ldc, int c_off, int acc, bool act32) {
     int a = acc;

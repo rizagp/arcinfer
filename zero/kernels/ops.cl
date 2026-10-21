@@ -2023,6 +2023,15 @@ __kernel void ple_gate_quant(__global const float* g, __global const float* pl, 
   quant_store16(v, 0, m, M, NPL, aq, asc, absum, act32);
 }
 
+// Logit softcap of rows r of C (row stride ld, from column off): v = cap * tanh(v / cap), as the head GEMVs' HEAD_OUT
+// (two-pass mode: after both passes). grid (ceil(N / 256) * 256, rows).
+__kernel void softcap_rows(__global float* C, int ld, int off, int N, float cap) {
+  const int n = get_global_id(0), r = get_global_id(1);
+  if (n >= N) return;
+  __global float* p = C + (size_t)r * ld + off + n;
+  *p = cap * tanh(*p * (1.0f / cap));
+}
+
 // x[m] *= s (layer output scale applied after the per-layer-embedding block). grid (256, M_valid).
 __kernel void scale_rows(__global float* x, int K, float s) {
   const int m = get_group_id(1);
