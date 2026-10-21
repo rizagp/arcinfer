@@ -27,6 +27,19 @@ A realistic single increment is:
 
 Do not start with the attention rewrite; it is the largest part and needs GPU measurements.
 
+## Test budget (agreed with the user, 2026-10-21)
+
+Minimal tests, not the full suite per step (to save time and usage):
+
+- after each phase: build, **one** KL check on the 26B (prompt + `--kl-decode`, 480-token code prompt against
+  `ref_g26_480.bin`), and the drafter's bit-identity once (`runz --mtp --dump-logits` vs plain);
+- at the end of the session: `runz --slots-check` on the 26B with `ARC_Q2=1`, one speed run per model, and
+  `testsun_tests.ps1` once (the default mode must be unchanged);
+- skipped: knob sweeps, best-of-two at every step, Qwen runs per phase (every F21.11 change sits behind Q2 and
+  Gemma, so the Qwen paths are only checked once at the end).
+
+Order for Friday 2026-10-23 night: Phase 0 -> Phase 1 -> Phase 4 generation attention (flash-decoding), ~5-7 hours.
+
 ## Phase 0 — make Q2 explicit (required before server use)
 
 Current state:
