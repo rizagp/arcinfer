@@ -309,6 +309,9 @@ if (($Vision -eq "off" -and $m.vision) -or ($NoMtp -and $m.mtp) -or ($Vision -eq
   $v = $models | Where-Object { $_.supported -and (Same-Path $_.path $m.path) -and [bool]$_.vision -eq $wantVision -and [bool]$_.mtp -eq $wantMtp } | Select-Object -First 1
   if ($v) { $m = $v }
 }
+# a restart (another model, other options) keeps the running server's slots unless -Slots is given: pi-arc on
+# another model dropped them (and the second Pi / client then waited for the only slot)
+if (-not $PSBoundParameters.ContainsKey("Slots") -and $st -and "$($st.extra)" -match "--slots (\d+)") { $Slots = [int]$Matches[1] }
 $ctxArg = if ($Ctx) { $Ctx } elseif ($Slots -gt 1) { "auto" } elseif ($m.ctx) { "$($m.ctx)" } else { "auto" }  # (the listed context is for one slot)
 $novision = $(if ($m.vision -eq $false) { "1" } else { "0" })
 # the other options, as server arguments (also kept in the state file: a change restarts the server)
