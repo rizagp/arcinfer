@@ -336,3 +336,17 @@ or read its code**: write an independent implementation (the user chose this, op
 | 22.3 | Limits and safety | ⏳ | no private / local addresses unless allowed, a per-answer tool-call cap, timeouts; documented in README / USAGE |
 | 22.4 | Asynchronous tools (the user's design, 2026-10-21) | ⏳ | a search / fetch must not block the chat: the model's tool call starts the request on a server thread and the answer goes on (e.g. "searching ..."); the slot is free meanwhile (other requests and the user's next messages keep running); the web UI shows a pending search card; when the results arrive they are added to the conversation as the tool result and a follow-up turn discusses them (if the user wrote in between, the results come after those messages, with the call they belong to). Several searches can run at once; each result is discussed when it arrives. Cancel / timeout per search. Protocol as Claude Code's background tasks: the tool result comes back at once ("started, id #3"), so the model needs no training for waiting; when the search ends the server adds a notification message ("[search #3 for ...]: results") and starts one answer turn; the system prompt explains the protocol (results come later, by id; do not invent them). Check that small models (4B / E4B) follow it; a synchronous mode (wait, slot released meanwhile) stays as the fallback |
 
+## F24: voice conversation in the web UI, with web search (requested 2026-10-21)
+
+The user wants to talk with the AI in the web UI and have it search the web in the same conversation. Builds on F22
+(web_search / web_fetch in C++, asynchronous: the voice answer goes on, "let me look that up", and the results are
+discussed by voice when they arrive).
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 24.1 | Microphone in the web UI -> Gemma audio input | ⏳ | record in the browser, send as an audio part to Gemma E4B / 12B (their audio encoders run on the GPU; 7.2 s of speech transcribed word for word, 12 Oct); ~3-4 h with 24.2 |
+| 24.2 | Spoken answers | ⏳ | the browser's speech synthesis (Web Speech API; Windows has Indonesian voices) speaking the answer as it streams, sentence by sentence; later perhaps a local TTS model |
+| 24.3 | Conversation mode | ⏳ | listen -> answer -> speak -> listen again, end-of-speech detection, interrupting the AI by speaking |
+| 24.4 | Any chat model | ⏳ | speech to text with a separate ASR model (`unslothai/Qwen3-ASR-1.7B-GGUF` is in the HF cache; its architecture is not supported yet), then the text to any model (35B, 26B, ...); ~1-2 days |
+| 24.5 | Web search by voice | ⏳ after F22 | the F22.4 async protocol: the tool result comes back at once, the AI says it is searching, the results arrive as a notification and are spoken about |
+
