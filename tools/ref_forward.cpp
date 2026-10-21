@@ -240,7 +240,6 @@ static void gemma4_layers(const std::vector<int>& toks, std::vector<float>& x) {
   const int T = (int)toks.size(), nl = hp("block_count"), E = hp("embedding_length"), nh = hp("attention.head_count");
   const int hd_full = hp("attention.key_length"), hd_swa = hp("attention.key_length_swa", hd_full);
   const int n_swa = hp("attention.sliding_window", 0), n_layer_kv = nl - hp("attention.shared_kv_layers", 0);
-  if (hp("embedding_length_per_layer_input", 0) > 0) { fprintf(stderr, "per-layer embeddings: not in the reference\n"); exit(1); }
   const float eps = (float)F->get_float(A + ".attention.layer_norm_rms_epsilon", 1e-6);
   const double base = F->get_float(A + ".rope.freq_base", 1e6), base_swa = F->get_float(A + ".rope.freq_base_swa", 1e4);
   const auto* pat = F->get_ints(A + ".attention.sliding_window_pattern");
@@ -253,6 +252,27 @@ static void gemma4_layers(const std::vector<int>& toks, std::vector<float>& x) {
   for (int t = 0; t < T; ++t) {
     dequant_row(te.type, te.data + (size_t)toks[t] * (te.nbytes / V), E, &x[(size_t)t * E]);
     for (int i = 0; i < E; ++i) x[(size_t)t * E + i] *= std::sqrt((float)E);
+  }
+  // per-layer embeddings (E2B / E4B, as llama.cpp gemma3n / gemma4 and the engine's ple_inputs): per layer NPL values,
+  // pl = (rmsnorm(proj(x) / sqrt(E)) * w + tok_embd_pl * sqrt(NPL)) / sqrt(2); at the end of layer il,
+  // x = (x + rmsnorm(proj_il(gelu(inp_gate_il(x)) * pl[il])) * post_norm_il) * out_scale
+  const int npl = hp("embedding_length_per_layer_input", 0);
+  std::vector<float> pl;
+  if (npl > 0) {
+    matmul("per_layer_model_proj.weight", x, T, pl);  // [T][nl * npl]
+    const GgufTensor& pt = F->get("per_layer_token_embd.weight");
+    const size_t np = (size_t)nl * npl, prb = pt.nbytes / pt.dims[1];
+    const std::vector<float> pw = vecf("per_layer_proj_norm.weight");
+    std::vector<float> tok(np);
+    for (int t = 0; t < T; ++t) {
+      dequant_row(pt.type, pt.data + (size_t)toks[t] * prb, (int)np, tok.data());
+      for (int g = 0; g < nl; ++g) {
+        float* v = &pl[(size_t)t * np + (size_t)g * npl];
+        for (int i = 0; i < npl; ++i) v[i] /= std::sqrt((float)E);
+        rmsnorm(v, npl, pw.data(), eps);
+        for (int i = 0; i < npl; ++i) v[i] = (v[i] + tok[(size_t)g * npl + i] * std::sqrt((float)npl)) / std::sqrt(2.0f);
+      }
+    }
   }
   std::vector<std::vector<float>> Ks(nl), Vs(nl);
   std::vector<int> hds(nl), nkvs(nl);
@@ -454,7 +474,20 @@ static void gemma4_layers(const std::vector<int>& toks, std::vector<float>& x) {
     if (F->find(p + "layer_output_scale.weight")) scale = vecf(p + "layer_output_scale.weight")[0];
     for (int t = 0; t < T; ++t) {
       rmsnorm(&dd[(size_t)t * E], E, pf.data(), eps);
-      for (int i = 0; i < E; ++i) x[(size_t)t * E + i] = (x[(size_t)t * E + i] + dd[(size_t)t * E + i]) * scale;
+      for (int i = 0; i < E; ++i) x[(size_t)t * E + i] = (x[(size_t)t * E + i] + dd[(size_t)t * E + i]) * (npl > 0 ? 1.0f : scale);
+    }
+    if (npl > 0) {  // the per-layer embedding block, then the layer's output scale
+      std::vector<float> g, y;
+      matmul(p + "inp_gate.weight", x, T, g);  // [T][npl]
+      for (int t = 0; t < T; ++t)
+        for (int i = 0; i < npl; ++i)
+          g[(size_t)t * npl + i] = gelu_tanh(g[(size_t)t * npl + i]) * pl[((size_t)t * nl + il) * npl + i];
+      matmul(p + "proj.weight", g, T, y);  // [T][E]
+      const std::vector<float> pn = vecf(p + "post_norm.weight");
+      for (int t = 0; t < T; ++t) {
+        rmsnorm(&y[(size_t)t * E], E, pn.data(), eps);
+        for (int i = 0; i < E; ++i) x[(size_t)t * E + i] = (x[(size_t)t * E + i] + y[(size_t)t * E + i]) * scale;
+      }
     }
     fprintf(stderr, "\rlayer %d/%d", il + 1, nl);
   }

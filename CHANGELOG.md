@@ -2,6 +2,11 @@
 
 ## 2026-10-20: the OpenCL engine removed; robustness fixes
 
+- **Two-pass mode for Gemma 4 (`ARC_Q2=1`, opt-in, slow for now)**: every activation in two int8 passes (the value,
+  then its rounding residual), the experts too, and the attention in float (f32 query and K, f16 V). KL against the
+  f32 reference, 480-token code prompt: 26B 0.0985 -> 0.0045 (decode path 0.104 -> 0.0045), 12B 0.033 -> 0.0003,
+  E4B 0.0010 -> 0.00003; drafters stay bit-identical, slots too. Speed work comes next (QUEUE F21.11).
+  `tools/ref_forward` now has Gemma 4's per-layer embeddings (E2B / E4B).
 - **Gemma 4 26B-A4B with its drafter** (Unsloth's `mtp-gemma-4-26B-A4B-it.gguf`, next to the model): 3 drafts per
   step; server answers of 400 tokens, code 18.8 -> 27.0 tok/s, Indonesian 19.4 -> 21.7.
 - **Gemma 4 drafts verified bit for bit**: a verification pass ran several rows per attention launch with the keys

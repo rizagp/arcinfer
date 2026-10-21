@@ -142,6 +142,7 @@ class Engine {
     // (Flash Next: 2048, its residual is 4 streams wide)
     max_chunk = o.chunk > 0 ? o.chunk : stream_ ? (hp.hc ? 2048 : 8192) : hp.moe ? 2048 : (w8_resident ? 512 : 4096);
     max_chunk = (std::max(max_chunk, o.min_chunk) + 127) / 128 * 128;
+    q2_init();
     if (!opt.dry) build_kernels();
     load_weights();
     {
@@ -528,6 +529,7 @@ class Engine {
         if (L.kv_src < 0) {
           const size_t cap = L.swa ? swa_cap : c;
           n += 2 * (size_t)L.nkv * cap * L.hd + 2 * (size_t)L.nkv * cap * (L.hd / 64) * 4;
+          if (q2_) n += (q2_kf32_ ? 6 : 4) * (size_t)L.nkv * cap * L.hd;  // (two-pass mode: attn_fa_g's K / V rows)
         }
     } else {
       int nl = mtp_block_ ? 1 : 0;
@@ -623,7 +625,7 @@ class Engine {
       for (cl_mem* f : {&L.kq, &L.vq, &L.ksc, &L.vsc, &L.vq4, &L.vsc4, &L.conv_state, &L.S, &L.pk, &L.S_next, &L.conv_pre,
                         &L.xin, &L.qkvin, &L.abin})
         add(*f);
-      if (!opt.attn_int8) { add(L.kc); add(L.vc); }
+      if (!opt.attn_int8 || q2_) { add(L.kc); add(L.vc); }
     };
     for (auto& L : layers_) add_layer(L);
     if (mtp_block_) add_layer(mtp_);
@@ -1771,7 +1773,7 @@ class Engine {
     auto it = kcache_.find(key);
     if (it != kcache_.end()) return it->second;
     const std::string& src = which == "gemm" ? gemm_src_ : which == "decode" ? dec_src_ : which == "moe" ? moe_src_ : ops_src_;
-    auto p = cl_.build(src, "-cl-std=CL3.0 -cl-mad-enable " + defs);
+    auto p = cl_.build(src, "-cl-std=CL3.0 -cl-mad-enable " + defs + (which == "ops" ? q2_defs_ : std::string()));
     progs_.push_back(p);
     return kcache_[key] = cl_.kernel(p, name);
   }
@@ -2560,6 +2562,7 @@ class Engine {
         const Layer& S = layers_[L.kv_src];
         if (S.hd != L.hd || S.nkv != L.nkv || S.swa != L.swa) throw std::runtime_error("Gemma 4: incompatible shared KV layer");
         L.kq = S.kq; L.vq = S.vq; L.ksc = S.ksc; L.vsc = S.vsc; L.cap = S.cap;
+        L.kc = S.kc; L.vc = S.vc;
       } else {
         const size_t kvb = (size_t)L.nkv * L.cap * L.hd, scb = (size_t)L.nkv * L.cap * (L.hd / 64) * 4;
         L.kq = buf(kvb);
@@ -2568,6 +2571,12 @@ class Engine {
         L.vsc = buf(scb);
         for (cl_mem m : {L.kq, L.vq}) fill(m, kvb);
         for (cl_mem m : {L.ksc, L.vsc}) fill(m, scb);
+        if (q2_) {  // (two-pass mode: f16 K / V rows for attn_fa_g; the int8 cache stays for the drafter)
+          L.kc = buf(kvb * (q2_kf32_ ? 4 : 2));
+          L.vc = buf(kvb * 2);
+          fill(L.kc, kvb * (q2_kf32_ ? 4 : 2));
+          fill(L.vc, kvb * 2);
+        }
       }
       if (hp.n_ple) {
         L.ple_gate = load_w(p + "inp_gate.weight");
@@ -2727,7 +2736,7 @@ class Engine {
     const int ldq = hp.n_head * hp.head_dim * 2 + 2 * hp.n_head_kv * hp.head_dim;
     const int big_w = std::max({hp.conv_dim(), 2 * hp.n_ff, ldq});
     x_ = buf(M * hp.hce() * 4);
-    aq_ = buf(M * maxK);
+    aq_ = buf(M * maxK * (q2_ ? 2 : 1));
     if (hp.hc) {
       hc_xn_ = buf(M * hp.hce() * 4);
       hc_gate_ = buf(M * hp.hce() * 4);
@@ -2752,9 +2761,13 @@ class Engine {
         }
       }
     }
-    asc_ = buf(M * (maxK / 32) * 4);
-    absum_ = buf(M * (maxK / 16) * 2);
-    if (hp.gemma) {  // 16 padded rows, as single-token and verification passes use
+    asc_ = buf(M * (maxK / 32) * 4 * (q2_ ? 2 : 1));
+    absum_ = buf(M * (maxK / 16) * 2 * (q2_ ? 2 : 1));
+    if (hp.gemma && q2_) {  // (two passes: the residual at the same offsets as in aq_ / asc_ / absum_)
+      aqB_ = buf(M * maxK * 2);
+      ascB_ = buf(M * (maxK / 32) * 4 * 2);
+      absumB_ = buf(M * (maxK / 16) * 2 * 2);
+    } else if (hp.gemma) {  // 16 padded rows, as single-token and verification passes use
       aqB_ = buf((size_t)16 * hp.n_ff);
       ascB_ = buf((size_t)16 * (hp.n_ff / 32) * 4);
       absumB_ = buf((size_t)16 * (hp.n_ff / 16) * 2);
@@ -2812,6 +2825,7 @@ class Engine {
     }
     gb_ = buf(std::max<size_t>(M * 2 * hp.ssm_nv * 4, 64));
     qi_ = buf(M * hp.n_head * hp.head_dim);
+    if (q2_) qf_ = buf(M * hp.n_head * hp.head_dim * 4);  // (two-pass mode: the f32 queries of attn_fa_g)
     qsc_ = buf(M * hp.n_head * (hp.head_dim / 64) * 4);  // q scales per 64-dim block
     if (hp.gemma) {
       rope_tab_[0] = buf(M * (hp.hd_swa / 2) * 8);
@@ -2850,8 +2864,13 @@ class Engine {
         mh_ = buf(S * F * 4);
         my_ = buf(S * hp.n_embd * 4);
       }
-      mhq_ = buf(S * F);
-      mhsc_ = buf(S * (F / 32) * 4);
+      mhq_ = buf(S * F * (q2_ ? 2 : 1));
+      mhsc_ = buf(S * (F / 32) * 4 * (q2_ ? 2 : 1));
+      if (q2_) {  // (two-pass mode: the down input's residual at these offsets; the up projection apart from the gate)
+        q2m_hq_ = S * F;
+        q2m_sc_ = S * (F / 32) * 4;
+        mh2_ = buf(S * F * 4);
+      }
       msh_ = buf(M * hp.n_embd * 4);
       if (hp.gemma) {  // (Gemma 4 experts: msh_ stays zero; the dense FFN's normed output; the experts' sum)
         fill(msh_, M * hp.n_embd * 4);
@@ -3043,7 +3062,44 @@ class Engine {
   }
   // C[:, c_off : c_off+N] (+)= act * W^T for the current chunk. A single token uses the raw-row GEMV.
   // acc: 0 = store, 1 = accumulate into C, 2 = C = silu(C) * result (fused SwiGLU, GEMM path only)
+  // ---- two int8 passes (ARC_Q2=1, Gemma 4; QUEUE F21.4): every activation row is stored twice by quant_store16,
+  // the int8 values and, at fixed offsets in the same buffers, their rounding residual in int8; a matrix product
+  // runs on both and adds them (the f32 reference simulating this: Gemma 4 26B KL 0.0985 -> 0.0053 together with
+  // two-pass attention). The offsets come from alloc_buffers' sizes (max_chunk rows of the widest input).
+  bool q2_ = false;
+  cl_mem qf_ = nullptr, mh2_ = nullptr;
+  size_t q2m_hq_ = 0, q2m_sc_ = 0;  // (the experts' down input: residual offsets in mhq_ / mhsc_, bytes)
+  bool q2_off_ = false;
+  bool q2_att_ = !getenv("ARC_Q2_ATT") || atoi(getenv("ARC_Q2_ATT")) != 0;  // (ARC_Q2_ATT=0: the int8 attention with two-pass matrices, for KL studies)
+  bool q2_kf32_ = !getenv("ARC_Q2_KF32") || atoi(getenv("ARC_Q2_KF32")) != 0;  // K rows in f32 (0: f16)  // (single pass for now: the Gemma assistant drafter keeps its own arithmetic)
+  size_t q2_aq_ = 0, q2_sc_ = 0, q2_ab_ = 0;  // bytes
+  std::string q2_defs_;
+  void q2_init() {
+    q2_ = hp.gemma && getenv("ARC_Q2") && atoi(getenv("ARC_Q2")) != 0;
+    if (!q2_) return;
+    const size_t M = max_chunk;
+    const int maxK = std::max({hp.n_embd, hp.n_ff, hp.ssm_d_inner, hp.n_head * hp.head_dim, hp.hce(), hp.n_ff_exp_pad});
+    q2_aq_ = M * maxK;
+    q2_sc_ = M * (maxK / 32) * 4;
+    q2_ab_ = M * (maxK / 16) * 2;
+    q2_defs_ = " -DQ2_AQ=" + std::to_string(q2_aq_) + " -DQ2_SC=" + std::to_string(q2_sc_ / 4) + " -DQ2_AB=" +
+               std::to_string(q2_ab_ / 2);
+    fprintf(stderr, "two-pass int8 activations (ARC_Q2): on\n");
+  }
   void matmul(const char* name, const GpuWeight& w, int Mp, cl_mem C, int ldc, int c_off, int acc, bool act32) {
+    matmul1(name, w, Mp, C, ldc, c_off, acc, act32);
+    if (!q2_ || q2_off_) return;
+    if (acc > 1) throw std::logic_error(std::string("two-pass activations with a fused epilogue: ") + name);
+    const cl_mem a = aq_, s = asc_, b = absum_;
+    aq_ = from(a, q2_aq_);
+    asc_ = from(s, q2_sc_);
+    absum_ = from(b, q2_ab_);
+    matmul1(name, w, Mp, C, ldc, c_off, 1, act32);
+    aq_ = a;
+    asc_ = s;
+    absum_ = b;
+  }
+  void matmul1(const char* name, const GpuWeight& w, int Mp, cl_mem C, int ldc, int c_off, int acc, bool act32) {
     int a = acc;
     if (cur_T_ == 1) {
       // rows per sub-group: enough sub-groups for small N; very tall matrices (an lm_head of short rows) do better
@@ -3308,17 +3364,46 @@ class Engine {
       // (the large register file: it spilled 8.8 KB per thread; E4B 8K prompt 676 -> 685 tok/s, decode 20.4 -> 20.7;
       //  ARC_GPREP_GRF=128: the default file)
       static const bool gprep_small = getenv("ARC_GPREP_GRF") && std::string(getenv("ARC_GPREP_GRF")) == "128";
-      cl_kernel k = kernel("ops", (gprep_small ? std::string() : std::string("-cl-intel-256-GRF-per-thread ")) + hdo, "attn_prep_g");
+      cl_kernel k = kernel("ops", (gprep_small ? std::string() : std::string("-cl-intel-256-GRF-per-thread ")) + hdo +
+                                      (q2_kf32_ ? " -DKF32" : ""), "attn_prep_g");
       float eps = hp.eps, base = L.swa ? hp.rope_base_swa : hp.rope_base, qscale = 1.0f;  // Gemma 4: no 1/sqrt(d)
       int pp = p0, hv = L.has_v ? 1 : 0, uff = L.rope_ff ? 1 : 0, cap = L.cap, nn = nh, nk = nkv, ld = ldq, TT = Tq;
       cl_mem rt = rope_table(L.swa ? 0 : 1, hd, base, L.rope_ff, Tq);
       set_args(k, 0, from(big_, (size_t)r0 * ldq * 4), ld, nn, nk, hv, L.q_norm, L.k_norm, TT, pp, eps, base,
                L.rope_ff ? L.rope_ff : L.q_norm, uff, qscale, qi_, qsc_, L.kq, L.ksc, L.vq, L.vsc, cap, rt);
+      int f16 = q2_ && q2_att_ ? 1 : 0;
+      set_args(k, 22, f16, q2_ ? from(qf_, (size_t)r0 * nh * hd * 4) : qsc_, q2_ ? L.kc : qsc_, q2_ ? L.vc : qsc_);
       size_t gws[2] = {(size_t)(nh + (own_kv ? nkv : 0)) * 16, (size_t)Tq}, lws[2] = {16, 1};
       run("attn_prep", k, 2, gws, lws);
     };
     const std::string ao = attn_opts(hd, hpg);
-    if (!batch_.empty()) {  // a batched pass (T <= 8): each sequence's rows with its slot's caches and position
+    // (two-pass mode: float attention over the f16 rows for every pass; rows r0 .. r0 + n at position p0)
+    auto fa_g = [&](int r0, int n, int p0) {
+      const int gq = hpg <= 4 ? hpg : 4;
+      cl_kernel k = kernel("ops", std::string(q2_kf32_ ? "-DKF32 " : "") + "-cl-intel-256-GRF-per-thread -DFA_G -DHD=" + std::to_string(hd) + " -DGQ=" +
+                                      std::to_string(gq), "attn_fa_g");
+      int cp = L.cap, nn = nh, nk = nkv, pp = p0, MM = n, w = win, nlo = L.swa ? nc_lo_ : -1, nhi = L.swa ? nc_hi_ : -1;
+      set_args(k, 0, from(qf_, (size_t)r0 * nh * hd * 4), L.kc, L.vc, cp, nn, nk, pp, MM,
+               from(o_, (size_t)r0 * nh * hd * 4), w, nlo, nhi);
+      size_t gws[3] = {16, (size_t)(nh / gq), (size_t)n}, lws[3] = {16, 1, 1};
+      run(L.swa ? "attn_swa" : "attn_global", k, 3, gws, lws);
+    };
+    if (q2_ && q2_att_) {
+      if (!batch_.empty()) {
+        for (const BatchSeq& q : batch_) {
+          point_to(q.slot);
+          pos = q.pos;
+          prep(q.row, q.n, q.pos);  // (qi_ / o_ stay whole: the rows' offsets go to the kernels)
+          fa_g(q.row, q.n, q.pos);
+          int& wh = slot_host_[q.slot].written_hi;
+          wh = std::max(wh, q.pos + q.n);
+        }
+        pos = 0;
+      } else {
+        prep(0, T, pos);
+        fa_g(0, T, pos);
+      }
+    } else if (!batch_.empty()) {  // a batched pass (T <= 8): each sequence's rows with its slot's caches and position
       const cl_mem qi0 = qi_, qsc0 = qsc_, o0 = o_;
       for (const BatchSeq& q : batch_) {
         point_to(q.slot);
@@ -3338,7 +3423,7 @@ class Engine {
     } else {
       prep(0, T, pos);
     }
-    if (!batch_.empty()) {
+    if (!batch_.empty() || (q2_ && q2_att_)) {
       // (done above)
     } else if (T <= 8) {
       attn_decode_rows(L.swa ? "attn_swa" : "attn_global", L, L.cap, nkv, hpg, hd, pos, T, win);
@@ -3384,9 +3469,9 @@ class Engine {
     const int a_in = act32_for(false);
     if (!ffn_in_ready_) rmsnorm_quant(x_, 0, L.ffn_norm, E, Mp, T, a_in);
     ffn_in_ready_ = false;
-    const int fused = cur_T_ > 8 && E <= 8192 ? 1 : 0;
+    const int fused = cur_T_ > 8 && E <= 8192 && !q2_ ? 1 : 0;
     if (T <= 8 && (L.gate.type == GGML_IQ4_XS || L.gate.type == GGML_Q4_0) && L.up.type == L.gate.type &&
-        F % 32 == 0 && Mp == 16 &&
+        F % 32 == 0 && Mp == 16 && !q2_ &&
         !getenv("ARC_NO_GLU")) {
       // E2B / E4B (IQ4_XS gate / up), T <= 8: gelu(gate) * up and its quantization in the GEMV itself (gemv_glu,
       // same values as gemm_gate + gemm_up + swiglu_quant); the down projection reads it from the B buffers
@@ -4188,12 +4273,14 @@ class Engine {
     }
     // routing, then the slots grouped by expert and their tiles
     static const int tm_std = getenv("ARC_MOE_TM") ? std::max(1, atoi(getenv("ARC_MOE_TM"))) : 16;  // (standard experts: slots per decoded weight; 2048-token prompt: TM 8 416, 16 473, 32 423, 64 187 tok/s)
-    const int tm = T == 1 ? 1 : hp.moe_std ? tm_std : 16, n = T * NU;
+    // (two-pass mode, Gemma 4: every pass through the T > 1 routing and moe_rg, whose two passes it runs)
+    const bool q2g = q2_ && g4;
+    const int tm = T == 1 && !q2g ? 1 : hp.moe_std ? tm_std : 16, n = T * NU;
     const std::string defs = "-cl-intel-256-GRF-per-thread -DNE=" + std::to_string(hp.n_expert) +
                              " -DNU=" + std::to_string(NU) + " -DTM=" + std::to_string(tm) +
                              (Fp != F ? " -DFV=" + std::to_string(F) : std::string()) + (g4 ? " -DESCALE" : "");
     const std::string hld = (Fp != F ? " -DHLD=" + std::to_string(Fp) : std::string()) + (g4 ? " -DMOE_GELU" : "");
-    if (T == 1) {  // one token: its NU experts are the tiles
+    if (T == 1 && !q2g) {  // one token: its NU experts are the tiles
       cl_kernel k = kernel("moe", defs, "moe_route1");
       set_args(k, 0, rl, sgate_, mtiles_, stok_, swt_, minv_);
       if (g4) set_args(k, 6, L.escale);
@@ -4279,7 +4366,7 @@ class Engine {
     // CPU reference 0.0221 -> 0.0191 (337 tokens; max 0.96 -> 0.27); its gate / up stay per tile (15.4 vs 13.7 s, KL
     // 0.0230 with both).
     const bool gemm_ok = moe_group_ > 0 && Fp == F && moe_gemm_layer_ok(L);
-    const bool rg_ok = !no_rg && hp.moe_std && tm == 16 && T >= rg_min && F % 64 == 0 && moe_rg_layer_ok(L);
+    const bool rg_ok = !no_rg && hp.moe_std && tm == 16 && (T >= rg_min || q2g) && F % 64 == 0 && moe_rg_layer_ok(L);
     // (Gemma 4 26B-A4B, F 704 padded to 768: no decode + GEMM, so gate / up take moe_rg at every chunk size from
     //  rg_min as the down projection does; ARC_G4_RG_GU=0: per tile)
     static const bool g4_rg_gu = !getenv("ARC_G4_RG_GU") || atoi(getenv("ARC_G4_RG_GU")) != 0;
@@ -4303,7 +4390,8 @@ class Engine {
       run("moe_gateup", k, 2, gws, lws);
     };
     auto quant_h = [&] {
-      cl_kernel k = kernel("moe", defs, "moe_quant");
+      cl_kernel k = kernel("moe", defs + (q2_ ? " -DQ2M=" + std::to_string(q2m_hq_) + " -DQ2MS=" + std::to_string(q2m_sc_ / 4)
+                                             : std::string()), "moe_quant");
       int FF = Fp;
       set_args(k, 0, mh_, FF, slots_, mhq_, mhsc_);
       size_t gws[2] = {(size_t)16 * Fp / 256, (size_t)n}, lws[2] = {16, 1};
@@ -4329,7 +4417,7 @@ class Engine {
     static const bool xsplit = !getenv("ARC_XSPLIT") || atoi(getenv("ARC_XSPLIT")) != 0;
     cl_mem tiles = mtiles_;
     std::vector<int> tl1;
-    if (xc_ && T == 1 && !use_gemm && hp.moe_std && xsplit) {
+    if (xc_ && T == 1 && !use_gemm && hp.moe_std && xsplit && !q2g) {
       tl1.resize(1 + 3 * (size_t)NU);
       CL_CHECK(clEnqueueReadBuffer(cl_.queue, mtiles_, CL_TRUE, 0, tl1.size() * 4, tl1.data(), 0, nullptr, nullptr));
       xt_hit_h_.assign(1, 0);
@@ -4448,16 +4536,33 @@ class Engine {
       int N = i == 2 ? E : F, K = i == 2 ? Fp : E, M = i == 2 ? slots_ : Mp, ldc = i == 2 ? E : Fp,
           acc = i == 1 ? (hp.gemma ? 3 : 2) : 0, ne = NE,
           um = i == 2 ? 0 : 1, us = i == 2 ? 1 : 0;
-      cl_mem a = i == 2 ? mhq_ : aq_, as = i == 2 ? mhsc_ : asc_, c = i == 2 ? my_ : mh_;
       int kv = i == 2 ? F : K;
-      if (xc_)
-        set_args(k, 0, xc_->xtab[L.il], N, K, tabs_, a, as, c, M, ldc, acc, mtiles_, mtstart_, ne, stok_, um, swt_, us, kv,
-                 xc_->xtab[L.il], xoff(L, i));
-      else
-        set_args(k, 0, L.ex_q[i], N, K, tabs_, a, as, c, M, ldc, acc, mtiles_, mtstart_, ne, stok_, um, swt_, us, kv);
-      const size_t ny = ny_env > 0 ? (size_t)ny_env : max_tiles;
-      size_t gws[2] = {(size_t)N, ny}, lws[2] = {16, 1};
-      run(i == 2 ? "moe_down" : "moe_gateup", k, 2, gws, lws);
+      // (two-pass mode: the matrix on the values, then on their residual, added; the up projection into mh2_ and
+      //  the GELU product after both)
+      const int passes = q2_ ? 2 : 1;
+      for (int ps = 0; ps < passes; ++ps) {
+        cl_mem a = i == 2 ? (ps ? from(mhq_, q2m_hq_) : mhq_) : (ps ? from(aq_, q2_aq_) : aq_);
+        cl_mem as = i == 2 ? (ps ? from(mhsc_, q2m_sc_) : mhsc_) : (ps ? from(asc_, q2_sc_) : asc_);
+        cl_mem c = i == 2 ? my_ : (q2_ && i == 1 ? mh2_ : mh_);
+        int ac = q2_ ? ps : acc;
+        if (xc_)
+          set_args(k, 0, xc_->xtab[L.il], N, K, tabs_, a, as, c, M, ldc, ac, mtiles_, mtstart_, ne, stok_, um, swt_, us, kv,
+                   xc_->xtab[L.il], xoff(L, i));
+        else
+          set_args(k, 0, L.ex_q[i], N, K, tabs_, a, as, c, M, ldc, ac, mtiles_, mtstart_, ne, stok_, um, swt_, us, kv);
+        const size_t ny = ny_env > 0 ? (size_t)ny_env : max_tiles;
+        size_t gws[2] = {(size_t)N, ny}, lws[2] = {16, 1};
+        run(i == 2 ? "moe_down" : "moe_gateup", k, 2, gws, lws);
+      }
+      if (q2_ && i == 1) {
+        if (!hp.gemma) throw std::logic_error("two-pass experts: Gemma 4 only (the GELU product)");
+        cl_kernel g = kernel("moe", "-DNE=" + std::to_string(NE) + " -DNU=" + std::to_string(hp.n_expert_used) + " -DTM=16",
+                             "moe_gelu_mul");
+        int ld = Fp, fv = F;
+        set_args(g, 0, mh_, mh2_, ld, fv);
+        size_t gws[2] = {(size_t)Fp, (size_t)cur_T_ * hp.n_expert_used};  // (the pass's slots: T x NU rows)
+        run("moe_gateup", g, 2, gws, nullptr);
+      }
     }
   }
   // Experts of a prompt chunk through the int8 GEMM: part 0 = gate + up (h = silu(x Wg^T) * x Wu^T into mh_),
@@ -4552,6 +4657,8 @@ class Engine {
       cl_mem no_table = nullptr;  // the angles are computed in the kernel
       set_args(k, 0, big_, ld, nn, nk, hv, D.q_norm, D.q_norm, TT, p0, eps, base, D.rope_ff ? D.rope_ff : D.q_norm, uff,
                qscale, qi_, qsc_, TL.kq, TL.ksc, TL.vq, TL.vsc, cap, no_table);
+      int f16 = 0;
+      set_args(k, 22, f16, qsc_, qsc_, qsc_);
       size_t gws[2] = {(size_t)nh * 16, 1}, lws[2] = {16, 1};  // q heads only: the cache is the main model's
       run("draft", k, 2, gws, lws);
     }
@@ -4582,6 +4689,8 @@ class Engine {
     run("draft", k_add_norm_, 2, gws, lws);
   }
   std::vector<int> gemma_draft(int tok, int max_drafts) {
+    struct Q2Off { bool& f; bool was; ~Q2Off() { f = was; } } q2_keep{q2_off_, q2_off_};  // (the drafter: one pass)
+    q2_off_ = true;
     std::vector<int> drafts;
     cl_mem h = hlast_;
     int t = tok;

@@ -252,6 +252,31 @@ __kernel void moe_quant(__global const float* h, int F, int S, __global char* hq
   for (int i = 0; i < 16; ++i) pk[i / 4] |= (uint)(convert_int_rte(v[i] * inv) & 0xFF) << (8 * (i % 4));
   vstore4((uint4)(pk[0], pk[1], pk[2], pk[3]), 0, (__global uint*)(hq + (size_t)r * F + base));
   if ((lane & 1) == 0) hsc[((size_t)s * 8 + lane / 2) * S + r] = amax / 127.0f;
+#ifdef Q2M  // (two-pass mode: the rounding residual, same layout, Q2M bytes / Q2MS floats further on)
+  float rmax = 0.0f;
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    v[i] -= (float)convert_int_rte(v[i] * inv) * (amax / 127.0f);
+    rmax = fmax(rmax, fabs(v[i]));
+  }
+  rmax = fmax(rmax, intel_sub_group_shuffle_xor(rmax, 1));
+  const float rinv = rmax > 0.0f ? 127.0f / rmax : 0.0f;
+  uint rk[4] = {0, 0, 0, 0};
+#pragma unroll
+  for (int i = 0; i < 16; ++i) rk[i / 4] |= (uint)(convert_int_rte(v[i] * rinv) & 0xFF) << (8 * (i % 4));
+  vstore4((uint4)(rk[0], rk[1], rk[2], rk[3]), 0, (__global uint*)(hq + Q2M + (size_t)r * F + base));
+  if ((lane & 1) == 0) hsc[Q2MS + ((size_t)s * 8 + lane / 2) * S + r] = rmax / 127.0f;
+#endif
+}
+
+// (two-pass mode) h = gelu_tanh(gate) * up over the first fv columns of n rows of stride F: the gate in h, the up
+// projection in u (moe_rg wrote both in two passes each). grid (F, n).
+__kernel void moe_gelu_mul(__global float* h, __global const float* u, int F, int fv) {
+  const int c = get_global_id(0), r = get_global_id(1);
+  if (c >= fv) return;
+  const size_t i = (size_t)r * F + c;
+  const float g = h[i];
+  h[i] = 0.5f * g * (1.0f + tanh(0.7978845608f * (g + 0.044715f * g * g * g))) * u[i];
 }
 
 // y[slot][N] = weight(slot) * (h[slot] W_down^T) for one tile and 16 columns. grid (N, max_tiles), local (16, 1)

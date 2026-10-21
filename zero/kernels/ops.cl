@@ -7,6 +7,12 @@
 #ifndef SB
 #define SB 1
 #endif
+// two-pass mode's float attention: the K rows in f32 (-DKF32) or f16
+#ifdef KF32
+#define KC_T float
+#else
+#define KC_T half
+#endif
 
 inline float silu(float x) { return x / (1.0f + exp(-x)); }
 
@@ -24,11 +30,17 @@ inline void quant_store16(const float* v, int s, int m, int M, int K, __global c
   const float inv = amax > 0.0f ? 127.0f / amax : 0.0f;
   int sum = 0;
   uint pk[4] = {0, 0, 0, 0};
+#ifdef Q2_AQ
+  float res[16];  // (two passes: what the int8 values miss)
+#endif
 #pragma unroll
   for (int i = 0; i < 16; ++i) {
     const int q = convert_int_rte(v[i] * inv);
     sum += q;
     pk[i / 4] |= (uint)(q & 0xFF) << (8 * (i % 4));
+#ifdef Q2_AQ
+    res[i] = v[i] - (float)q * (amax / 127.0f);
+#endif
   }
   vstore4((uint4)(pk[0], pk[1], pk[2], pk[3]), 0, (__global uint*)(aq + (size_t)m * K + s * 256 + 16 * lane));
   absum[((size_t)s * 16 + lane) * M + m] = (ushort)(short)sum;
@@ -37,6 +49,35 @@ inline void quant_store16(const float* v, int s, int m, int M, int K, __global c
   } else if (lane == 0) {
     asc[(size_t)s * M + m] = amax / 127.0f;
   }
+#ifdef Q2_AQ
+  // the residual rounded the same way, in the same layout, Q2_AQ bytes / Q2_SC floats / Q2_AB shorts further on
+  {
+    float rmax = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) rmax = fmax(rmax, fabs(res[i]));
+    if (act32) rmax = fmax(rmax, intel_sub_group_shuffle_xor(rmax, 1));
+    else rmax = sub_group_reduce_max(rmax);
+    const float rinv = rmax > 0.0f ? 127.0f / rmax : 0.0f;
+    int rsum = 0;
+    uint rk[4] = {0, 0, 0, 0};
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+      const int q = convert_int_rte(res[i] * rinv);
+      rsum += q;
+      rk[i / 4] |= (uint)(q & 0xFF) << (8 * (i % 4));
+    }
+    __global char* aq2 = aq + Q2_AQ;
+    __global float* asc2 = asc + Q2_SC;
+    __global ushort* ab2 = absum + Q2_AB;
+    vstore4((uint4)(rk[0], rk[1], rk[2], rk[3]), 0, (__global uint*)(aq2 + (size_t)m * K + s * 256 + 16 * lane));
+    ab2[((size_t)s * 16 + lane) * M + m] = (ushort)(short)rsum;
+    if (act32) {
+      if ((lane & 1) == 0) asc2[((size_t)s * 8 + lane / 2) * M + m] = rmax / 127.0f;
+    } else if (lane == 0) {
+      asc2[(size_t)s * M + m] = rmax / 127.0f;
+    }
+  }
+#endif
 }
 
 // y = rmsnorm(x[row_off + m]) * w, quantized for the next GEMM. Optionally also stores y as f32.
@@ -1659,7 +1700,8 @@ __kernel void attn_prep_g(__global const float* qkv, int ldq, int nh, int nkv, i
                           __global const float* kn, int M_valid, int pos0, float eps, float theta_base,
                           __global const float* ff, int use_ff, float q_scale, __global char* qi,
                           __global float* qsc, __global uint* kq, __global float* ksc, __global uchar* vq,
-                          __global float* vsc, int cap, __global const float2* rt) {
+                          __global float* vsc, int cap, __global const float2* rt, int f16kv, __global float* qf,
+                          __global KC_T* kc, __global half* vc) {
   const int m = get_global_id(1), hs = get_global_id(0) / SG, lane = get_sub_group_local_id();
   if (m >= M_valid) return;
   const bool isq = hs < nh;
@@ -1722,6 +1764,23 @@ __kernel void attn_prep_g(__global const float* qkv, int ldq, int nh, int nkv, i
   for (int c = 0; c < VPL / 4; ++c) pk[c] = 0;
 #pragma unroll
   for (int i = 0; i < VPL; ++i) pk[i / 4] |= (uint)(convert_int_rte(v[i] * inv) & 0xFF) << (8 * (i % 4));
+  // (f16kv: the f32 query and f16 K / V rows for attn_fa_g as well: kc / vc [kv head][cap][HD], slot = pos % cap)
+  if (f16kv) {
+    if (isq) {
+      __global float* qd = qf + ((size_t)m * nh + hs) * HD + VPL * lane;
+#pragma unroll
+      for (int i = 0; i < VPL; ++i) qd[i] = v[i];
+    } else {
+      __global KC_T* kd = kc + ((size_t)kvh * cap + pos % cap) * HD + VPL * lane;
+#ifdef KF32
+#pragma unroll
+      for (int i = 0; i < VPL; ++i) kd[i] = v[i];
+#else
+#pragma unroll
+      for (int i = 0; i < VPL; ++i) vstore_half(v[i], 0, kd + i);
+#endif
+    }
+  }
   if (isq) {
     __global uint* dst = (__global uint*)(qi + ((size_t)m * nh + hs) * HD) + (VPL / 4) * lane;
 #pragma unroll
@@ -1759,7 +1818,105 @@ __kernel void attn_prep_g(__global const float* qkv, int ldq, int nh, int nkv, i
     ksc[(blk * SB + lane / (16 / SB)) * 16 + kk] = amax / 127.0f;
     vsc[(blk * SB + lane / (16 / SB)) * 16 + kk] = vmax / 127.0f;
   }
+  if (f16kv) {
+    __global half* vd = vc + ((size_t)kvh * cap + pos % cap) * HD + VPL * lane;
+#pragma unroll
+    for (int i = 0; i < VPL; ++i) vstore_half(raw[i], 0, vd + i);
+  }
 }
+
+// Gemma 4 attention in float (two-pass mode, QUEUE F21.3): f32 queries (qf [M][nh][HD]) against f16 K / V rows
+// (kc / vc [kv head][cap][HD], slot = position % cap, written by attn_prep_g), f32 scores, softmax and P.V; no
+// 1/sqrt(d) (Gemma 4). Query position p0 + m sees the keys lo .. hi: lo = p - win + 1 (win > 0, sliding) or 0,
+// hi = p, or nc_hi inside a non-causal span [nc_lo, nc_hi] (an image). Each row is computed alone (its result does
+// not depend on the other rows of the launch): verification rows equal single tokens. One sub-group per (GQ q heads
+// of one kv head, row); keys in blocks of 16, lane = key for the scores, lane = 16 dims per 256 for P.V.
+// grid (16, nh / GQ, M), local (16, 1, 1).
+#ifdef FA_G
+#define FDC (HD / 256)  // 256-dim chunks of a row
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __global const half* vc, int cap, int nh,
+                        int nkv, int pos0, int M_valid, __global float* out, int win, int nc_lo, int nc_hi) {
+  const int lane = get_sub_group_local_id();
+  const int hg = get_global_id(1), m = get_global_id(2);
+  if (m >= M_valid) return;
+  const int pos = pos0 + m, g = (hg * GQ) / (nh / nkv);
+  const int lo = win > 0 ? max(0, pos - win + 1) : 0;
+  const int hi = (pos >= nc_lo && pos <= nc_hi) ? nc_hi : pos;
+  __global const float* qp = qf + ((size_t)m * nh + hg * GQ) * HD;
+  __global const KC_T* kb = kc + (size_t)g * cap * HD;
+  __global const half* vb = vc + (size_t)g * cap * HD;
+  float16 o[GQ][FDC];
+  float mx[GQ], lp[GQ];
+#pragma unroll
+  for (int r = 0; r < GQ; ++r) {
+    mx[r] = -INFINITY;
+    lp[r] = 0.0f;
+#pragma unroll
+    for (int c = 0; c < FDC; ++c) o[r][c] = 0.0f;
+  }
+  for (int b = lo / 16; b <= hi / 16; ++b) {
+    const int t0 = b * 16, p = t0 + lane;
+    const bool valid = p >= lo && p <= hi;
+    float s[GQ];
+#pragma unroll
+    for (int r = 0; r < GQ; ++r) s[r] = 0.0f;
+    __global const KC_T* krow = kb + (size_t)(p % cap) * HD;
+    for (int c = 0; c < HD / 16; ++c) {
+#ifdef KF32
+      const float16 kv = valid ? vload16(0, krow + 16 * c) : (float16)0.0f;
+#else
+      const float16 kv = valid ? vload_half16(0, krow + 16 * c) : (float16)0.0f;
+#endif
+#pragma unroll
+      for (int r = 0; r < GQ; ++r) {
+        const float qc = as_float(intel_sub_group_block_read((__global const uint*)(qp + r * HD + 16 * c)));
+        float a = s[r];
+        a = fma(BC16(qc, 0), kv.s0, a);  a = fma(BC16(qc, 1), kv.s1, a);
+        a = fma(BC16(qc, 2), kv.s2, a);  a = fma(BC16(qc, 3), kv.s3, a);
+        a = fma(BC16(qc, 4), kv.s4, a);  a = fma(BC16(qc, 5), kv.s5, a);
+        a = fma(BC16(qc, 6), kv.s6, a);  a = fma(BC16(qc, 7), kv.s7, a);
+        a = fma(BC16(qc, 8), kv.s8, a);  a = fma(BC16(qc, 9), kv.s9, a);
+        a = fma(BC16(qc, 10), kv.sa, a); a = fma(BC16(qc, 11), kv.sb, a);
+        a = fma(BC16(qc, 12), kv.sc, a); a = fma(BC16(qc, 13), kv.sd, a);
+        a = fma(BC16(qc, 14), kv.se, a); a = fma(BC16(qc, 15), kv.sf, a);
+        s[r] = a;
+      }
+    }
+#pragma unroll
+    for (int r = 0; r < GQ; ++r) {
+      const float sv = valid ? s[r] : -INFINITY;
+      const float mn = fmax(mx[r], sub_group_reduce_max(sv));
+      const float corr = exp(mx[r] - mn);
+      const float pr = valid ? exp(sv - mn) : 0.0f;
+      lp[r] = lp[r] * corr + pr;
+#pragma unroll
+      for (int c = 0; c < FDC; ++c) o[r][c] *= corr;
+      mx[r] = mn;
+      s[r] = pr;
+    }
+    for (int j = 0; j < 16; ++j) {
+      const int pj = t0 + j;
+      if (pj < lo || pj > hi) continue;  // (the same for every lane)
+      __global const half* vrow = vb + (size_t)(pj % cap) * HD + 16 * lane;
+#pragma unroll
+      for (int c = 0; c < FDC; ++c) {
+        const float16 vv = vload_half16(0, vrow + 256 * c);
+#pragma unroll
+        for (int r = 0; r < GQ; ++r) o[r][c] = fma((float16)sub_group_broadcast(s[r], j), vv, o[r][c]);
+      }
+    }
+  }
+#pragma unroll
+  for (int r = 0; r < GQ; ++r) {
+    const float L = sub_group_reduce_add(lp[r]);
+#pragma unroll
+    for (int c = 0; c < FDC; ++c)
+      vstore16(o[r][c] / L, 0, out + ((size_t)m * nh + hg * GQ + r) * HD + 256 * c + 16 * lane);
+  }
+}
+#undef FDC
+#endif  // FA_G
 
 // Single-token rows: x[m] = (x[m] + rmsnorm(t[m]) * w) * s (as add_rmsnorm), then the next GEMV input from the new
 // x[m]: rmsnorm(x[m]) * w2 (or x[m] itself with w2_norm = 0) quantized like rmsnorm_quant. The new values stay in
