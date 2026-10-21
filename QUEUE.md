@@ -354,4 +354,6 @@ it streams, search results are summarised when they arrive, and the user can int
 | 24.3 | Conversation mode | ⏳ | listen -> answer -> speak -> listen again, end-of-speech detection, interrupting the AI by speaking |
 | 24.4 | Any chat model | ⏳ | speech to text with a separate ASR model (`unslothai/Qwen3-ASR-1.7B-GGUF` is in the HF cache; its architecture is not supported yet), then the text to any model (35B, 26B, ...); ~1-2 days |
 | 24.5 | Web search by voice | ⏳ after F22 | the F22.4 async protocol: the tool result comes back at once, the AI says it is searching, the results arrive as a notification and are spoken about |
+| 24.6 | Human-sounding replies | ⏳ | the user wants it to feel like talking to a person: a spoken-style system prompt (short replies, no Markdown, lists or code read aloud, numbers and abbreviations spoken naturally, asks back), quick acknowledgements ("hmm", "sebentar ya") while thinking or searching, a natural neural TTS voice for Indonesian (pick one that runs locally), fast turn-taking and interruption |
+| 24.7 | Omni (speech-to-speech) models | 💡 later | Qwen2.5-Omni / Qwen3-Omni / MiniCPM-o speak directly (talker + codec decoder, livelier intonation); check Indonesian speech output first (Qwen3-Omni's speech output may not include it); engine support is days of work |
 
