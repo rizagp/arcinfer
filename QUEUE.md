@@ -357,3 +357,16 @@ it streams, search results are summarised when they arrive, and the user can int
 | 24.6 | Human-sounding replies | ⏳ | the user wants it to feel like talking to a person: a spoken-style system prompt (short replies, no Markdown, lists or code read aloud, numbers and abbreviations spoken naturally, asks back), quick acknowledgements ("hmm", "sebentar ya") while thinking or searching, a natural neural TTS voice for Indonesian (pick one that runs locally), fast turn-taking and interruption |
 | 24.7 | Omni (speech-to-speech) models | 💡 later | Qwen2.5-Omni / Qwen3-Omni / MiniCPM-o speak directly (talker + codec decoder, livelier intonation); Qwen3-Omni understands Indonesian speech but does not speak it (user, 2026-10-21), so for Indonesian it would only be the listener (its thinker answers in Indonesian text, a TTS speaks); look for an omni model that speaks Indonesian; engine support is days of work |
 
+## F25: tool calls and Pi background monitoring (2026-10-21)
+
+A Pi extension (`~/.pi/agent/extensions/log-monitor.ts`, outside this repo) lets the model tail a log in the
+background: `monitor_start` returns at once, matching lines arrive later as messages (batched, rate-limited) and
+the chat goes on. Tested with Pi on the 35B: notifications 2-4 s after a line is written, answered while the user
+asks something else. That test showed sampled tool calls were slow (2.45 tok/s).
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 25.1 | Sampled tool calls: skip the negligible vocabulary tail in constrained sampling | ✅ 3ba7880 | 35B short call 4.8 -> 20.4 tok/s, long `write` call 24.3 (greedy 24.4); same tokens in the seeded tests |
+| 25.2 | Jump-forward in tool calls | 💡 low priority | when the constraint allows only one continuation (the tool name, `":"`, closing tokens), append it without a decode step per token; output unchanged; estimate 10-20 % on tool calls, ~half a day; MTP already drafts most of these (78/92 accepted) |
+| 25.3 | First prompt of a new session | 💡 check | Pi's 1,206-token system prompt ran at 204 tok/s on the 35B (vs ~600 on long prompts), ~6 s once per session (later turns hit the system-prompt cache); check whether expert cache misses explain it |
+
