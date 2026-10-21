@@ -325,7 +325,7 @@ int main() {
   }
   // ---- sample_allowed: the same token and the same predicate calls as before
   for (int pen = 0; pen < 2; ++pen) {
-    int bad = 0, badcalls = 0, n = 0, wide = 0;
+    int bad = 0, badcalls = 0, n = 0, wide = 0, tails = 0;
     for (int c = 0; c < 1500; ++c) {
       const int V = c % 100 == 0 ? 248320 : c % 7 == 0 ? 1 + (int)(g() % 600) : 64 + (int)(g() % 20000);
       const auto l = rand_logits(g, V, c % 3);
@@ -344,15 +344,19 @@ int main() {
         const int a = s.sample_allowed(l, rec, [&](int t) { calls_new.push_back(t); return allowed(t); });
         const int b = o.sample_allowed(l, rec, [&](int t) { calls_old.push_back(t); return allowed(t); });
         bad += a != b;
-        badcalls += calls_new != calls_old;
+        // (a negligible tail is no longer tested: then the calls stop after the first 512, a prefix of the old ones)
+        const bool cut = calls_new.size() < calls_old.size() && calls_new.size() <= 512 &&
+                         std::equal(calls_new.begin(), calls_new.end(), calls_old.begin());
+        badcalls += calls_new != calls_old && !cut;
+        tails += cut;
         wide += calls_old.size() > 512;
         if (a >= 0) rec.push_back(a);
       }
     }
-    char what[220];
+    char what[260];
     snprintf(what, sizeof what, "sample_allowed(): %s: the same tokens and predicate calls as before (%d draws, %d "
-             "past the first 512; %d tokens, %d call sequences differ)", pen ? "with penalties / bias" : "default parameters",
-             n, wide, bad, badcalls);
+             "past the first 512, %d of them a negligible tail skipped; %d tokens, %d call sequences differ)",
+             pen ? "with penalties / bias" : "default parameters", n, wide, tails, bad, badcalls);
     expect(bad == 0 && badcalls == 0, what);
   }
   if (fails) {

@@ -104,6 +104,11 @@ class Sampler {
     std::vector<int> c;
     for (int r = 0; r < V && (int)c.size() < need; ++r) {
       if (r == head) {  // too few allowed among them: the rest of the vocabulary, sorted (scratch buffer)
+        // (unless the rest is negligible: allowed tokens were found and even the most likely of the rest (at most the
+        //  head's last) is e^-20 below the first of them after temperature, so none could be drawn (each < 2e-9 of
+        //  it). Sorting and testing the whole vocabulary there made sampled tool calls ~7x slower: after a key only
+        //  ':' is allowed, so the head never holds top_k allowed tokens.)
+        if (!c.empty() && (logits[c[0]] - logits[heap_[head - 1]]) / p_.temperature > 20.0f) break;
         idx_.resize(V);
         for (int i = head; i < V; ++i) idx_[i] = i;
         for (const auto& [at, t] : out_) idx_[at] = t;
