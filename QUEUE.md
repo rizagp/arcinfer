@@ -342,6 +342,11 @@ The user wants to talk with the AI in the web UI and have it search the web in t
 (web_search / web_fetch in C++, asynchronous: the voice answer goes on, "let me look that up", and the results are
 discussed by voice when they arrive).
 
+Requirement (user, 2026-10-21): real time and without breaks. Spoken commands ("search for this", "what matters in
+it?"); speech starts after the first sentence; generation must stay above speaking speed (~4-5 tok/s), so the voice
+model needs F21.11 first if Q2 is the Gemma default (E4B Q2 ~3 tok/s today would stutter); the answer is spoken while
+it streams, search results are summarised when they arrive, and the user can interrupt at any time.
+
 | # | Item | Status | Notes |
 |---|---|---|---|
 | 24.1 | Microphone in the web UI -> Gemma audio input | ⏳ | record in the browser, send as an audio part to Gemma E4B / 12B (their audio encoders run on the GPU; 7.2 s of speech transcribed word for word, 12 Oct); ~3-4 h with 24.2 |
