@@ -11,16 +11,17 @@ Everything below this list is history plus the details of these items; a row not
 
 | Priority | Item | Section |
 |---|---|---|
-| 1 | Speed of Gemma 4's accurate two-pass mode, then it becomes the only Gemma mode (started 2026-10-22; Phase 0 done) | F21.11 |
-| 2 | Register spills (attn_fa_g 11.4 KB first; 35B / 27B / Flash Next list) | F21.12 |
-| 3 | Flash Next to KL < 0.01 (now 0.048) | F21.13 |
-| 4 | Gemma 4 26B: prompt attention, long-context decode, vision encoder, MoE tiling, auto context | F21.5-21.9 |
-| 5 | Web search / fetch in the web UI (C++, asynchronous) | F22 |
-| 6 | Voice conversation in the web UI (24.1-24.3 can go first with E4B; 24.5 after F22) | F24 |
+| ✅ 10-22 | Gemma 4 accurate mode: fast enough and the only mode (one-pass code and `--v4` removed) | F21.11 / F26.2 |
+| 1 | Register spills left (drafter attn_prep_g / attn_split, 35B moe_gateup_q variants, attn_prep, gdn_conv) | F21.12 |
+| 2 | Flash Next to KL < 0.01 (now 0.048) | F21.13 |
+| 3 | Web search / fetch in the web UI (C++, asynchronous) | F22 |
+| 4 | Voice conversation in the web UI (24.1-24.3 with E4B first; 24.5 after F22) | F24 |
+| 5 | Slim the code: audit the remaining ARC_* switches, split engine.h by model family | F26.1 / F26.3 |
+| 6 | Gemma 4 26B leftovers: vision encoder (11.8 s per image), auto context, prompt speed (two-pass prompt ~220 vs ~525 tok/s) | F21.5-21.9 |
 | 7 | Batch decode for E4B and Flash Next | F20.5 / F20.6 |
-| 8 | Copy 4B / E4B (and 12B) from the D: backups to C: (the user decides) | F20.8 |
-| 9 | Slim the code after F21.11: audit the ARC_* switches, drop lost experiments and the inaccurate Gemma path | F26 |
-| 10 | Flint (unsloth/flint-GGUF, MoE 256 experts): new architecture | F28 |
+| 8 | Flint (unsloth/flint-GGUF on D:, MoE 256 experts): new architecture | F28 |
+| 9 | Copy 4B / E4B / 12B from D: to C: (the user decides) | F20.8 |
+| later | Remote access through Cloudflare (Origin https, login) | F27 |
 | low | Jump-forward in tool calls; first prompt of a new session | F25.2 / F25.3 |
 | parked | Fused FFN gate + up and small DeltaNet kernels (F17.2); review leftovers (F18.14); 35B expert decode once per layer (F19.6); larger staging (F19.2) | |
 
