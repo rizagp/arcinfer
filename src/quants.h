@@ -590,12 +590,9 @@ inline bool is_w8_type(uint32_t t) {
 }
 // W8x8 GEMM variant (zero/kernels/gemm8.cl VARIANT 0..4) for a decoded GGUF type.
 // Types with mins (Q2_K/Q4_K/Q5_K) are requantized to signed int8 by decode_w8_sb (no min term in the GEMM: 3x the
-// speed of the scales + mins variants 2/3, about 0.5 % weight error). ARC_W8_MINS=1 selects the scales + mins form
-// (experimental: currently less accurate end to end, see docs/archive/review_notes.md).
-inline bool w8_requant(uint32_t t) {
-  static const bool mins = getenv("ARC_W8_MINS") != nullptr;
-  return !mins && (t == GGML_Q2_K || t == GGML_Q4_K || t == GGML_Q5_K);
-}
+// speed of the scales + mins variants 2/3, about 0.5 % weight error; the scales + mins form was less accurate end to
+// end, docs/archive/review_notes.md).
+inline bool w8_requant(uint32_t t) { return t == GGML_Q2_K || t == GGML_Q4_K || t == GGML_Q5_K; }
 inline int w8_variant(uint32_t t) {
   if (t == GGML_Q8_0 || t == GGML_Q4_0 || t == GGML_IQ4_NL || t == GGML_Q2_0)
     return 4;  // per-32 f32 scales (the GEMM runs them as its native Q8_0 form)

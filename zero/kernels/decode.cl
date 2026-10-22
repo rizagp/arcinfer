@@ -367,8 +367,8 @@ inline void decode32(const uchar* p, int ib, const uint* grid, const uint* aux, 
 }
 
 // raw GGUF rows -> W8 GEMM layout: [g][s][j][w=0..15][lane] uint words and [g][s][10][lane] uint headers
-// (d, dmin, sc[16] bytes, mn[16] bytes; Q8_0 stores the f32 scale of each 32-block in header word ib).
-// One work-item per (row n, 32-element block); grid (N, K/32).
+// (d, dmin, sc[16] bytes, mn[16] bytes; Q8_0 stores the f32 scale of each 32-block in header word ib), by the
+// decode_w8_* kernels below.
 #ifndef GL
 #define GL 16
 #endif
@@ -389,45 +389,7 @@ inline void decode32(const uchar* p, int ib, const uint* grid, const uint* aux, 
 #endif
 // row n, superblock sb of an expert matrix starting at b (its address read once per work-item: XBASE)
 #define XR(b, n, sb) ((b) + ((size_t)(n) * nsb + (sb)) * BBP)
-__kernel void decode_w8(__global const uchar* raw, int N, int K, __global const uint* tabs, __global uint* wq,
-                        __global uint* wh) {
-  const int n = get_global_id(0), b32 = get_global_id(1);
-  const int nsb = K / 256, s = b32 / 8, ib = b32 % 8, g = n / GL, lane = n % GL;
-  uint w[8];
-  int sc0, sc1, mn0, mn1;
-  float d, dmin;
-#ifdef GRID_OFF
-  const uint* grid = tabs + GRID_OFF;
-#else
-  const uint* grid = tabs;
-#endif
-#ifdef AUX_OFF
-  const uint* aux = tabs + AUX_OFF;
-#else
-  const uint* aux = tabs;
-#endif
-  decode32(raw + ((size_t)n * nsb + s) * BBP, ib, grid, aux, w, &sc0, &sc1, &mn0, &mn1, &d, &dmin);
-  __global uint* dst = wq + (((size_t)g * nsb + s) * 4 + ib / 2) * 16 * GL + (ib % 2) * 8 * GL + lane;
-#pragma unroll
-  for (int k = 0; k < 8; ++k) dst[k * GL] = w[k];
-  __global uint* hd = wh + ((size_t)g * nsb + s) * HSTR * GL;
-#if PER32
-  hd[ib * GL + lane] = as_uint(d);
-#else
-  if (ib == 0) {
-    hd[0 * GL + lane] = as_uint(d);
-    hd[1 * GL + lane] = as_uint(dmin);
-  }
-  __global uchar* hb = (__global uchar*)hd;
-  const int b0 = 2 * ib, b1 = 2 * ib + 1;
-  hb[((2 + b0 / 4) * GL + lane) * 4 + b0 % 4] = (uchar)(char)sc0;
-  hb[((2 + b1 / 4) * GL + lane) * 4 + b1 % 4] = (uchar)(char)sc1;
-  hb[((6 + b0 / 4) * GL + lane) * 4 + b0 % 4] = (uchar)mn0;
-  hb[((6 + b1 / 4) * GL + lane) * 4 + b1 % 4] = (uchar)mn1;
-#endif
-}
-
-// Same conversion, one work-item per (row, superblock) with the codebooks staged in local memory once per
+// The conversion, one work-item per (row, superblock) with the codebooks staged in local memory once per
 // work-group. grid (N, K/256), local (LSZ, 1) with LSZ dividing N.
 __kernel void decode_w8_sb(__global const uchar* raw, int N, int K, __global const uint* tabs, __global uint* wq,
                            __global uint* wh XARGS_W8) {

@@ -2236,7 +2236,7 @@ class Engine {
   void decode_w8_x(const Layer& L, int i, int e0, int G, int N, int K) {
     const uint32_t type = L.ex_type[i];
     const int nsb = K / 256;
-    const bool sl = !getenv("ARC_NO_W8_SL") && !w8_requant(type) && nsb <= 16 && N % 16 == 0 &&
+    const bool sl = !w8_requant(type) && nsb <= 16 && N % 16 == 0 &&
                     16 * nsb * raw_padded_sb_bytes(type) <= 32768 && type != GGML_IQ1_M;
     cl_mem tab = xc_->xtab[L.il];
     int NN = G * N, xo = xoff(L, i);
@@ -2900,23 +2900,18 @@ class Engine {
   void decode_w8(cl_mem raw, uint32_t type, int N, int K, cl_mem dq, cl_mem dh) {
     // big-codebook types decode faster per superblock with the codebook in local memory; the rest per 32-block
     // one work-item per (row, superblock): the superblock is vector-loaded into registers and the codebook staged in
-    // local memory (27B, 11K prompt: IQ3_S / IQ4_XS / IQ3_XXS 5.8 -> 2.2 s); ARC_W8_SB=0: the per-32-block kernel,
-    // which reads global memory byte by byte (A/B tests; requantized types always go per superblock)
-    static const bool per32 = getenv("ARC_W8_SB") && atoi(getenv("ARC_W8_SB")) == 0;
+    // local memory (27B, 11K prompt: IQ3_S / IQ4_XS / IQ3_XXS 5.8 -> 2.2 s than a per-32-block kernel)
     static const bool by_type = getenv("ARC_PROF_W8TYPE") != nullptr;  // (profiling: decode time per weight type)
     const std::string nm = by_type ? std::string("decode_w8_") + ggml_type_name(type) : std::string("decode_w8");
-    const bool per_sb = !per32 || w8_requant(type);
     // Q8_0 / Q4_0 with their vector block decoder (vblock, decode_w8_vb): 3x faster than decode_w8_sb. (For the
     // codebook types it was slower: each lane loads its own superblock, 16 cache lines per load instruction.)
-    static const bool no_vb = getenv("ARC_NO_W8_VB") != nullptr;
     size_t lx = 256;
     while (N % lx) lx /= 2;
-    const bool vb = !no_vb && per_sb && lx >= 64 && (type == GGML_Q8_0 || type == GGML_Q4_0);
+    const bool vb = lx >= 64 && (type == GGML_Q8_0 || type == GGML_Q4_0);
     // whole rows of up to 16 superblocks, staged in local memory with coalesced loads (decode_w8_sl): types without
     // mins (Qwen3.6 35B prompt experts, 2048-token chunk: IQ3_XXS 1038 -> 518 ms, IQ4_XS 433 -> 303 ms)
-    static const bool no_sl = getenv("ARC_NO_W8_SL") != nullptr;
     const int nsb = K / 256;
-    const bool sl = !no_sl && per_sb && !w8_requant(type) && nsb <= 16 && N % 16 == 0 &&
+    const bool sl = !w8_requant(type) && nsb <= 16 && N % 16 == 0 &&
                     16 * nsb * raw_padded_sb_bytes(type) <= 32768 && type != GGML_IQ1_M;
     if (sl) {
       cl_kernel k = kernel("decode", "-DQT=" + std::to_string(type) + " -DSL_NSB=" + std::to_string(nsb), "decode_w8_sl");
@@ -2925,15 +2920,10 @@ class Engine {
       run(nm.c_str(), k, 1, &g1, &l1);
       return;
     }
-    cl_kernel k = kernel("decode", "-DQT=" + std::to_string(type), vb ? "decode_w8_vb" : per_sb ? "decode_w8_sb" : "decode_w8");
+    cl_kernel k = kernel("decode", "-DQT=" + std::to_string(type), vb ? "decode_w8_vb" : "decode_w8_sb");
     set_args(k, 0, raw, N, K, tabs_, dq, dh);
-    if (per_sb) {
-      size_t gws[2] = {(size_t)N, (size_t)K / 256}, lws[2] = {lx, 1};
-      run(nm.c_str(), k, 2, gws, lws);
-    } else {
-      size_t gws[2] = {(size_t)N, (size_t)K / 32}, lws[2] = {16, 1};
-      run(nm.c_str(), k, 2, gws, lws);
-    }
+    size_t gws[2] = {(size_t)N, (size_t)K / 256}, lws[2] = {lx, 1};
+    run(nm.c_str(), k, 2, gws, lws);
   }
 
   // Gemma's final logit soft-capping happens in the output head's GEMV (heads only ever see <= 8 rows).
