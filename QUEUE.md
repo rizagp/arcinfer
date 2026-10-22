@@ -410,6 +410,7 @@ byte before / after; a step that changes one bit is dropped), `tests/run_tests.p
 | 26.1 | Audit the 102 `ARC_*` switches | ⏳ after F21.11 | per switch: a default kept (fold it in), a diagnostic worth keeping (profiles, KL, `ARC_ZE_KPROPS`, fault injection), or a lost experiment (e.g. `ARC_GEMMA_VROWS`, `ARC_XSTAGE`, old `ARC_HC_F32` modes) to delete with its code path; the list goes into docs |
 | 26.2 | Drop the inaccurate Gemma path | ✅ 2026-10-22 (-227 lines: Gemma int8 attention, gemv_glu + aqB_ buffers, GELU epilogues, ARC_Q2_FUSE / _ATT / _KF32) | once the two-pass mode is the only Gemma mode: remove the single-pass Gemma code except what the drafter still runs (its int8 KV, `q2_off_`) |
 | 26.3 | Split `zero/engine.h` by model family | ⏳ | Qwen dense / DeltaNet, Gemma 4, Flash Next, MoE streaming, drafters (MTP, DFlash2, Gemma assistant) in their own headers; no change in behaviour, easier to read and audit |
+| 26.5 | Gemma two-pass memory: V from the int8 cache instead of f16 rows | ⚠️ dropped 2026-10-22 | measured: KL 26B 0.0044 -> 0.084 (prompt), 0.080 (decode), top-1 435 / 480: Gemma 4's V has a few very large dims that swamp a 64-dim scale block. K f16 was 0.018 earlier. Next for memory: the int8 K / V copy only for the layers the drafter reads (no accuracy change) |
 | 26.4 | Leftovers of F18.14 worth doing | 💡 | kernel lane guards + a non-multiple-dims test; Ctrl+C session save (RAII writers) |
 
 Estimate: 26.1 + 26.2 remove roughly 10-20 % of `engine.h` and the kernels (to be measured).
