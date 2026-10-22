@@ -6,7 +6,7 @@
 //   W8 (100..103): int8 q + per-16 int8 scales (+ per-16 mins), decoded just in time from any GGUF type.
 //     100 = per-16 scales, 101 = per-32 scales, 102 = per-16 scales + mins, 103 = per-32 scales + mins
 // Activations: aq [M][K] int8; asc [K/256][M] f32 (or [K/32][M] with -DACT32); absum [K/16][M] int16.
-// accumulate: 0 = store, 1 = add to C, 2 = C = silu(C) * result (fused SwiGLU), 3 = gelu_tanh(C) * result.
+// accumulate: 0 = store, 1 = add to C, 2 = C = silu(C) * result (fused SwiGLU).
 //
 // -DMOE_TILES (mixture-of-experts prompt chunks, -DACT32 only): W holds the decoded experts [e0, e1) stacked
 // (N rows each); the work is the slot tiles (expert, first slot, rows) of those experts, tiles tstart[e0] ..
@@ -409,9 +409,6 @@ __kernel void gemm(__global const uint* restrict wq, __global const uint* restri
     } else if (accumulate == 2) {  // fused SwiGLU: C holds the gate projection, v the up projection
       const float g = as_float(intel_sub_group_block_read(cp));
       v *= g / (1.0f + exp(-g));
-    } else if (accumulate == 3) {  // fused GeGLU (tanh GELU), Gemma
-      const float g = as_float(intel_sub_group_block_read(cp));
-      v *= 0.5f * g * (1.0f + tanh(0.7978845608f * (g + 0.044715f * g * g * g)));
     }
     intel_sub_group_block_write(cp, as_uint(v));
   }

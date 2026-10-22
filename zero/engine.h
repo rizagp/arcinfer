@@ -533,7 +533,7 @@ class Engine {
         if (L.kv_src < 0) {
           const size_t cap = L.swa ? swa_cap : c;
           n += 2 * (size_t)L.nkv * cap * L.hd + 2 * (size_t)L.nkv * cap * (L.hd / 64) * 4;
-          if (q2_) n += (q2_kf32_ ? 6 : 4) * (size_t)L.nkv * cap * L.hd;  // (two-pass mode: attn_fa_g's K / V rows)
+          if (q2_) n += 6 * (size_t)L.nkv * cap * L.hd;  // (two-pass mode: attn_fa_g's K / V rows)
         }
     } else {
       int nl = mtp_block_ ? 1 : 0;
@@ -1283,7 +1283,7 @@ class Engine {
       if (q2_)  // (two-pass mode: the float K / V rows attn_fa_g reads, [kv head][cap][hd], the same 16-row blocks)
         for (int g = 0; g < k.nkv; ++g)
           for (int t = 0; t < 2; ++t) {
-            const size_t unit = (size_t)16 * k.hd * (t == 0 ? (q2_kf32_ ? 4 : 2) : 2), base = (size_t)g * nbc;
+            const size_t unit = (size_t)16 * k.hd * (t == 0 ? 4 : 2), base = (size_t)g * nbc;
             cl_mem b = t == 0 ? k.L->kc : k.L->vc;
             if (first > 0) v.push_back({b, (base + s0) * unit, (size_t)first * unit});
             if (n > first) v.push_back({b, base * unit, (size_t)(n - first) * unit});
@@ -1435,8 +1435,6 @@ class Engine {
   cl_mem x_ = nullptr, aq_ = nullptr, asc_ = nullptr, absum_ = nullptr, big_ = nullptr, z_ = nullptr,
          conv_out_ = nullptr, gb_ = nullptr, o_ = nullptr, qrope_ = nullptr, logits_ = nullptr, qi_ = nullptr,
          qsc_ = nullptr, apart_ = nullptr;
-  // Gemma, T <= 8: the fused gate/up GEMV (gemv_glu) writes the down projection's int8 input here
-  cl_mem aqB_ = nullptr, ascB_ = nullptr, absumB_ = nullptr;
   // just-in-time W8 staging, one slot per matrix role (attn_qkv, ffn_up, ...): a layer's matrices stay decoded
   // while several chunks go through it (layer-major prefill)
   static constexpr int kRoles = 16;
@@ -2585,10 +2583,10 @@ class Engine {
         L.vsc = buf(scb);
         for (cl_mem m : {L.kq, L.vq}) fill(m, kvb);
         for (cl_mem m : {L.ksc, L.vsc}) fill(m, scb);
-        if (q2_) {  // (two-pass mode: f16 K / V rows for attn_fa_g; the int8 cache stays for the drafter)
-          L.kc = buf(kvb * (q2_kf32_ ? 4 : 2));
+        if (q2_) {  // (two-pass mode: f32 K / f16 V rows for attn_fa_g; the int8 cache stays for the drafter)
+          L.kc = buf(kvb * 4);
           L.vc = buf(kvb * 2);
-          fill(L.kc, kvb * (q2_kf32_ ? 4 : 2));
+          fill(L.kc, kvb * 4);
           fill(L.vc, kvb * 2);
         }
       }
@@ -2777,15 +2775,6 @@ class Engine {
     }
     asc_ = buf(M * (maxK / 32) * 4 * (q2_ ? 2 : 1));
     absum_ = buf(M * (maxK / 16) * 2 * (q2_ ? 2 : 1));
-    if (hp.gemma && q2_) {  // (two passes: the residual at the same offsets as in aq_ / asc_ / absum_)
-      aqB_ = buf(M * maxK * 2);
-      ascB_ = buf(M * (maxK / 32) * 4 * 2);
-      absumB_ = buf(M * (maxK / 16) * 2 * 2);
-    } else if (hp.gemma) {  // 16 padded rows, as single-token and verification passes use
-      aqB_ = buf((size_t)16 * hp.n_ff);
-      ascB_ = buf((size_t)16 * (hp.n_ff / 32) * 4);
-      absumB_ = buf((size_t)16 * (hp.n_ff / 16) * 2);
-    }
     big_ = buf(M * big_w * 4);
     // MoE: the expert activations / outputs (mh_ [slots][F], my_ [slots][E] f32) share memory with buffers that are
     // only used inside the attention / DeltaNet part of a layer (z_; conv_out_, o_, qrope_): never live at the same time
@@ -3087,9 +3076,6 @@ class Engine {
   bool q2_nocap_ = false;  // (the output head's two passes run without their softcap epilogue)
   cl_mem fa_part_ = nullptr;  // (attn_fa_g -DFA_SPLIT partials: 8 rows x heads x 64 splits x (head dim + 2) floats)
   bool q2_fuse_ = false, q2_fused_ = false;  // (matmul -> matmul1: run the fused two-pass GEMV; it ran)
-  const bool q2_fuse_on_ = !getenv("ARC_Q2_FUSE") || atoi(getenv("ARC_Q2_FUSE")) != 0;  // (0: two launches, for A/B)
-  bool q2_att_ = !getenv("ARC_Q2_ATT") || atoi(getenv("ARC_Q2_ATT")) != 0;  // (ARC_Q2_ATT=0: the int8 attention with two-pass matrices, for KL studies)
-  bool q2_kf32_ = !getenv("ARC_Q2_KF32") || atoi(getenv("ARC_Q2_KF32")) != 0;  // K rows in f32 (0: f16)  // (single pass for now: the Gemma assistant drafter keeps its own arithmetic)
   size_t q2_aq_ = 0, q2_sc_ = 0, q2_ab_ = 0;  // bytes
   std::string q2_defs_;
   void q2_init() {
@@ -3110,7 +3096,7 @@ class Engine {
     const bool cap = q2_ && !q2_off_ && &w == &lm_head_ && hp.softcap > 0.0f;
     q2_nocap_ = cap;
     // (one token: the GEMV runs both passes over one read of the weights, -DQ2F; it says so in q2_fused_)
-    q2_fuse_ = q2_ && !q2_off_ && cur_T_ <= 4 && q2_fuse_on_;  // (2-4 tokens: gemv_mt_v only, see matmul1)
+    q2_fuse_ = q2_ && !q2_off_ && cur_T_ <= 4;  // (2-4 tokens: gemv_mt_v only, see matmul1)
     q2_fused_ = false;
     matmul1(name, w, Mp, C, ldc, c_off, acc, act32);
     q2_fuse_ = false;
@@ -3409,19 +3395,18 @@ class Engine {
       // (the large register file: it spilled 8.8 KB per thread; E4B 8K prompt 676 -> 685 tok/s, decode 20.4 -> 20.7;
       //  ARC_GPREP_GRF=128: the default file)
       static const bool gprep_small = getenv("ARC_GPREP_GRF") && std::string(getenv("ARC_GPREP_GRF")) == "128";
-      cl_kernel k = kernel("ops", (gprep_small ? std::string() : std::string("-cl-intel-256-GRF-per-thread ")) + hdo +
-                                      (q2_kf32_ ? " -DKF32" : ""), "attn_prep_g");
+      cl_kernel k = kernel("ops", (gprep_small ? std::string() : std::string("-cl-intel-256-GRF-per-thread ")) + hdo,
+                           "attn_prep_g");
       float eps = hp.eps, base = L.swa ? hp.rope_base_swa : hp.rope_base, qscale = 1.0f;  // Gemma 4: no 1/sqrt(d)
       int pp = p0, hv = L.has_v ? 1 : 0, uff = L.rope_ff ? 1 : 0, cap = L.cap, nn = nh, nk = nkv, ld = ldq, TT = Tq;
       cl_mem rt = rope_table(L.swa ? 0 : 1, hd, base, L.rope_ff, Tq);
       set_args(k, 0, from(big_, (size_t)r0 * ldq * 4), ld, nn, nk, hv, L.q_norm, L.k_norm, TT, pp, eps, base,
                L.rope_ff ? L.rope_ff : L.q_norm, uff, qscale, qi_, qsc_, L.kq, L.ksc, L.vq, L.vsc, cap, rt);
-      int f16 = q2_ && q2_att_ ? 1 : 0;
-      set_args(k, 22, f16, q2_ ? from(qf_, (size_t)r0 * nh * hd * 4) : qsc_, q2_ ? L.kc : qsc_, q2_ ? L.vc : qsc_);
+      int f16 = 1;  // (the f32 query and the float K / V rows for attn_fa_g too)
+      set_args(k, 22, f16, from(qf_, (size_t)r0 * nh * hd * 4), L.kc, L.vc);
       size_t gws[2] = {(size_t)(nh + (own_kv ? nkv : 0)) * 16, (size_t)Tq}, lws[2] = {16, 1};
       run("attn_prep", k, 2, gws, lws);
     };
-    const std::string ao = attn_opts(hd, hpg);
     // (two-pass mode: float attention over the f16 rows for every pass; rows r0 .. r0 + n at position p0)
     // (prompt chunks of the sliding layers (head 256): 32 rows per work-group sharing each key block in local memory;
     //  the global layers (head 512) do better without, but with 2 q heads per sub-group instead of 4 (11.4 KB spill
@@ -3439,8 +3424,8 @@ class Engine {
     auto fa_g = [&](int r0, int n, int p0) {
       if (fa_split && n <= 8) {
         const int gq = std::min(hpg, fa_gq ? fa_gq : hd >= 512 ? 2 : 4);
-        const std::string fd = std::string(q2_kf32_ ? "-DKF32 " : "") + "-cl-intel-256-GRF-per-thread -DFA_G -DFA_SPLIT -DHD=" +
-                               std::to_string(hd) + " -DGQ=" + std::to_string(gq);
+        const std::string fd = "-cl-intel-256-GRF-per-thread -DFA_G -DFA_SPLIT -DHD=" + std::to_string(hd) + " -DGQ=" +
+                               std::to_string(gq);
         cl_kernel k = kernel("ops", fd, "attn_fa_g");
         // (splits of the launch: those of its widest row, as the kernel computes them)
         const int nlo = L.swa ? nc_lo_ : -1, nhi = L.swa ? nc_hi_ : -1, last = p0 + n - 1;
@@ -3460,7 +3445,7 @@ class Engine {
         return;
       }
       if (fa_gh && n > 8 && hd >= 512 && hd % (fa_fs * 16) == 0 && (hd / fa_fs / 16 == 8 || hd / fa_fs / 16 == 16)) {
-        cl_kernel k = kernel("ops", std::string(q2_kf32_ ? "-DKF32 " : "") + "-cl-intel-256-GRF-per-thread -DFA_GH -DHD=" +
+        cl_kernel k = kernel("ops", "-cl-intel-256-GRF-per-thread -DFA_GH -DHD=" +
                                         std::to_string(hd) + " -DHPG=" + std::to_string(hpg) + " -DFS=" + std::to_string(fa_fs),
                              "attn_fa_gh");
         int cp = L.cap, nn = nh, nk = nkv, pp = p0, MM = n, w = win, nlo = L.swa ? nc_lo_ : -1, nhi = L.swa ? nc_hi_ : -1;
@@ -3472,7 +3457,7 @@ class Engine {
       }
       const int gq = std::min(hpg, fa_gq ? fa_gq : hd >= 512 ? 2 : 4);
       const int R = n <= 8 ? 1 : fa_rows ? fa_rows : hd >= 512 ? 1 : 32;  // (sliding: 32 rows 4.43 -> 4.16 s; 64: too large)
-      cl_kernel k = kernel("ops", std::string(q2_kf32_ ? "-DKF32 " : "") + "-cl-intel-256-GRF-per-thread -DFA_G -DHD=" + std::to_string(hd) + " -DGQ=" +
+      cl_kernel k = kernel("ops", "-cl-intel-256-GRF-per-thread -DFA_G -DHD=" + std::to_string(hd) + " -DGQ=" +
                                       std::to_string(gq) + (R > 1 ? " -DFA_ROWS=" + std::to_string(R) : std::string()), "attn_fa_g");
       int cp = L.cap, nn = nh, nk = nkv, pp = p0, MM = n, w = win, nlo = L.swa ? nc_lo_ : -1, nhi = L.swa ? nc_hi_ : -1;
       set_args(k, 0, from(qf_, (size_t)r0 * nh * hd * 4), L.kc, L.vc, cp, nn, nk, pp, MM,
@@ -3480,65 +3465,19 @@ class Engine {
       size_t gws[3] = {16, (size_t)(nh / gq), (size_t)(n + R - 1) / R * R}, lws[3] = {16, 1, (size_t)R};
       run(L.swa ? "attn_swa" : "attn_global", k, 3, gws, lws);
     };
-    if (q2_ && q2_att_) {
-      if (!batch_.empty()) {
-        for (const BatchSeq& q : batch_) {
-          point_to(q.slot);
-          pos = q.pos;
-          prep(q.row, q.n, q.pos);  // (qi_ / o_ stay whole: the rows' offsets go to the kernels)
-          fa_g(q.row, q.n, q.pos);
-          int& wh = slot_host_[q.slot].written_hi;
-          wh = std::max(wh, q.pos + q.n);
-        }
-        pos = 0;
-      } else {
-        prep(0, T, pos);
-        fa_g(0, T, pos);
-      }
-    } else if (!batch_.empty()) {  // a batched pass (T <= 8): each sequence's rows with its slot's caches and position
-      const cl_mem qi0 = qi_, qsc0 = qsc_, o0 = o_;
+    if (!batch_.empty()) {  // a batched pass (T <= 8): each sequence's rows with its slot's caches and position
       for (const BatchSeq& q : batch_) {
         point_to(q.slot);
-        pos = q.pos;  // (rope_table's position)
-        qi_ = from(qi0, (size_t)q.row * nh * hd);
-        qsc_ = from(qsc0, (size_t)q.row * nh * (hd / 64) * 4);
-        o_ = from(o0, (size_t)q.row * nh * hd * 4);
-        prep(q.row, q.n, q.pos);  // (its rows of big_ in; q rows into the views above)
-        attn_decode_rows(L.swa ? "attn_swa" : "attn_global", L, L.cap, nkv, hpg, hd, q.pos, q.n, win);
+        pos = q.pos;
+        prep(q.row, q.n, q.pos);  // (qi_ / o_ stay whole: the rows' offsets go to the kernels)
+        fa_g(q.row, q.n, q.pos);
         int& wh = slot_host_[q.slot].written_hi;
         wh = std::max(wh, q.pos + q.n);
       }
-      qi_ = qi0;
-      qsc_ = qsc0;
-      o_ = o0;
       pos = 0;
     } else {
       prep(0, T, pos);
-    }
-    if (!batch_.empty() || (q2_ && q2_att_)) {
-      // (done above)
-    } else if (T <= 8) {
-      attn_decode_rows(L.swa ? "attn_swa" : "attn_global", L, L.cap, nkv, hpg, hd, pos, T, win);
-    } else if (!L.swa && hd == 512 && (hpg == 16 || hpg == 4) && !getenv("ARC_NO_PS")) {
-      // Gemma 4 global layers: head dims split over 4 sub-groups of 4 q heads (attn_ps): attn_q8 spills there.
-      // 12B (16 q heads per kv head): 1.25-1.4x faster at any prompt length (bench/attn_bench, ATT_PS=4,4,1
-      // ATT_TPW=2); E4B (4 per kv head): TPW 8, 870 -> 619 ms per layer for a 13,921-token prompt (ATT_NH=8
-      // ATT_NKV=2 ATT_HD=512 ATT_PS=4,4,1 ATT_TPW=8; same error against the CPU reference)
-      const int tpw = hpg == 16 ? 2 : 8, lsz = 16 * (hpg / 4) * (tpw / 1) * 4;
-      cl_kernel kp = kernel("ops", "-cl-intel-256-GRF-per-thread -DHD=512 -DHPG=" + std::to_string(hpg) + " -DHS=2 -DTPW=" +
-                                       std::to_string(tpw) + " -DPNS=4 -DPHG=4 -DPTT=1" + sb_opt(hd), "attn_ps");
-      int p0 = pos, cap = L.cap, nn = nh, TT = T, w = win;
-      set_args(kp, 0, qi_, qsc_, L.kq, L.ksc, L.vq, L.vsc, cap, nn, p0, TT, o_, w);
-      size_t gws[2] = {(size_t)(T + tpw - 1) / tpw * lsz, (size_t)nkv}, lws[2] = {(size_t)lsz, 1};
-      run("attn_global", kp, 2, gws, lws);
-    } else {
-      cl_kernel ka = kernel("ops", ao, "attn_q8");
-      // image tokens attend to each other non-causally in the sliding-window layers (Gemma 4 unified vision)
-      int p0 = pos, cap = L.cap, nn = nh, TT = T, w = win, nlo = L.swa ? nc_lo_ : -1, nhi = L.swa ? nc_hi_ : -1;
-      set_args(ka, 0, qi_, qsc_, L.kq, L.ksc, L.vq, L.vsc, cap, nn, p0, TT, o_, w, nlo, nhi);
-      const int tpw = 32 / (hpg / attn_hs_for(hpg));
-      size_t gws[2] = {(size_t)(T + tpw - 1) / tpw * 512, (size_t)nkv}, lws[2] = {512, 1};
-      run(L.swa ? "attn_swa" : "attn_global", ka, 2, gws, lws);
+      fa_g(0, T, pos);
     }
     if (batch_.empty() && pos + T > written_hi_) written_hi_ = pos + T;
     const int a_out = act32_for(true);
@@ -3561,42 +3500,15 @@ class Engine {
     const int a_in = act32_for(false);
     if (!ffn_in_ready_) rmsnorm_quant(x_, 0, L.ffn_norm, E, Mp, T, a_in);
     ffn_in_ready_ = false;
-    const int fused = cur_T_ > 8 && E <= 8192 && !q2_ ? 1 : 0;
-    if (T <= 8 && (L.gate.type == GGML_IQ4_XS || L.gate.type == GGML_Q4_0) && L.up.type == L.gate.type &&
-        F % 32 == 0 && Mp == 16 && !q2_ &&
-        !getenv("ARC_NO_GLU")) {
-      // E2B / E4B (IQ4_XS gate / up), T <= 8: gelu(gate) * up and its quantization in the GEMV itself (gemv_glu,
-      // same values as gemm_gate + gemm_up + swiglu_quant); the down projection reads it from the B buffers
-      const int tb = T == 1 ? 1 : T <= 2 ? 2 : T <= 4 ? 4 : 8;
-      cl_kernel k = kernel("decode", "-DQT=" + std::to_string((int)L.gate.type) + " -DTB=" + std::to_string(tb), "gemv_glu");
-      int N = F, K = E, MM = Mp, TT = T;
-      set_args(k, 0, L.gate.raw, L.up.raw, N, K, tabs_, aq_, asc_, MM, TT, aqB_, ascB_, absumB_);
-      size_t g1 = (size_t)F / 32 * 256, l1 = 256;
-      rd_bytes += raw_bytes(L.gate) + raw_bytes(L.up);
-      run("gemm_glu", k, 1, &g1, &l1);
-      std::swap(aq_, aqB_);
-      std::swap(asc_, ascB_);
-      std::swap(absum_, absumB_);
-      matmul("gemm_down", L.down, Mp, big_, E, 0, 0, act32_for(false));
-      std::swap(aq_, aqB_);
-      std::swap(asc_, ascB_);
-      std::swap(absum_, absumB_);
-    } else {
-      if (fused) {
-        matmul("gemm_gate", L.gate, Mp, big_, F, 0, 0, a_in);
-        matmul("gemm_up", L.up, Mp, big_, F, 0, 3, a_in);  // gelu(gate) * up in the epilogue
-      } else {
-        matmul("gemm_gate", L.gate, Mp, big_, 2 * F, 0, 0, a_in);
-        matmul("gemm_up", L.up, Mp, big_, 2 * F, F, 0, a_in);
-      }
-      const int a_dn = act32_for(false);
-      {
-        int gelu = 1, FF = F, MM = Mp, TT = T;
-        set_args(k_swiglu_, 0, big_, FF, MM, TT, aq_, asc_, absum_, a_dn, fused, gelu);
-        run_rows_quant("swiglu_quant", F, T, Mp);
-      }
-      matmul("gemm_down", L.down, Mp, big_, E, 0, 0, a_dn);
+    matmul("gemm_gate", L.gate, Mp, big_, 2 * F, 0, 0, a_in);
+    matmul("gemm_up", L.up, Mp, big_, 2 * F, F, 0, a_in);
+    const int a_dn = act32_for(false);
+    {
+      int gelu = 1, FF = F, MM = Mp, TT = T, fused = 0;  // (gelu(gate) * up, quantized for the down projection)
+      set_args(k_swiglu_, 0, big_, FF, MM, TT, aq_, asc_, absum_, a_dn, fused, gelu);
+      run_rows_quant("swiglu_quant", F, T, Mp);
     }
+    matmul("gemm_down", L.down, Mp, big_, E, 0, 0, a_dn);
     if (hp.moe) {
       // Gemma 4 26B-A4B (llama.cpp gemma4): ffn = rmsnorm(mlp) * post_ffw_norm_1 + rmsnorm(experts(rmsnorm(x) *
       // pre_ffw_norm_2)) * post_ffw_norm_2, the router on rmsnorm(x) * scale / sqrt(E); then the usual post_ffw norm
@@ -3728,9 +3640,9 @@ class Engine {
                         int n_q_heads = 0) {
     // the Gemma 4 assistant drafter's layers (n_q_heads given) keep the original kernels and split choices
     const bool drafter = n_q_heads != 0;
-    // heads per sub-group: one at HD 512 (registers) and with per-64-dim scales (Gemma 4: the head slices of a split
-    // then share its K/V through L1, 2x faster than two heads per sub-group); else as the prompt kernels
-    const int hs = hd >= 512 || (hp.gemma && !drafter) ? 1 : attn_hs_for(hpg), nsp = hpg / hs;
+    // heads per sub-group: one at HD 512 (registers); else as the prompt kernels. (Gemma 4's own layers run their
+    // float attention in layer_gemma_attn; only its assistant drafter comes here)
+    const int hs = hd >= 512 ? 1 : attn_hs_for(hpg), nsp = hpg / hs;
     // (experiments: ARC_ATTN_DEC_GRF=128 builds the decode attention kernels with the default register file, twice
     //  the threads per EU; ARC_ATTN_DEC_SG sets the sub-groups the key split aims for, default 512)
     static const bool dec_small = [] {
@@ -3753,10 +3665,6 @@ class Engine {
     };
     int nn = n_q_heads ? n_q_heads : hp.n_head, hdd = hd, cp = cap, w = win;
     for (int r0 = 0; r0 < T;) {
-      // Gemma 4 (per-64-dim scales): attn_dsplit, head dims split over the sub-groups, every K/V byte read once for
-      // all rows; up to 4 rows (pairs when a kv head has more than 4 q heads). 1.3-2.4x faster than the paths below
-      // at long context (bench/attn_dec_bench). The Qwen models stay on those: there they gain less, and they keep
-      // their verification rows bit-identical to single-token decoding (the MTP regression test).
       const int left = T - r0;
       // Qwen3.6 35B (8 q heads per kv head, 256-dim heads, one scale per row): attn_dsplit, 4 q heads per sub-group
       // and the dims split over 4 sub-groups, one row per launch as attn_decode before: bench/attn_dec_bench at 64K
@@ -3784,39 +3692,6 @@ class Engine {
         for (int m = 0; m < n; ++m) {
           int orow = r0 + m, prow = m;
           set_args(k_attn_comb_, 0, apart_, nss, nn, o_, orow, hdd, prow);
-          size_t g1 = (size_t)nn * hd, l1 = 64;
-          run("attn_combine", k_attn_comb_, 1, &g1, &l1);
-        }
-        r0 += n;
-        continue;
-      }
-      if (!drafter && hp.gemma) {
-        // (one row per launch, as a single token at that position: the key split, the heads per sub-group and the
-        //  partial sums are then those of decoding the row's token alone, so a verification row is bit-identical
-        //  to it. Several rows per launch (ARC_GEMMA_VROWS=1, before 20 Oct) read each K/V byte once for all rows but
-        //  split the keys by the last row's position: drafter logits up to 2.2 (26B) / 1.3 (12B) / 0.85 (E4B) off
-        //  plain decoding, the 26B's greedy text changed after 7 tokens. Speed with the drafter, short / 11K prompt:
-        //  12B 21.3 -> 23.2 / 14.8 -> 14.9, E4B 47.4 -> 48.9 / 30.9 -> 30.0, 26B 21.0 -> 21.0 at 11K)
-        static const bool vrows = getenv("ARC_GEMMA_VROWS") && atoi(getenv("ARC_GEMMA_VROWS")) != 0;
-        const bool one_row = !vrows;
-        const int n = one_row ? 1 : std::min(left, left <= 2 ? left : hpg <= 4 ? 4 : 2), tr = n <= 1 ? 1 : n <= 2 ? 2 : 4;
-        int hg = 1;  // q heads per sub-group: at most 4 (row, head) pairs (registers)
-        for (int h : {4, 3, 2, 1})
-          if (hpg % h == 0 && h * tr <= 4) { hg = h; break; }
-        int nsub = hd / 64;  // dim groups: <= 512 work-items, <= 32 KB of SLM partial scores
-        while (nsub > 1 && ((hpg / hg) * nsub > 32 || hpg * tr * nsub > 256)) nsub /= 2;
-        const int sgs = hpg / hg * nsub, lsz = 16 * sgs, plast = pos0 + r0 + n - 1;
-        const int lo = win ? std::max(0, pos0 + r0 - win + 1) : 0;
-        int S, kstart, ns, p0 = pos0 + r0, nv = n, q0 = r0;
-        pick_split(lo, plast, sgs, 512, 512, S, kstart, ns);
-        cl_kernel k = kernel("ops", opts(1) + " -DHG=" + std::to_string(hg) + " -DNSUB=" + std::to_string(nsub) +
-                                        " -DTR=" + std::to_string(tr), "attn_dsplit");
-        set_args(k, 0, qi_, qsc_, L.kq, L.ksc, vq_dec(L), vsc_dec(L), cp, nn, p0, nv, apart_, w, kstart, S, ns, q0);
-        size_t gws[2] = {(size_t)ns * lsz, (size_t)nkv}, lws[2] = {(size_t)lsz, 1};
-        run(name, k, 2, gws, lws);
-        for (int m = 0; m < n; ++m) {
-          int orow = r0 + m, prow = m;
-          set_args(k_attn_comb_, 0, apart_, ns, nn, o_, orow, hdd, prow);
           size_t g1 = (size_t)nn * hd, l1 = 64;
           run("attn_combine", k_attn_comb_, 1, &g1, &l1);
         }
@@ -4365,11 +4240,10 @@ class Engine {
     }
     // routing, then the slots grouped by expert and their tiles
     static const int tm_std = getenv("ARC_MOE_TM") ? std::max(1, atoi(getenv("ARC_MOE_TM"))) : 16;  // (standard experts: slots per decoded weight; 2048-token prompt: TM 8 416, 16 473, 32 423, 64 187 tok/s)
-    // (two-pass mode, Gemma 4: prompt chunks through the T > 1 routing and moe_rg, whose two passes it runs; generation
-    //  and verification (T <= 8) through the per-tile kernels with both passes fused, -DQ2F, as plain decoding;
-    //  ARC_Q2_FUSE=0: everything through moe_rg as before)
+    // (Gemma 4, two passes: prompt chunks through the T > 1 routing and moe_rg, whose two passes it runs; generation
+    //  and verification (T <= 8) through the per-tile kernels with both passes fused, -DQ2F, as plain decoding)
     static const int rg_min0 = getenv("ARC_MOE_RG_MIN") ? atoi(getenv("ARC_MOE_RG_MIN")) : 320;
-    const bool q2f = q2_ && g4 && q2_fuse_on_ && hp.moe_std && T <= 8 && T < rg_min0;
+    const bool q2f = q2_ && g4 && hp.moe_std && T <= 8 && T < rg_min0;
     const bool q2g = q2_ && g4 && !q2f;
     const std::string q2fd = q2f ? " -DQ2F" + q2_defs_ + " -DQ2M=" + std::to_string(q2m_hq_) + " -DQ2MS=" +
                                        std::to_string(q2m_sc_ / 4)
@@ -4636,7 +4510,7 @@ class Engine {
       // (Flash Next: h rows of Fp = 768 for F = 640 values; the down projection's rows padded to Fp with zeros)
       const int Fp = hp.n_ff_exp_pad;
       int N = i == 2 ? E : F, K = i == 2 ? Fp : E, M = i == 2 ? slots_ : Mp, ldc = i == 2 ? E : Fp,
-          acc = i == 1 ? (hp.gemma ? 3 : 2) : 0, ne = NE,
+          acc = i == 1 ? 2 : 0, ne = NE,
           um = i == 2 ? 0 : 1, us = i == 2 ? 1 : 0;
       int kv = i == 2 ? F : K;
       // (two-pass mode: the matrix on the values, then on their residual, added; the up projection into mh2_ and

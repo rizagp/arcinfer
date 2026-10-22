@@ -7,12 +7,8 @@
 #ifndef SB
 #define SB 1
 #endif
-// two-pass mode's float attention: the K rows in f32 (-DKF32) or f16
-#ifdef KF32
+// Gemma 4's float attention: the K rows in f32
 #define KC_T float
-#else
-#define KC_T half
-#endif
 
 inline float silu(float x) { return x / (1.0f + exp(-x)); }
 
@@ -1772,13 +1768,8 @@ __kernel void attn_prep_g(__global const float* qkv, int ldq, int nh, int nkv, i
       for (int i = 0; i < VPL; ++i) qd[i] = v[i];
     } else {
       __global KC_T* kd = kc + ((size_t)kvh * cap + pos % cap) * HD + VPL * lane;
-#ifdef KF32
 #pragma unroll
       for (int i = 0; i < VPL; ++i) kd[i] = v[i];
-#else
-#pragma unroll
-      for (int i = 0; i < VPL; ++i) vstore_half(v[i], 0, kd + i);
-#endif
     }
   }
   if (isq) {
@@ -1855,11 +1846,7 @@ inline void fa_split_range(int lo, int hi, int sp, int* b0, int* b1) {  // block
 #endif
 #if FA_ROWS > 1
 #define FA_KS (HD + 1)  // (a key's row stride in local memory: lane = key reads without bank conflicts)
-#ifdef KF32
 #define FA_KW uint
-#else
-#define FA_KW ushort
-#endif
 #endif
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __global const half* vc, int cap, int nh,
@@ -1931,11 +1918,7 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
     __global const KC_T* krow = kb + (size_t)(p % cap) * HD;
 #endif
     for (int c = 0; c < HD / 16; ++c) {
-#ifdef KF32
       const float16 kv = valid ? vload16(0, krow + 16 * c) : (float16)0.0f;
-#else
-      const float16 kv = valid ? vload_half16(0, krow + 16 * c) : (float16)0.0f;
-#endif
 #pragma unroll
       for (int r = 0; r < GQ; ++r) {
         const float qc = as_float(intel_sub_group_block_read((__global const uint*)(qp + r * HD + 16 * c)));
@@ -2074,11 +2057,7 @@ __kernel void attn_fa_gh(__global const float* qf, __global const KC_T* kc, __gl
 #pragma unroll
       for (int h = 0; h < HPG; ++h) s[h] = 0.0f;
       for (int c = 0; c < HD / 16; ++c) {
-#ifdef KF32
         const float16 kv = valid ? vload16(0, krow + 16 * c) : (float16)0.0f;
-#else
-        const float16 kv = valid ? vload_half16(0, krow + 16 * c) : (float16)0.0f;
-#endif
 #pragma unroll
         for (int h = 0; h < HPG; ++h) {
           const float qc = as_float(intel_sub_group_block_read((__global const uint*)(qp + h * HD + 16 * c)));

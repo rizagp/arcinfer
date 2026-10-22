@@ -782,7 +782,7 @@ __kernel void gemv(__global const uchar* raw, int N, int K, __global const uint*
   }
 }
 
-// Activations of the TB tokens of gemv_mt / gemv_mt_v / gemv_glu. TB < MT_LAZY_MIN: loaded once per superblock pair
+// Activations of the TB tokens of gemv_mt / gemv_mt_v. TB < MT_LAZY_MIN: loaded once per superblock pair
 // into registers (MT_ACTS), each (row, token) dot reads them there (MT_ACT). TB >= MT_LAZY_MIN (default 4, the
 // verification of 3..7 MTP drafts): held all together they spilled (TB 8: 8 x uint8 per lane, 128 GRF here; TB 4:
 // 1-4 KB per thread with 4 rows per sub-group); instead each token's bytes are loaded
@@ -1345,80 +1345,6 @@ __kernel void gemv_mt_v(__global const uchar* raw, int N, int K, __global const 
 }
 #undef MT_APO
 #undef MT_SCO
-#endif
-#if QT == IQ4_XS || QT == Q4_0
-// Gemma FFN input of the down projection for T <= TB tokens in one launch: y = gelu_tanh(x . gate) * (x . up),
-// quantized per 32 values (act32 layout) into aq2 / asc2 / absum2 (not the input buffers: other work-groups are
-// still reading those). A work-group (16 sub-groups) computes rows [32g, 32g + 32) of both matrices, a sub-group
-// rows 32g + 2j, 32g + 2j + 1 of each (gemv_mt_v's arithmetic), then sub-group t quantizes token t's 32 values as
-// quant_store16 would. Replaces gemm_gate + gemm_up + swiglu_quant (two launches per layer fewer; same values).
-// grid (N / 32 * 256), local 256.
-inline float gelu_tanh_v(float x) { return 0.5f * x * (1.0f + tanh(0.7978845608f * (x + 0.044715f * x * x * x))); }
-__attribute__((intel_reqd_sub_group_size(16)))
-__kernel void gemv_glu(__global const uchar* rg, __global const uchar* ru, int N, int K, __global const uint* tabs,
-                       __global const char* aq, __global const float* asc, int M, int T, __global char* aq2,
-                       __global float* asc2, __global ushort* absum2) {
-  __local uint kt[VB_TABLES];
-  __local float res[2][32][TB];
-  vb_tables(kt, tabs);
-  const int lane = get_sub_group_local_id(), sg = get_sub_group_id(), n0 = get_group_id(0) * 32;
-  const int nsb = K / 256, ib = lane % 8, hs = lane / 8;
-  float acc[4][TB];
-#pragma unroll
-  for (int r = 0; r < 4; ++r)
-#pragma unroll
-    for (int t = 0; t < TB; ++t) acc[r][t] = 0.0f;
-  for (int sp = 0; sp < nsb; sp += 2) {
-    const int b = sp * 8 + lane;
-    const bool has = sp + hs < nsb;
-    const int s = has ? sp + hs : sp;
-    MT_ACTS
-#pragma unroll
-    for (int r = 0; r < 4; ++r) {  // gate rows 2sg, 2sg+1, then up rows 2sg, 2sg+1
-      uint w[8];
-      float d, dmin;
-      int sc0, sc1, mn0, mn1;
-      const int n = min(n0 + 2 * sg + (r & 1), N - 1);
-      vblock((r < 2 ? rg : ru) + ((size_t)n * nsb + s) * BBP, ib, kt, w, &d, &dmin, &sc0, &sc1, &mn0, &mn1);
-#pragma unroll
-      for (int t = 0; t < TB; ++t) {
-        MT_ACT(t)
-        int lo = dot_4x8packed_ss_int(at.s0, w[0]);
-        lo += dot_4x8packed_ss_int(at.s1, w[1]);
-        lo += dot_4x8packed_ss_int(at.s2, w[2]);
-        lo += dot_4x8packed_ss_int(at.s3, w[3]);
-        int hi = dot_4x8packed_ss_int(at.s4, w[4]);
-        hi += dot_4x8packed_ss_int(at.s5, w[5]);
-        hi += dot_4x8packed_ss_int(at.s6, w[6]);
-        hi += dot_4x8packed_ss_int(at.s7, w[7]);
-        acc[r][t] += st * d * (float)(sc0 * lo + sc1 * hi);
-      }
-    }
-  }
-#pragma unroll
-  for (int r = 0; r < 4; ++r)
-#pragma unroll
-    for (int t = 0; t < TB; ++t) {
-      const float v = sub_group_reduce_add(acc[r][t]);
-      if (lane == 0) res[r / 2][2 * sg + (r & 1)][t] = v;
-    }
-  barrier(CLK_LOCAL_MEM_FENCE);
-  if (sg < T && sg < TB) {  // token sg: lane l holds values 2l, 2l + 1 of the block
-    const int t = sg, k = n0 + 2 * lane;
-    const float y0 = gelu_tanh_v(res[0][2 * lane][t]) * res[1][2 * lane][t];
-    const float y1 = gelu_tanh_v(res[0][2 * lane + 1][t]) * res[1][2 * lane + 1][t];
-    const float amax = sub_group_reduce_max(fmax(fabs(y0), fabs(y1)));
-    const float inv = amax > 0.0f ? 127.0f / amax : 0.0f;
-    const int q0 = convert_int_rte(y0 * inv), q1 = convert_int_rte(y1 * inv);
-    *(__global uchar2*)(aq2 + (size_t)t * N + k) = (uchar2)((uchar)q0, (uchar)q1);
-    int sum = q0 + q1;  // per 16 values: lanes 0..7 and 8..15
-    sum += intel_sub_group_shuffle_xor(sum, 1);
-    sum += intel_sub_group_shuffle_xor(sum, 2);
-    sum += intel_sub_group_shuffle_xor(sum, 4);
-    if ((lane & 7) == 0) absum2[((size_t)n0 / 16 + lane / 8) * M + t] = (ushort)(short)sum;
-    if (lane == 0) asc2[((size_t)n0 / 32) * M + t] = amax / 127.0f;
-  }
-}
 #endif
 // Matrix x few-tokens product on the padded raw rows (TB tokens share every weight read): used for small
 // batches such as speculative-decoding verification. Same structure as gemv; activations of token t are row t
@@ -2142,9 +2068,6 @@ __kernel void moe_rg(__global const uchar* raw, int N, int K, __global const uin
       } else if (accumulate == 2) {
         const float g = as_float(intel_sub_group_block_read(cp));
         v *= g / (1.0f + exp(-g));
-      } else if (accumulate == 3) {  // (Gemma 4 experts: gelu_tanh(gate) * up, as moe_gateup_q with -DMOE_GELU)
-        const float g = as_float(intel_sub_group_block_read(cp));
-        v = 0.5f * g * (1.0f + tanh(0.7978845608f * (g + 0.044715f * g * g * g))) * v;
       }
       intel_sub_group_block_write(cp, as_uint(v));
     }
