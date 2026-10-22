@@ -391,11 +391,6 @@ test uses port 8091 and needs the GPU memory.
   sampled from the model's distribution, so the output is unchanged (checked: identical answers at every draft
   count). `--mtp-drafts N`: arcinferzero 1–7 (default 7 for the 27B and whenever DFlash2 drafts, 5 for the 35B,
   3 for the 4B, 2 for the 9B and Gemma).
-- `--v4` (arcinferzero, Qwen; experimental, off by default): a 4-bit copy of the attention cache's V half that
-  generation and draft verification read, next to the int8 cache that prompts read. Prompts keep their speed;
-  generation deep in a long context is ~7 % faster (35B after 125K tokens: median step 72.8 -> 67.5 ms); the
-  attention cache needs ~25 % more memory (35B at 131K: expert cache 90 -> 87 %); 35B perplexity +0.4 %. Useful
-  only for long answers at contexts well above 64K (`docs/speed-progress.md`, 2026-10-18).
 - `--dflash DIR` (arcinferzero: `serverz`, `runz`): speculative decoding with a DFlash2 block drafter, `DIR` being
   the folder with its `config.json` and `model.safetensors` (the snapshot folder of `hf download
   z-lab/Qwen3.8-27B-DFlash2` for the 27B, `hf download incoai/Qwen3.6-35B-A3B-DFlash2` for the 35B). It drafts a

@@ -14,6 +14,11 @@
   (`-q2`), and the saved state carries a flag and the float K / V rows: a conversation saved, a second one held,
   the first one loaded again gives the same greedy answer as a fresh server (26B, 1,511 tokens); a plain server
   refuses the file. Saved states of the other modes are unchanged.
+- **`--v4` removed** (the 4-bit V copy for Qwen generation at very long contexts; the user does not use it): the
+  option, `-V4`, `ARC_V4`, `ARC_V4_SINK` / `ARC_V4_RECENT`, its kernel paths and buffers (-179 lines). Default
+  output unchanged bit for bit (Qwen 35B / 27B with and without drafting, Gemma 26B).
+- **Gemma 4 one-pass code removed** (-227 lines): its int8 attention paths, `gemv_glu` and its buffers, the fused
+  GELU epilogues, `ARC_Q2_FUSE` / `ARC_Q2_ATT` / `ARC_Q2_KF32`; output bit-identical.
 - **Server hardening (audit by DeepSeek, reviewed)**: a request with an `Origin` from another site gets 403 (a web
   page elsewhere could otherwise drive this no-authentication server; local pages and the server's own web UI, also
   opened from another device with `--host`, keep working; command-line clients send no Origin), CORS only for those,

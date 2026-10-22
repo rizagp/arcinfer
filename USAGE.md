@@ -184,15 +184,6 @@ as the one-pass mode was (26B with its drafter ~25 tokens/s, E4B ~38); prompts a
 tokens/s against ~525). Its saved conversations and system-prompt cache live in their own folders (`...-q2`);
 conversations saved by the one-pass mode are not loaded.
 
-**4-bit V copy for long answers at long contexts (`--v4`, arcinferzero, Qwen models, experimental).**
-`arc-server start -Model 35b -V4` (or `serverz.exe ... --v4`) keeps the normal int8 attention cache for reading
-prompts and adds a 4-bit copy of its V half that generation reads. Prompts stay as fast as without it; generation
-deep in a long context is ~7 % faster (35B after a 125K-token prompt: 13.5 -> 14.3 tokens/s), because each new token
-reads half the V bytes. It costs memory instead of saving it: the attention cache grows by ~25 %, so the expert
-cache of the MoE models gets a little smaller (35B at 131K: 90 -> 87 % of the experts). The answers change slightly
-(4-bit values; 35B: perplexity +0.4 %), MTP and DFlash2 still give the same text as plain decoding. Below ~64K
-tokens of context it brings nothing; leave it off unless long answers at very long contexts are the main use.
-
 **Two conversations at once (`-Slots 2`, arcinferzero).** By default the server holds one conversation and runs one
 request at a time: a second Pi window waits until the first one's answer is finished, and switching between them
 goes through the session cache. `pi-arc 35b --slots 2` (or `arc-server start -Model 35b -Slots 2`) makes the server

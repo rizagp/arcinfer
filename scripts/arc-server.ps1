@@ -36,7 +36,6 @@ param(
   [int]$ImageMaxTokens = 0,
   [double]$BudgetGb = 0,
   [switch]$AttnF32,
-  [switch]$V4,
   [switch]$PreserveThinking,
   [switch]$NoPrefixCache,
   [double]$PrefixCacheGb = -1,
@@ -223,8 +222,6 @@ Options for start / restart:
   -ImageMinTokens / -ImageMaxTokens <N>  tokens per image (defaults: Qwen 256..2048, Gemma 4 12B 1120..2048)
   -BudgetGb <GB>                 keep decoded weights resident up to GB (default: chosen with the context)
   -AttnF32                       f32 attention (tests)
-  -V4                            + a 4-bit copy of V for generation (Qwen; experimental): faster long
-                                 answers deep in long contexts (100K+ tokens), ~25 % more attention-cache memory
   -PreserveThinking              earlier turns keep their reasoning (Qwen3.6 35B; Qwen3.8 27B always does)
   -NoPrefixCache                 do not keep system prompts on disk;  -PrefixCacheGb <N>  their disk space (8)
   -NoSwap                        the server keeps its model (requests for another model do not switch)
@@ -322,7 +319,6 @@ if ($ImageMinTokens -gt 0) { $extra += @("--image-min-tokens", $ImageMinTokens) 
 if ($ImageMaxTokens -gt 0) { $extra += @("--image-max-tokens", $ImageMaxTokens) }
 if ($BudgetGb -gt 0) { $extra += @("--budget", $BudgetGb) }
 if ($AttnF32) { $extra += "--attn-f32" }
-if ($V4) { $extra += "--v4" }
 if ($PreserveThinking) { $extra += "--preserve-thinking" }
 if ($NoPrefixCache) { $extra += "--no-prefix-cache" }
 if ($PrefixCacheGb -ge 0) { $extra += @("--prefix-cache-gb", $PrefixCacheGb) }
@@ -331,7 +327,7 @@ if ($ListenHost) { $extra += @("--host", $ListenHost) }
 if ($SessionDir) { $extra += @("--session-dir", "`"$SessionDir`"") }
 $extraKey = "$($extra -join ' ')|think $ThinkBudget"
 # (compared with the running server's only when given: pi-arc's plain start keeps a server started with other options)
-$extraGiven = @("MtpDrafts", "ThinkBudget", "ImageMinTokens", "ImageMaxTokens", "BudgetGb", "AttnF32", "V4", "PreserveThinking", "NoPrefixCache",
+$extraGiven = @("MtpDrafts", "ThinkBudget", "ImageMinTokens", "ImageMaxTokens", "BudgetGb", "AttnF32", "PreserveThinking", "NoPrefixCache",
   "PrefixCacheGb", "NoSwap", "ListenHost", "SessionDir", "Slots" | Where-Object { $PSBoundParameters.ContainsKey($_) }).Count -gt 0
 # the running server is kept unless an option given now differs from what it runs with (empty / 0 = not given)
 $same = $running -eq $m.alias -and (-not $Ctx -or ($st -and "$($st.ctx)" -eq $ctxArg)) -and

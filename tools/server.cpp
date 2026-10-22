@@ -2256,7 +2256,7 @@ static std::string ctx_key(const std::string& model, const EngineOptions& eo) {
   for (auto& c : p) c = (char)tolower((unsigned char)c);
   return p + "|" + std::to_string(fs::file_size(model, ec)) + "|" + std::to_string(eo.chunk) +
          "|z" + std::to_string((int)(eo.windows_reserve_gb * 10)) + (eo.stream_experts ? "s" : "n") +
-         (eo.dflash.empty() ? std::string() : eo.mtp_block ? "|dflash" : "|dflash-only") + (eo.v4 ? "|v4" : "") +
+         (eo.dflash.empty() ? std::string() : eo.mtp_block ? "|dflash" : "|dflash-only") + 
          (eo.slots > 1 ? "|slots" + std::to_string(eo.slots) + "/" + std::to_string(Engine::kSlotCtxFloor) : std::string()) +
          "|md" + std::to_string(eo.mtp_drafts) + "|" +  // (DFlash2 drafter: its weights and buffers; 4-bit V)
          (eo.min_chunk ? "/" + std::to_string(eo.min_chunk) : std::string()) + "|" + (eo.mtp ? "mtp" : "-") + "|" + (eo.attn_int8 ? "i8" : "f32") + "|" + std::to_string(device_global_mem()) +
@@ -2669,13 +2669,12 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
   srv.default_preserve_ = so.preserve_thinking;
   if (so.preserve_thinking && !srv.can_preserve_)
     fprintf(stderr, "--preserve-thinking: this model's chat template has no such option (Qwen3.6 has it; Qwen3.8 always keeps the reasoning)\n");
-  // (saved states only load into the same layout: no MTP block (-std), DFlash2 without the MTP block (-df) and the
-  // 4-bit V copy (--v4) each keep their own folders next to the plain one; auto and -nodf share one: DFlash2 saves
-  // no state of its own, its context rings start empty after a load — give it a suffix once that changes)
+  // (saved states only load into the same layout: no MTP block (-std) and DFlash2 without the MTP block (-df) each
+  // keep their own folders next to the plain one; auto and -nodf share one: DFlash2 saves no state of its own, its
+  // context rings start empty after a load — give it a suffix once that changes)
   std::string layout;
   if (!eo.mtp) layout += "-std";
   if (eo.mtp && !eo.dflash.empty() && !eo.mtp_block) layout += "-nomtp";
-  if (eo.v4) layout += "-v4";
   if (L->eng->hp.gemma) layout += "-q2";  // (Gemma 4: two-pass states; the one-pass ones of before 2026-10-22 stay unused)
   if (so.prefix_cache && eo.attn_int8) {  // %LOCALAPPDATA%\arcinfer\prefix\<model>-<size>[<layout>]
     std::error_code ec;
@@ -2763,7 +2762,6 @@ int main(int argc, char** argv) {
     else if (a == "--webui") so.webui = next();
     else if (a == "--budget") { so.eo.w8_budget_gb = to_double(a, next()); so.budget_given = true; }
     else if (a == "--attn-f32") so.eo.attn_int8 = false;
-    else if (a == "--v4") so.eo.v4 = true;  // (4-bit V cache, Qwen, experimental)
     else if (a == "--mtp") so.eo.mtp = true;
     else if (a == "--dflash") { so.eo.dflash = next(); so.eo.mtp = true; }
     else if (a == "--no-dflash") { so.eo.dflash.clear(); so.dflash_auto = false; }
@@ -2801,9 +2799,6 @@ int main(int argc, char** argv) {
     fprintf(stderr, "arcinfer-server: %s\n", e.what());
     return 2;
   }
-  // (ARC_V4=1 turns the engine's 4-bit V copy on as --v4 does: the server must know it too, for its context key and
-  //  the folders of saved states)
-  if (getenv("ARC_V4") && atoi(getenv("ARC_V4")) > 0) so.eo.v4 = true;
   if (model.empty() || help) {
     fprintf(stderr,
             "usage: arcinfer-server -m model.gguf [options]   OpenAI-compatible server (API at /v1, web UI at /)\n"
@@ -2851,8 +2846,6 @@ int main(int argc, char** argv) {
             "                        weights + an expert file under %%LOCALAPPDATA%%\\arcinfer\\zero\\models; afterwards\n"
             "                        the original GGUF can be moved away (e.g. to a USB disk)\n"
             "  --no-stream           every expert on the GPU (no SSD streaming; MoE models then get less context)\n"
-            "  --v4                  + a 4-bit copy of V for generation (Qwen, experimental): faster long answers deep in\n"
-            "                        long contexts, ~25 %% more attention-cache memory\n"
             "  --attn-f32            f32 attention (tests)\n"
             "  --kernels DIR         kernel folder (default zero\\kernels);  --webui DIR  web UI folder\n"
             "  --session-cache-gb N  disk space for saved conversations (default 0 = off): switching between\n"

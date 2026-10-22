@@ -88,7 +88,6 @@ static int run_main(int argc, char** argv) {
             "  --feed-step N         feed the prompt in calls of N tokens (tests resuming mid-prompt)\n"
             "  --budget GB           keep decoded weights resident up to GB\n"
             "  --attn-f32            f32 attention (f16 K/V)      --act256    one activation scale per 256 values (not 32)\n"
-            "  --v4                  + a 4-bit copy of V that generation reads (Qwen, experimental; more memory)\n"
             "profiling:\n"
             "  --prof                time to first token and per-kernel profile of the prompt\n"
             "  --prof-gen            per-kernel profile of generation (ARC_PROF_LAYERS=8: per group of 8 layers)\n"
@@ -143,7 +142,6 @@ static int run_main(int argc, char** argv) {
     else if (a == "--prof-gen") prof_gen = true;
     else if (a == "--act256") eo.act32_all = false;
     else if (a == "--attn-f32") eo.attn_int8 = false;
-    else if (a == "--v4") eo.v4 = true;  // (4-bit V cache, Qwen)
     else if (a == "--mtp") eo.mtp = true;
     else if (a == "--dflash") { eo.dflash = argv[++i]; eo.mtp = true; }  // DFlash2 drafter folder
     else if (a == "--draft") {  // auto: DFlash2 and the MTP block, picked per step; mtp: the block only; dflash: DFlash2 only
