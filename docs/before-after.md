@@ -22,8 +22,8 @@ character. "Bit-identical" below means exactly that, not "close". Changes that a
 | Qwen3.8 27B (IQ3_S GSQ, dense) | ~135 tok/s (4K prompt) | 4.9 tok/s; code 18.1 with DFlash2 + MTP | KL 0.0003-0.0004 |
 | Qwen3.8 Flash Next (IQ3_S, 512 experts on the SSD) | ~191 tok/s (4K, measured 2026-10-23), 163 (32K), 123 (125K) | 6-7 tok/s | KL 0.020 against the CPU reference with QSA (3.5K prompt); 0.048 on 363 tokens of README text (0.065 before) |
 | Qwen3.5 4B | 911 tok/s (2K prompt) | 17.6 tok/s | KL 0.0021; perplexity 6.056 (llama.cpp 6.141) |
-| Gemma 4 12B (Google QAT) | 100 tok/s (14K prompt) | 19.0 tok/s with its drafter | KL 0.0002 (two-pass mode, the only one since 2026-10-22) |
-| Gemma 4 26B-A4B (Google QAT Q4_0, MoE, experts on the SSD) | 230 tok/s (4K prompt), 178 (14K) | ~25 tok/s with its drafter; 13.0 after a 14K prompt without | KL 0.0042 against the CPU reference (480 tokens; two-pass mode, the only one since 2026-10-22) |
+| Gemma 4 12B (Google QAT) | 102 tok/s (14K prompt) | 19.0 tok/s with its drafter | KL 0.0002 (two-pass mode, the only one since 2026-10-22) |
+| Gemma 4 26B-A4B (Google QAT Q4_0, MoE, experts on the SSD) | 254 tok/s (4K prompt), 189 (14K) | ~25 tok/s with its drafter; 13.0 after a 14K prompt without | KL 0.0042 against the CPU reference (480 tokens; two-pass mode, the only one since 2026-10-22) |
 
 Two conversations at once (`--slots 2`), both writing their answers, their next tokens in one engine pass (tok/s of
 the two together): 27B prose 7.3 -> 10.5, code 11.6 -> 15.4; 35B 20.2 -> 24.7, 29.0 -> 30.7; Gemma 4 26B 19.8 -> 26.2
