@@ -1,7 +1,11 @@
 # F21.11 — Q2 speed work log / handoff
 
-Status: **planned, not implemented**. This file is the shared work log: the agent doing the code writes the
-implementation notes below; Claude adds measured results in the same file.
+Status (2026-10-22): **done; the two-pass mode is Gemma 4's only mode** (`ARC_Q2` / `--q2` no longer exist; the
+one-pass code is removed). What was implemented and measured is in `docs/before-after.md` (rows of 10-22) and
+`QUEUE.md` F21.11; the plan below is kept as written. Summary, 26B: generation with the drafter ~25 tok/s (one-pass
+26.8), after a 14K prompt 13.0 (14.9); 4K prompt ~218 tok/s (526); KL 0.0042 (prompt 0.0044, decode 0.0042).
+Tried and dropped: fused two-pass moe_rg for prompts (gate / up only -6 %), shuffle-free prompt attention, V from the
+int8 cache (KL 0.084), K f16 (KL 0.018).
 
 ## Why this file
 
@@ -34,7 +38,8 @@ Minimal tests, not the full suite per step (to save time and usage):
 - after each phase: build, **one** KL check on the 26B (prompt + `--kl-decode`, 480-token code prompt against
   `ref_g26_480.bin`), and the drafter's bit-identity once (`runz --mtp --dump-logits` vs plain);
 - at the end of the session: `runz --slots-check` on the 26B with `ARC_Q2=1`, one speed run per model, and
-  `testsun_tests.ps1` once (the default mode must be unchanged);
+  `tests
+un_tests.ps1` once (the default mode must be unchanged);
 - skipped: knob sweeps, best-of-two at every step, Qwen runs per phase (every F21.11 change sits behind Q2 and
   Gemma, so the Qwen paths are only checked once at the end).
 

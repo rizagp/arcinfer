@@ -2788,6 +2788,7 @@ int main(int argc, char** argv) {
     else if (a == "--no-prefix-cache") so.prefix_cache = false;
     else if (a == "--prefix-cache-gb") so.prefix_gb = to_double(a, next());
     else if (a == "--help" || a == "-h") help = true;
+    else throw std::runtime_error("unknown option " + a + " (--help lists them; --q2 and --v4 were removed 2026-10-22)");
   }
   if (!help) {
     if (port < 1 || port > 65535) throw std::runtime_error("--port: expected 1..65535 (got " + std::to_string(port) + ")");
