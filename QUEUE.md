@@ -2,7 +2,25 @@
 
 Target: token generation using > 90 % of measured bandwidth (~75 GB/s, so > 67.5 GB/s average per token) for
 every chat model in the Hugging Face cache, and vision / audio working on every model that has the encoder for it.
-Status: ✅ done · 🔄 in progress · ⏳ queued · ⚠️ note · [~] partial
+Status: ✅ done · 🔄 in progress · ⏳ queued · ⏸️ parked · 💡 idea · ⚠️ note · [~] partial
+
+## Open now (tidied 2026-10-22)
+
+Everything below this list is history plus the details of these items; a row not listed here is done, dropped
+(⚠️ with the reason) or parked (⏸️).
+
+| Priority | Item | Section |
+|---|---|---|
+| 1 | Speed of Gemma 4's accurate two-pass mode, then it becomes the only Gemma mode (Friday 2026-10-23 night) | F21.11 |
+| 2 | Register spills (attn_fa_g 11.4 KB first; 35B / 27B / Flash Next list) | F21.12 |
+| 3 | Flash Next to KL < 0.01 (now 0.048) | F21.13 |
+| 4 | Gemma 4 26B: prompt attention, long-context decode, vision encoder, MoE tiling, auto context | F21.5-21.9 |
+| 5 | Web search / fetch in the web UI (C++, asynchronous) | F22 |
+| 6 | Voice conversation in the web UI (24.1-24.3 can go first with E4B; 24.5 after F22) | F24 |
+| 7 | Batch decode for E4B and Flash Next | F20.5 / F20.6 |
+| 8 | Copy 4B / E4B (and 12B) from the D: backups to C: (the user decides) | F20.8 |
+| low | Jump-forward in tool calls; first prompt of a new session | F25.2 / F25.3 |
+| parked | Fused FFN gate + up and small DeltaNet kernels (F17.2); review leftovers (F18.14); 35B expert decode once per layer (F19.6); larger staging (F19.2) | |
 
 ## Done (F1-F14)
 
@@ -182,12 +200,18 @@ Rough schedule (adjusted to results; work that fails its criteria is dropped, no
 - Monday 07:30 stop testing; 07:40 tidy up: all test processes stopped, server LEFT OFF (user's decision),
   final report.
 
+**Outcome (tidied 2026-10-22):** 17.1 [~] (token-outer GEMVs for verification 99d6bcb, 4 rows per sub-group
+2ed16d8; the computed sign table was slower, docs/lessons) · 17.2 ⏸️ not started (parked) · 17.3 / 17.4 ✅ (27B
+DFlash2: Q4_0 weights d32199d, hybrid with the MTP block d1b2ed6, one-pass selector 379fee5) · 17.5 ✅ superseded by
+the slots and batch decode of F20 · 17.6 ✅ superseded by `tests/run_tests.ps1` for arcinferzero (c697b40), run
+after every engine change since.
+
 **Status (16 Oct night):**
 - [x] Part A: GEMM with 16 tokens side by side (+3-7 %), attention P·V (-12..17 %); decode prefetch, split, GEMV sign
   trick tried, not used (docs/lessons §5).
 - [x] Flash Next runs (engine, PLE, QSA, server): short-chat KL 0.0014; generation ±4 tok/s; commit 9788df0.
-- [ ] Flash Next: validate QSA at 3,566 tokens vs the CPU reference; speed (cache 12 %, one pool); no MTP.
-- [ ] DFlash2 for 27B: drafter code written (zero/engine.h dflash_*, --dflash DIR), not tested yet.
+- [x] Flash Next: validate QSA at 3,566 tokens vs the CPU reference (KL 0.020); speed (deep prefetch, F19.3); no MTP (F20.7).
+- [x] DFlash2 for 27B: drafter code written (zero/engine.h dflash_*, --dflash DIR), tested and in use (code 18.1 tok/s).
 
 **New order (user decision 16 Oct midday): Flash Next first.**
 1. Flash Next (qwen4exp) on arcinferzero, reusing the 35B path (SSD expert streaming + GPU cache, MoE routing,
@@ -239,7 +263,7 @@ time, no model GGUF deleted, no large new disk use without asking (Flash Next ex
 | 18.13 | 4-bit V (review 18 / 18.7 option D, user: "PP terbaik, TG baik") | ✅ | opt-in `--v4`: int8 V for prompts + a 4-bit copy (per 64 dims, (n - 8) * amax / 7) for generation; 35B 125K prompt 321 -> 316 tok/s, generation at depth 72.8 -> 67.5 ms per step, expert cache 90 -> 87 %. session save -> restart -> load with --v4 tested 18 Oct (identical follow-up; an int8 server refuses the V4 files) |
 | 18.11 | Flash Next QSA row tiling (N-5) | ✅ | commit ec25201: qsa_score_rt (8 rows), bit-identical; pp32768 +5..17 %, 125K prompt 78.6 -> 123.4 tok/s; --attn-f32 refused for QSA (it had no masks) |
 | 18.12 | Docs: speed-progress (35B IQ4_XS, sweep), lessons (mach scan, KV 4-bit results), README 35B line | ✅ | |
-| 18.14 | DeepSeek review re-check (agent, every item vs HEAD e85bd08) | 🔄 | done since: chunk-size line cap + chunk trailers, --host warning, --v4 / --mtp-drafts help, "one answer at a time" note. Left, by importance: kernel lane guards (the shim already fails loudly) + a non-multiple-dims test; writer thread so a slow client does not hold the engine lock; --v4 Flash Next beyond 8K (35B done: 32K KL 0.0124; 262K generation -8 % per step at 76 % cache); Ctrl+C session save / RAII writers; qsa_select histogram; GEMM / GEMV / moe_group autotune; merge kernels/ and zero/kernels/; split server.cpp / ops.cl; /props and /v1/models schema test; check-docs script; small test model |
+| 18.14 | DeepSeek review re-check (agent, every item vs HEAD e85bd08) | ⏸️ leftovers parked (2026-10-22) | done since: chunk-size line cap + chunk trailers, --host warning, --v4 / --mtp-drafts help, "one answer at a time" note. Left, by importance: kernel lane guards (the shim already fails loudly) + a non-multiple-dims test; writer thread so a slow client does not hold the engine lock; --v4 Flash Next beyond 8K (35B done: 32K KL 0.0124; 262K generation -8 % per step at 76 % cache); Ctrl+C session save / RAII writers; qsa_select histogram; GEMM / GEMV / moe_group autotune; merge kernels/ and zero/kernels/; split server.cpp / ops.cl; /props and /v1/models schema test; check-docs script; small test model |
 
 ## F19: prompt speed after V4 (review section 19, requested 2026-10-18)
 
