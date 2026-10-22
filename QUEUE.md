@@ -20,6 +20,7 @@ Everything below this list is history plus the details of these items; a row not
 | 7 | Batch decode for E4B and Flash Next | F20.5 / F20.6 |
 | 8 | Copy 4B / E4B (and 12B) from the D: backups to C: (the user decides) | F20.8 |
 | 9 | Slim the code after F21.11: audit the ARC_* switches, drop lost experiments and the inaccurate Gemma path | F26 |
+| 10 | Flint (unsloth/flint-GGUF, MoE 256 experts): new architecture | F28 |
 | low | Jump-forward in tool calls; first prompt of a new session | F25.2 / F25.3 |
 | parked | Fused FFN gate + up and small DeltaNet kernels (F17.2); review leftovers (F18.14); 35B expert decode once per layer (F19.6); larger staging (F19.2) | |
 
@@ -420,4 +421,25 @@ The user may reach the web UI from outside, as Unsloth Studio does behind a Clou
 |---|---|---|---|
 | 27.1 | Origin check accepts `https://<Host>` | 💡 when wanted | through a tunnel the page is `https://name.domain`; today only `http://<Host>` and local pages pass (403 otherwise) |
 | 27.2 | Login | 💡 when wanted | the server has no authentication: anyone with the URL could use the GPU and read saved conversations. Recommended: Cloudflare Access in front; optional second layer `--password` / `--api-key` (Bearer for API clients, a login page in the web UI), ~1-2 h |
+
+## F28: Flint (unsloth/flint-GGUF) support (requested 2026-10-22)
+
+The user downloaded `flint-UD-Q4_K_XL.gguf` (25.05 GB, Unsloth's imatrix quant of `RecursiveSI/flint`,
+Apache-2.0) to `D:\models` (HF cache layout). Architecture `flint` (FlintForCausalLM), not supported yet.
+
+From `config.json`: MoE, 49 layers, hidden 2048, 32 q / 4 kv heads of 128, 256 experts (6 per token, size 512,
+`norm_topk_prob`, **sigmoid router**) + a shared expert (1024); layers 0-1 dense MLP (6144); attention every 4th
+layer full, the others **sliding window 513**; **no RoPE** on the full layers (`no_rope_layer_indices`), rope
+theta 10000 elsewhere; `softmax_type: learnable` (attention sinks, to confirm against llama.cpp); vocab 150,144;
+context 262,144. Close to the 35B-A3B path (streamed experts, shared expert) plus Gemma-style sliding layers.
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 28.1 | Read the GGUF: tensor names / types, chat template, how llama.cpp implements `flint` (sinks, NoPE, router) | ⏳ | the reference for every later step |
+| 28.2 | f32 CPU reference (`tools/ref_forward`) for Flint | ⏳ | KL target < 0.01 as for the other models |
+| 28.3 | Engine: hparams, sliding / full KV caches, NoPE layers, sinks, sigmoid routing, dense first layers, expert streaming / `--pack` | ⏳ | estimate 1-2 days with 28.1-28.2 |
+| 28.4 | Server: template, tool calls, thinking, catalog entry (`--list-models`, pi-arc shortcut) | ⏳ | |
+| 28.5 | Speed: prompt / generation, drafting if a drafter exists | ⏳ | before / after rows |
+
+Disk: the package's expert file (~23 GB) goes with the model on D: or C: (C: had 57 GB free on 2026-10-22).
 
