@@ -2526,6 +2526,7 @@ static int list_models() {
 struct ServeOpts {
   EngineOptions eo;
   bool ctx_auto = false;
+  bool warm_prompt = true;  // (the server's start: also a long warm-up prompt; a switch for a request skips it)
   std::string webui, mmproj, sess_dir;
   int think_budget = -1;
   bool preserve_thinking = false;
@@ -2596,7 +2597,7 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
           eng.max_chunk, eng.gpu_bytes / 1073741824.0, eng.w8_resident ? "W8 resident" : "W8 just-in-time");
   {  // compile kernels before serving (all of the generation's after an update)
     const auto tw = std::chrono::steady_clock::now();
-    if (eng.warm_up_once(L->tok->encode("Hi", false)[0]))
+    if (eng.warm_up_once(L->tok->encode("Hi", false)[0], so.warm_prompt))
       fprintf(stderr, "kernels warmed up for this model in %.1f s (once after an update)\n",
               std::chrono::duration<double>(std::chrono::steady_clock::now() - tw).count());
   }
@@ -3221,6 +3222,7 @@ int main(int argc, char** argv) {
           // (a --dflash drafter is for the first model, and only with MTP; other models find their own)
           if (!m->mtp || !same_file(m->path, model)) s2.eo.dflash.clear();
           try {
+            s2.warm_prompt = false;  // (the waiting request warms it)
             cur = load_model(m->path, m->alias, s2);
             fprintf(stderr, "switched to %s in %.1f s\n", m->alias.c_str(), ms_since(t0) / 1000);
             if (const char* la = getenv("LOCALAPPDATA"))  // pi-arc starts with this model next time

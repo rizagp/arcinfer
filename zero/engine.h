@@ -374,7 +374,7 @@ class Engine {
   // the MTP block each); leaves the engine reset. Only when this model, these options and these kernel sources have
   // not been warmed before (a marker in the kernel cache): after an update the first requests took seconds per new
   // kernel (27B with DFlash2: a 27-token prompt 37 s, then 1-3 tok/s), later starts skip it. Returns true when it ran.
-  bool warm_up_once(int tok) {
+  bool warm_up_once(int tok, bool prompt = true) {
     const std::string& dir = cl_.cache_dir;
     char hex[17];
     snprintf(hex, sizeof hex, "%016llx",
@@ -383,12 +383,20 @@ class Engine {
                                              "|" + std::to_string(opt.mtp_drafts) +
                                              "|" + std::to_string(max_chunk) + "|" + cl_.device_id));
     const std::string marker = dir.empty() ? std::string() : dir + "\\warm-" + hex;
+    // (every start (prompt = true): a prompt long enough for the large-chunk kernels (moe_rg from 320 rows), then a token: their first
+    //  use in a process cost seconds even from the kernel cache; 35B with drafters, a first 1,749-token request 8.6 s
+    //  (203 tok/s), the next ones 3.5 s)
+    const int nwarm = std::max(1, std::min({prompt ? 512 : 32, max_chunk, ctx - 12}));
     if (!marker.empty() && std::filesystem::exists(marker)) {
-      forward(&tok, 1);  // (the kernels are in the cache: building them is quick)
+      if (prompt) {
+        std::vector<int> w(nwarm, tok);
+        forward(w.data(), nwarm);
+      }
+      forward(&tok, 1);
       reset();
       return false;
     }
-    std::vector<int> t(std::max(1, std::min(32, ctx - 12)), tok);
+    std::vector<int> t(nwarm, tok);
     forward(t.data(), (int)t.size());
     forward(&tok, 1);
     if (has_mtp && !gemma_mtp_) {

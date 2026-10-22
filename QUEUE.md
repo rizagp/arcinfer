@@ -395,7 +395,7 @@ asks something else. That test showed sampled tool calls were slow (2.45 tok/s).
 |---|---|---|---|
 | 25.1 | Sampled tool calls: skip the negligible vocabulary tail in constrained sampling | ✅ 3ba7880 | 35B short call 4.8 -> 20.4 tok/s, long `write` call 24.3 (greedy 24.4); same tokens in the seeded tests |
 | 25.2 | Jump-forward in tool calls | 💡 low priority | when the constraint allows only one continuation (the tool name, `":"`, closing tokens), append it without a decode step per token; output unchanged; estimate 10-20 % on tool calls, ~half a day; MTP already drafts most of these (78/92 accepted) |
-| 25.3 | First prompt of a new session | 💡 check | Pi's 1,206-token system prompt ran at 204 tok/s on the 35B (vs ~600 on long prompts), ~6 s once per session (later turns hit the system-prompt cache); check whether expert cache misses explain it |
+| 25.3 | First prompt of a new session | ✅ 2026-10-23 | not expert misses: the first prompt of a process paid the first use of the large-chunk kernels (moe_rg and others from 320 rows; the warm-up ran 1 token, 32 after an update). 35B with its drafters, a 1,749-token request right after the start 8.6 s (203 tok/s), the next ones 3.5 s. The server's start now also runs a 512-token warm-up prompt: first request 4.0-4.4 s (439-444 tok/s), ready after 13 s; a model switched in for a request skips it (that request warms it) |
 
 ## F26: slim the code (requested 2026-10-22, after F21.11)
 
