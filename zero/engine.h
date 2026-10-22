@@ -142,7 +142,12 @@ class Engine {
     // Qwen3.6 35B at ctx 262K, chunk 2048 / 4096 / 8192: expert cache 83 / 81 / 77 %, 32K prompt 485 / 533 / 604
     // tok/s, 128K prompt 284 / 306 / 324, generation at 128K 13.0 / 12.8 / 12.6 tok/s)
     // (Flash Next: 2048, its residual is 4 streams wide)
-    max_chunk = o.chunk > 0 ? o.chunk : stream_ ? (hp.hc ? 2048 : 8192) : hp.moe ? 2048 : (w8_resident ? 512 : 4096);
+    // (Gemma 4's two-pass mode: 2048 for streamed experts too. Its float K / V rings of the sliding layers hold the
+    //  window + a chunk + 4096 rows, 4.1 GB at 8192 on the 26B, which left the expert cache at 39 %. 26B, ctx 16K,
+    //  chunk 8192 / 4096 / 2048: expert cache 39 / 64 / 77 %, 4K prompt 216 / 184 / 217 tok/s, generation after a
+    //  14K prompt 9.9 / 12.3 / 13.0 tok/s)
+    const bool q2_want = hp.gemma && (o.q2 || (getenv("ARC_Q2") && atoi(getenv("ARC_Q2")) != 0));
+    max_chunk = o.chunk > 0 ? o.chunk : stream_ ? (hp.hc || q2_want ? 2048 : 8192) : hp.moe ? 2048 : (w8_resident ? 512 : 4096);
     max_chunk = (std::max(max_chunk, o.min_chunk) + 127) / 128 * 128;
     q2_init();
     if (!opt.dry) build_kernels();

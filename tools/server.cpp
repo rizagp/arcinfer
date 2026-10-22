@@ -2260,10 +2260,10 @@ static std::string ctx_key(const std::string& model, const EngineOptions& eo) {
          (eo.slots > 1 ? "|slots" + std::to_string(eo.slots) + "/" + std::to_string(Engine::kSlotCtxFloor) : std::string()) +
          "|md" + std::to_string(eo.mtp_drafts) + "|" +  // (DFlash2 drafter: its weights and buffers; 4-bit V)
          (eo.min_chunk ? "/" + std::to_string(eo.min_chunk) : std::string()) + "|" + (eo.mtp ? "mtp" : "-") + "|" + (eo.attn_int8 ? "i8" : "f32") + "|" + std::to_string(device_global_mem()) +
-         "|m14";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
+         "|m15";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
                  // for 27B, m6: MoE prompt GEMM staging, m7: MoE buffers shared, m8: MoE MTP 1 draft, Q3_K experts, m9: memory parts in the cache,
                  // m12: streamed MoE reserves 128K of context before the expert cache, m13: streamed MoE chunk 8192, m14: slot_bytes with every
-                 // slot buffer, f16 K / V with --attn-f32);
+                 // slot buffer, f16 K / V with --attn-f32, m15: --q2 Gemma MoE chunk 2048);
                  // bump on changes
 }
 // "ctx\tresident" lines (older lines without the second field are computed again)
@@ -2487,7 +2487,7 @@ static int list_models() {
           }
       }
       // (the engine's default: streamed experts 8192, Flash Next 2048, resident decoded weights 512)
-      int chunk = m.arch == "qwen4exp" ? 2048 : moe ? 8192 : a.resident ? 512 : 4096;  // (streamed MoE first, as the engine)
+      int chunk = m.arch == "qwen4exp" || (gemma && moe && eo.q2) ? 2048 : moe ? 8192 : a.resident ? 512 : 4096;  // (as the engine)
       if (gemma && m.vision) chunk = std::max(chunk, 2048);  // (an image is one chunk)
       d.set("chunk", chunk);
       d.set("mtp_drafts", !m.mtp ? 0 : !eo.dflash.empty() ? 7 : gemma ? (moe ? 3 : 2) : moe ? 5 : n_embd >= 5120 ? 7 : n_embd <= 2560 ? 3 : 2);
@@ -2819,7 +2819,7 @@ int main(int argc, char** argv) {
             "                        " ARC_DATA_HELP "ctx-auto.txt)\n"
             "  --chunk N             prompt tokens per step (default 4096; MoE with experts on the SSD 8192, Flash\n"
             "                        Next 2048; MoE with --no-stream 2048; 512 when decoded weights stay resident;\n"
-            "                        Gemma with images at least 2048)\n"
+            "                        Gemma with images at least 2048; Gemma MoE with --q2 2048)\n"
             "  --mtp                 speculative decoding with the model's MTP block or Gemma assistant drafter\n"
             "  --mtp-drafts N        drafts per step: Qwen 1..7, Gemma 1..3 (default: 7 for Qwen 27B-class and with\n"
             "                        DFlash2, 5 for MoE, 3 for 4B and Gemma 4 26B, 2 otherwise)\n"
