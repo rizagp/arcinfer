@@ -214,7 +214,7 @@ class Engine {
     if (hp.ple_layer >= 0) ple_sync();
     struct DflCommit { Engine& e; int p0; ~DflCommit() { if (e.dfl_) e.dfl_commit_prompt(p0); } } dfl_commit{*this, pos};
     if (dfl_) dfl_window(pos, n);
-    if ((!w8_resident || stream_) && n > max_chunk && !getenv("ARC_CHUNK_MAJOR") && !hp.n_ple) {
+    if ((!w8_resident || stream_) && n > max_chunk && !hp.n_ple) {
       // layer-major in segments of up to lm_seg_ tokens (each matrix is decoded once per segment)
       prog_total_ = n;
       for (int s0 = 0; s0 < n; s0 += lm_seg_) {
@@ -1377,7 +1377,7 @@ class Engine {
   cl_kernel k_rmsnorm_ = nullptr, k_swiglu_ = nullptr, k_gdn_conv_ = nullptr, k_conv_upd_ = nullptr,
             k_gdn_recur_ = nullptr, k_gnorm_ = nullptr, k_attn_prep_ = nullptr, k_attn_ = nullptr,
             k_attn_gate_ = nullptr, k_gdn_gates_ = nullptr, k_attn_q8_ = nullptr, k_attn_dec_ = nullptr,
-            k_attn_comb_ = nullptr, k_gdn_recur1_ = nullptr;
+            k_attn_comb_ = nullptr;
   std::vector<Layer> layers_;
   cl_kernel k_add_norm_ = nullptr, k_ple_gate_ = nullptr, k_ple_comb_ = nullptr, k_add_nq_ = nullptr;
   cl_kernel k_rope_tab_ = nullptr;
@@ -1406,8 +1406,6 @@ class Engine {
          hver_ = nullptr, mtp_h_ = nullptr;
   bool spec_ = false;  // verification pass: DeltaNet states to S_next, the inputs kept (verify_done)
   std::vector<float> mtp_logits_host_, spec_logits_host_;
-  std::vector<int> draft_ids_;     // vocabulary rows of the drafts' output head (empty: the whole head)
-  cl_mem draft_idx_ = nullptr;
   int conv_ct_ = 1;  // tokens per sub-group in gdn_conv (1 is fastest: more sub-groups in flight)
   GpuWeight lm_head_;
   cl_mem out_norm_ = nullptr, tabs_ = nullptr;
@@ -1433,7 +1431,6 @@ class Engine {
   // while several chunks go through it (layer-major prefill)
   static constexpr int kRoles = 16;
   cl_mem stage_q_[kRoles] = {}, stage_h_[kRoles] = {};
-  cl_mem splitk_ = nullptr;  // split-K GEMV partials (up to 4 x 65536 floats)
   bool has_rgu_ = false;      // MoE: stacked router + shared-expert gate / up weights (Layer::rgu)
   cl_mem rgu_out_ = nullptr, rgu_gu_ = nullptr;
   cl_mem qz_out_ = nullptr, qz_z_ = nullptr, qz_ab_ = nullptr;  // stacked DeltaNet input projections' output, its views
@@ -1768,7 +1765,6 @@ class Engine {
     const std::string big = "-cl-intel-256-GRF-per-thread -DGQ=" + std::to_string(gq());
     k_attn_ = kernel("ops", big, "attn_fa");
     k_gdn_recur_ = kernel("ops", big, "gdn_recur");
-    k_gdn_recur1_ = p("gdn_recur1");  // (T = 1: 128 GRF, 4 lanes per state column)
     const std::string att = "-cl-intel-256-GRF-per-thread -DHPG=" + std::to_string(hp.n_head / hp.n_head_kv) +
                             " -DHS=" + std::to_string(attn_hs()) + " -DTPW=" + std::to_string(attn_tpw()) + sb_opt(256);
     k_attn_q8_ = kernel("ops", att, "attn_q8");
@@ -1896,9 +1892,8 @@ class Engine {
   void load_gdn_in(Layer& L, const std::string& p) {
     const GgufTensor &tq = f_.get(p + "attn_qkv.weight"), &tz = f_.get(p + "attn_gate.weight");
     const int E = hp.n_embd, C = (int)tq.dims[1], Di = (int)tz.dims[1], nab = 2 * hp.ssm_nv;
-    static const bool no_qz = getenv("ARC_NO_QZ") != nullptr;  // (A/B: separate GEMVs)
     const bool quant = tq.type != GGML_F32 && tq.type != GGML_F16 && tq.type != GGML_BF16;
-    if (no_qz || !quant || tq.type != tz.type || tq.dims[0] != E || tz.dims[0] != E || E % 256 || C % 64 || Di % 64 ||
+    if (!quant || tq.type != tz.type || tq.dims[0] != E || tz.dims[0] != E || E % 256 || C % 64 || Di % 64 ||
         C != hp.conv_dim() || Di != hp.ssm_d_inner) {
       L.qkv = load_w(p + "attn_qkv.weight");
       L.z = load_w(p + "attn_gate.weight");
@@ -2710,8 +2705,7 @@ class Engine {
     const size_t cv_bytes = (std::max<size_t>(M * hp.conv_dim() * 4, 64) + 4095) / 4096 * 4096,
                  o_bytes = (M * std::max(hp.ssm_d_inner, hp.n_head * hp.head_dim) * 4 + 4095) / 4096 * 4096,
                  qr_bytes = M * hp.n_head * hp.head_dim * 4;
-    static const bool no_share = getenv("ARC_NO_MOE_SHARE") != nullptr;  // (A/B)
-    const bool share = hp.moe && !no_share;
+    const bool share = hp.moe;
     auto sub = [&](cl_mem parent, size_t off, size_t bytes) -> cl_mem {
       if (opt.dry) return nullptr;
       cl_int err;
@@ -2850,20 +2844,6 @@ class Engine {
       mtp_h_ = buf((size_t)hp.n_embd * 4);
       fill(hlast_, (size_t)hp.n_embd * 4);
       mtp_logits_host_.resize(hp.n_vocab);
-      // ARC_DRAFT_VOCAB=N: the drafts' output head covers only the first N token ids (BPE ids are roughly in order of
-      // frequency) and the last 512 (control tokens). A draft is only a guess the main model verifies, so the output
-      // stays the same; a token outside the list is never drafted. Off by default: 27B, 3 drafts, N = 65536: an
-      // English code answer 9.0 -> 9.5 tok/s, but an Indonesian one 7.3 -> 6.1 (its common tokens lie beyond 65536:
-      // 206 of 441 drafts accepted instead of 251 of 360).
-      const int dv = getenv("ARC_DRAFT_VOCAB") ? atoi(getenv("ARC_DRAFT_VOCAB")) : 0;
-      if (dv > 0 && dv + 512 < hp.n_vocab) {
-        for (int i = 0; i < dv; ++i) draft_ids_.push_back(i);
-        for (int i = hp.n_vocab - 512; i < hp.n_vocab; ++i) draft_ids_.push_back(i);
-        draft_idx_ = buf(draft_ids_.size() * 4);
-        if (!opt.dry)
-          CL_CHECK(clEnqueueWriteBuffer(cl_.queue, draft_idx_, CL_TRUE, 0, draft_ids_.size() * 4, draft_ids_.data(), 0,
-                                        nullptr, nullptr));
-      }
     }
     for (int r = 0; r < kRoles; ++r)
       if (stage_need_q_[r]) {
@@ -3057,32 +3037,8 @@ class Engine {
       // with more sub-groups again
       const bool vk = gemv_v_ok(w);
       const int grows = vk ? gemv_v_rows(w) : w.N <= 4096 ? 1 : w.N <= 8192 ? 2 : w.N <= 65536 ? 4 : 2;
-      // split-K for matrices with few rows (zero/kernels/decode.cl SPLITK; experiment, off: ARC_SPLITK=S / ARC_SPLITK_ROWS).
-      // Qwen3.6 35B: 512-row matrices 10-15 % faster including the extra splitk_sum launch, larger ones slower, 18.6 vs
-      // 18.8 tok/s overall: the small GEMVs lose time to the fixed cost of a launch, not to too few sub-groups
-      static const int sk_env = getenv("ARC_SPLITK") ? atoi(getenv("ARC_SPLITK")) : -1;
-      static const int sk_rows = getenv("ARC_SPLITK_ROWS") ? atoi(getenv("ARC_SPLITK_ROWS")) : 0;
-      const int sgs = (w.N + grows - 1) / grows, pairs = (w.K / 256 + 1) / 2;
-      int S = 1;
-      if (&w != &lm_head_) S = sk_env >= 0 ? std::max(1, sk_env) : sgs <= sk_rows / 4 ? 4 : sgs <= sk_rows / 2 ? 2 : 1;
-      S = std::min(S, pairs);
       int N = w.N, K = w.K, M = Mp;
       rd_bytes += raw_bytes(w);
-      if (S > 1) {
-        if (!splitk_) splitk_ = buf((size_t)4 * 65536 * 4);
-        cl_kernel k = kernel("decode", "-DQT=" + std::to_string(w.type) + " -DGROWS=" + std::to_string(grows) +
-                                           " -DSPLITK=" + std::to_string(S), vk ? "gemv_v" : "gemv");
-        int z = 0;
-        set_args(k, 0, w.raw, N, K, tabs_, aq_, asc_, absum_, M, splitk_, z, z);
-        size_t g[2] = {((size_t)sgs * 16 + 255) / 256 * 256, (size_t)S}, l[2] = {256, 1};
-        run(name, k, 2, g, l);
-        cl_kernel k2 = kernel("decode", "-DQT=" + std::to_string(w.type), "splitk_sum");
-        int SS = S;
-        set_args(k2, 0, splitk_, SS, N, C, c_off, a);
-        size_t g2 = ((size_t)N + 255) / 256 * 256, l2 = 256;
-        run(name, k2, 1, &g2, &l2);
-        return;
-      }
       if (q2_fuse_ && a > 1) throw std::logic_error(std::string("fused two-pass GEMV with an epilogue: ") + name);
       cl_kernel k = kernel("decode", "-DQT=" + std::to_string(w.type) + " -DGROWS=" + std::to_string(grows) + head_defs(w) +
                                          (q2_fuse_ ? " -DQ2F" + q2_defs_ : std::string()),
@@ -3672,9 +3628,8 @@ class Engine {
     const int E = hp.n_embd, HC = hp.hc_n, W = hp.hce(), LD = down.N, LR = hp.hc_lr, KP = hc_lr_pad();
     float eps = hp.eps;
     // single tokens: two fused kernels with f32 activations (norm + down + inject, then silu + up + gated mean) and
-    // the block input's quantization; prompt chunks below: int8 GEMMs (ARC_HC_INT8=1: those for single tokens too)
-    static const bool int8_1 = getenv("ARC_HC_INT8") != nullptr;
-    if (T == 1 && !int8_1 && W <= 10240 && KP <= 1024) {
+    // the block input's quantization; prompt chunks below: int8 GEMMs
+    if (T == 1 && W <= 10240 && KP <= 1024) {
       if (!hc_rinv_) hc_rinv_ = buf(64 * 4);
       int rr = r0, e = E, hc = HC, n = down.N, lr = LR, kp = KP;
       cl_kernel k1 = kernel("ops", "", "hc_down1");
@@ -3880,14 +3835,12 @@ class Engine {
         run("conv_state_update", k_conv_upd_, 1, &g1, &l1);
       }
       {
-        // (ARC_GDN1=1: a T = 1 kernel with 4 lanes per state column and 128 GRF; bit-identical but slower: 35B 248-341
-        //  vs 226-254 ms per 96 tokens for gdn_recur with vector state loads, which was 316)
-        static const bool use1 = getenv("ARC_GDN1") && atoi(getenv("ARC_GDN1")) != 0;
-        const bool one = Tq == 1 && use1;
-        cl_kernel k = one ? k_gdn_recur1_ : k_gdn_recur_;
+        // (a T = 1 kernel with 4 lanes per state column and 128 GRF, bit-identical, was slower: 35B 248-341 vs 226-254
+        //  ms per 96 tokens; removed 2026-10-22)
+        cl_kernel k = k_gdn_recur_;
         set_args(k, 0, cq, C, gq, nk, nv, L.S, Tq, oq, spec_ ? L.S_next : L.S);
-        size_t g1 = (size_t)nv * (one ? 512 : 128), l1 = 64;
-        run(one ? "gdn_recur1" : "gdn_recur", k, 1, &g1, &l1);
+        size_t g1 = (size_t)nv * 128, l1 = 64;
+        run("gdn_recur", k, 1, &g1, &l1);
       }
     };
     if (batch_.empty()) seq(0, T);
@@ -4145,10 +4098,9 @@ class Engine {
     // over the stacked rows when the layer has them (router logits at rgu_out_[0], gate / up in rgu_gu_)
     const int fused = cur_T_ > 8 ? 1 : 0;
     cl_mem rl = rl_, gu = big_;
-    static const bool no_rgu = getenv("ARC_NO_RGU") != nullptr;  // (A/B: three GEMVs)
     if (g4) {
       // (done above)
-    } else if (T == 1 && L.rgu.raw && !no_rgu) {
+    } else if (T == 1 && L.rgu.raw) {
       matmul("gemm_router_sh", L.rgu, Mp, rgu_out_, 0, 0, 0, true);
       rl = rgu_out_;
       gu = rgu_gu_;
@@ -5048,28 +5000,7 @@ class Engine {
     if (hp.moe) layer_moe(mtp_, n, Mp);
     else layer_ffn(mtp_, n, Mp);
     if (logits) {
-      if (draft_ids_.empty()) {
-        head_rows(n - 1, 1, shnorm_, hout);
-      } else {  // (the draft head: the listed rows only, compact logits)
-        const int saved = cur_T_;
-        cur_T_ = 1;
-        float eps = hp.eps;
-        int E2 = hp.n_embd, M = 16, nn = 1, wh = hout ? 1 : 0, a32 = 1, r0 = n - 1;
-        set_args(k_rmsnorm_, 0, x_, r0, shnorm_, E2, M, nn, eps, aq_, asc_, absum_, hout ? hout : big_, wh, a32);
-        size_t gws[2] = {256, 1}, lws[2] = {256, 1};
-        run("rmsnorm_quant", k_rmsnorm_, 2, gws, lws);
-        const GpuWeight& w = lm_head_;
-        const bool vk = gemv_v_ok(w);
-        const int grows = vk ? gemv_v_rows(w) : 4;
-        cl_kernel k = kernel("decode", "-DQT=" + std::to_string(w.type) + " -DGROWS=" + std::to_string(grows) + " -DROWIDX" +
-                                           head_defs(w), vk ? "gemv_v" : "gemv");
-        int NN = (int)draft_ids_.size(), K = w.K, MM = 16, z = 0;
-        rd_bytes += raw_bytes(w) / w.N * NN;
-        set_args(k, 0, w.raw, NN, K, tabs_, aq_, asc_, absum_, MM, logits_, z, z, draft_idx_);
-        size_t g1 = ((size_t)(NN + grows - 1) / grows * 16 + 255) / 256 * 256, l1 = 256;
-        run("lm_head_draft", k, 1, &g1, &l1);
-        cur_T_ = saved;
-      }
+      head_rows(n - 1, 1, shnorm_, hout);
     }
     x_ = saved_x;
     pos = saved_pos;
@@ -5148,13 +5079,12 @@ class Engine {
     if (pos + 1 + max_drafts > ctx) max_drafts = std::max(1, ctx - pos - 1);
     std::vector<int> drafts;
     mtp_rows(toks.data(), hfin_, np + 1, pos - np, true, max_drafts > 1 ? mtp_h_ : nullptr);
-    // (the draft head's logits: compact, row i is token draft_ids_[i]; the confidence is taken over those rows)
-    const size_t nl = draft_ids_.empty() ? (size_t)hp.n_vocab : draft_ids_.size();
+    const size_t nl = (size_t)hp.n_vocab;
     for (int k = 0;; ++k) {
       CL_CHECK(clEnqueueReadBuffer(cl_.queue, logits_, CL_TRUE, 0, nl * 4, mtp_logits_host_.data(), 0, nullptr, nullptr));
       const auto first = mtp_logits_host_.begin(), last = first + nl;
       const auto mx = std::max_element(first, last);
-      const int d = draft_ids_.empty() ? (int)(mx - first) : draft_ids_[mx - first];
+      const int d = (int)(mx - first);
       drafts.push_back(d);
       if ((int)drafts.size() >= max_drafts) break;
       const double z = softmax_den(&*first, nl, *mx);

@@ -635,50 +635,23 @@ __kernel void decode_w8_sl(__global const uchar* raw, int N, int K, __global con
 #define HEAD_OUT(v) (v)
 #endif
 
-// Split-K (-DSPLITK=S, small matrices): work-group column g1 = get_group_id(1) takes superblock pairs
-// [g1 * P / S, (g1 + 1) * P / S) of the row and writes its partial sums to C[g1 * N + n] (no c_off, no
-// accumulation); splitk_sum adds the S partials into the output. With a few hundred to a few thousand rows a
-// GEMV streams each row with too few sub-groups in flight to hide the memory latency (Qwen3.6 35B: 512-row
-// matrices at 36 GB/s, 2048-row at 49, 8192-row at 62).
-#ifdef SPLITK
-#define SK_LO(nsb) (2 * ((int)get_group_id(1) * (((nsb) + 1) / 2) / SPLITK))
-#define SK_HI(nsb) min((nsb), 2 * (((int)get_group_id(1) + 1) * (((nsb) + 1) / 2) / SPLITK))
-#define SK_STORE(n, v) C[(size_t)get_group_id(1) * N + (n)] = (v)
-#else
-#define SK_LO(nsb) 0
-#define SK_HI(nsb) (nsb)
-#define SK_STORE(n, v) C[c_off + (n)] = accumulate ? C[c_off + (n)] + (v) : (v)
-#endif
-// C[c_off + n] (+)= sum of the S split-K partials p[s * N + n]. grid (N).
-__kernel void splitk_sum(__global const float* p, int S, int N, __global float* C, int c_off, int accumulate) {
-  const int n = get_global_id(0);
-  if (n >= N) return;
-  float v = 0.0f;
-  for (int i = 0; i < S; ++i) v += p[(size_t)i * N + n];
-  C[c_off + n] = accumulate ? C[c_off + n] + v : v;
-}
 // -DQ2F (Gemma 4 two-pass mode, one token): the second pass fused in. Next to the activations' int8 values the
 // buffers hold their rounding residuals at fixed offsets (-DQ2_AQ bytes into aq, -DQ2_SC floats into asc, -DQ2_AB
 // halves into absum, as ops.cl's quant_store16 writes them); each weight block read is dotted with both and kept in
 // two accumulators. The output is what the two launches gave, value pass then residual pass (accumulate = 1):
-// (C + v) + r, or v + r. No soft cap (the two-pass head is capped after both passes) and no split-K.
+// (C + v) + r, or v + r. No soft cap (the two-pass head is capped after both passes).
 #ifdef Q2F
-#if defined(SOFTCAP) || defined(SPLITK)
-#error "Q2F: no soft cap or split-K in the fused two-pass GEMV"
+#ifdef SOFTCAP
+#error "Q2F: no soft cap in the fused two-pass GEMV"
 #endif
 #define Q2F_STORE(n, v, r) C[c_off + (n)] = (accumulate ? C[c_off + (n)] + (v) : (v)) + (r)
 #endif
 #define WIN_U (2 * BBP / 4)          // uints per two-superblock window
 #define WIN_CALLS ((WIN_U + 15) / 16)
 __attribute__((intel_reqd_sub_group_size(16)))
-// With -DROWIDX the kernel computes only the rows listed in rowidx[0..N) (compact output; MTP draft head).
 __kernel void gemv(__global const uchar* raw, int N, int K, __global const uint* tabs, __global const char* aq,
                    __global const float* asc, __global const ushort* absum, int M, __global float* C, int c_off,
-                   int accumulate
-#ifdef ROWIDX
-                   , __global const int* rowidx
-#endif
-                   ) {
+                   int accumulate) {
   __local uint win_all[16][WIN_CALLS * 16];
   __local uint* win = win_all[get_sub_group_id() & 15];
 #ifdef GRID_OFF
@@ -706,7 +679,7 @@ __kernel void gemv(__global const uchar* raw, int N, int K, __global const uint*
 #pragma unroll
   for (int r = 0; r < GROWS; ++r) acc2[r] = 0.0f;
 #endif
-  for (int sp = SK_LO(nsb); sp < SK_HI(nsb); sp += 2) {
+  for (int sp = 0; sp < nsb; sp += 2) {
     const int b = sp * 8 + lane;  // this lane's 32-block within the row
     const bool has = sp + lane / 8 < nsb;
     const uint8 a8 = has ? vload8(0, (__global const uint*)(aq + 32 * b)) : (uint8)0;
@@ -724,11 +697,7 @@ __kernel void gemv(__global const uchar* raw, int N, int K, __global const uint*
 #endif
 #pragma unroll
     for (int r = 0; r < GROWS; ++r) {
-      #ifdef ROWIDX
-      const int n = rowidx[min(r0 + r, N - 1)];
-      #else
       const int n = min(r0 + r, N - 1);
-      #endif
       __global const uint* src = (__global const uint*)(raw + ((size_t)n * nsb + sp) * BBP);
 #pragma unroll
       for (int c = 0; c < WIN_CALLS; ++c) win[c * 16 + lane] = intel_sub_group_block_read(src + c * 16);
@@ -777,7 +746,7 @@ __kernel void gemv(__global const uchar* raw, int N, int K, __global const uint*
 #else
     const float v = HEAD_OUT(sub_group_reduce_add(acc[r]));
     const int n = r0 + r;
-    if (lane == 0 && n < N) SK_STORE(n, v);
+    if (lane == 0 && n < N) C[c_off + n] = accumulate ? C[c_off + n] + v : v;
 #endif
   }
 }
@@ -1117,15 +1086,10 @@ __kernel void decode_w8_vb(__global const uchar* raw, int N, int K, __global con
 #endif
 }
 
-// With -DROWIDX (as gemv): only the rows listed in rowidx[0..N), output compact (the MTP draft head).
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void gemv_v(__global const uchar* raw, int N, int K, __global const uint* tabs, __global const char* aq,
                      __global const float* asc, __global const ushort* absum, int M, __global float* C, int c_off,
-                     int accumulate
-#ifdef ROWIDX
-                     , __global const int* rowidx
-#endif
-                     ) {
+                     int accumulate) {
   __local uint kt[VB_TABLES];
   vb_tables(kt, tabs);
   const int lane = get_sub_group_local_id(), r0 = (get_global_id(0) / 16) * GROWS;
@@ -1138,7 +1102,7 @@ __kernel void gemv_v(__global const uchar* raw, int N, int K, __global const uin
 #pragma unroll
   for (int r = 0; r < GROWS; ++r) acc2[r] = 0.0f;
 #endif
-  for (int sp = SK_LO(nsb); sp < SK_HI(nsb); sp += 2) {
+  for (int sp = 0; sp < nsb; sp += 2) {
     const int b = sp * 8 + lane;
     const bool has = sp + hs < nsb;
     const int s = has ? sp + hs : sp;
@@ -1153,11 +1117,7 @@ __kernel void gemv_v(__global const uchar* raw, int N, int K, __global const uin
       uint w[8];
       float d, dmin;
       int sc0, sc1, mn0, mn1;
-#ifdef ROWIDX
-      const int row = rowidx[min(r0 + r, N - 1)];
-#else
       const int row = min(r0 + r, N - 1);
-#endif
       vblock(raw + ((size_t)row * nsb + s) * BBP, ib, kt, w, &d, &dmin, &sc0, &sc1, &mn0, &mn1);
       int lo = dot_4x8packed_ss_int(a8.s0, w[0]);
       lo += dot_4x8packed_ss_int(a8.s1, w[1]);
@@ -1190,7 +1150,7 @@ __kernel void gemv_v(__global const uchar* raw, int N, int K, __global const uin
 #else
     const float v = HEAD_OUT(sub_group_reduce_add(acc[r]));
     const int n = r0 + r;
-    if (lane == 0 && n < N) SK_STORE(n, v);
+    if (lane == 0 && n < N) C[c_off + n] = accumulate ? C[c_off + n] + v : v;
 #endif
   }
 }
