@@ -1838,6 +1838,18 @@ __kernel void attn_prep_g(__global const float* qkv, int ldq, int nh, int nkv, i
 // results are bit for bit those of R = 1. grid (16, nh / GQ, ceil(M / R) * R), local (16, 1, R).
 #ifdef FA_G
 #define FDC (HD / 256)  // 256-dim chunks of a row
+// -DFA_SPLIT (generation / verification, <= 8 rows): flash-decoding. A row's key blocks are cut into splits of at
+// least FA_BPS blocks, at most FA_SMAX of them, a function of that row's own range only (so a row gives the same
+// result alone and in a verification launch); each split runs the loop below over its blocks and writes its
+// unnormalized output, its max and its sum to part, and attn_fa_gc combines them. One row alone used to be 8
+// sub-groups scanning every key: 26B at 14K context, 142 ms of attention per token.
+#define FA_SMAX 64
+#define FA_BPS 8
+inline void fa_split_range(int lo, int hi, int sp, int* b0, int* b1) {  // blocks [b0, b1) of split sp (empty: b0 >= b1)
+  const int nb = hi / 16 - lo / 16 + 1, ns = min(FA_SMAX, (nb + FA_BPS - 1) / FA_BPS), per = (nb + ns - 1) / ns;
+  *b0 = lo / 16 + sp * per;
+  *b1 = min(lo / 16 + (sp + 1) * per, hi / 16 + 1);
+}
 #ifndef FA_ROWS
 #define FA_ROWS 1
 #endif
@@ -1851,9 +1863,17 @@ __kernel void attn_prep_g(__global const float* qkv, int ldq, int nh, int nkv, i
 #endif
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __global const half* vc, int cap, int nh,
-                        int nkv, int pos0, int M_valid, __global float* out, int win, int nc_lo, int nc_hi) {
+                        int nkv, int pos0, int M_valid, __global float* out, int win, int nc_lo, int nc_hi
+#ifdef FA_SPLIT
+                        , int sgrid, __global float* part
+#endif
+                        ) {
   const int lane = get_sub_group_local_id();
+#ifdef FA_SPLIT
+  const int hg = get_global_id(1), m = get_global_id(2) / sgrid, sp = get_global_id(2) % sgrid;
+#else
   const int hg = get_global_id(1), m = get_global_id(2);
+#endif
 #if FA_ROWS > 1
   __local FA_KW sk[16 * FA_KS];
   __local ushort sv[16 * HD];
@@ -1892,6 +1912,11 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
     }
     barrier(CLK_LOCAL_MEM_FENCE);
     if (b < lo / 16 || b > hi / 16) continue;  // (uniform over the sub-group: its row's own blocks only)
+#elif defined(FA_SPLIT)
+  int bs0, bs1;
+  fa_split_range(lo, hi, sp, &bs0, &bs1);
+  if (bs0 >= bs1) return;  // (a split past this row's)
+  for (int b = bs0; b < bs1; ++b) {
 #else
   for (int b = lo / 16; b <= hi / 16; ++b) {
 #endif
@@ -1958,10 +1983,49 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
 #pragma unroll
   for (int r = 0; r < GQ; ++r) {
     const float L = sub_group_reduce_add(lp[r]);
+#ifdef FA_SPLIT  // (this split's unnormalized output, then its sum and max)
+    __global float* pp = part + (((size_t)m * nh + hg * GQ + r) * FA_SMAX + sp) * (HD + 2);
+#pragma unroll
+    for (int c = 0; c < FDC; ++c) vstore16(o[r][c], 0, pp + 256 * c + 16 * lane);
+    if (lane == 0) {
+      pp[HD] = L;
+      pp[HD + 1] = mx[r];
+    }
+#else
 #pragma unroll
     for (int c = 0; c < FDC; ++c)
       vstore16(o[r][c] / L, 0, out + ((size_t)m * nh + hg * GQ + r) * HD + 256 * c + 16 * lane);
+#endif
   }
+}
+// The FA_SPLIT partials of each (row, head) combined: out = sum_s o_s e^(mx_s - mx) / sum_s L_s e^(mx_s - mx), the
+// splits in order. grid (HD, nh, M).
+__kernel void attn_fa_gc(__global const float* part, int nh, int pos0, int M_valid, __global float* out, int win,
+                         int nc_lo, int nc_hi) {
+  const int d = get_global_id(0), h = get_global_id(1), m = get_global_id(2);
+  if (m >= M_valid) return;
+  const int pos = pos0 + m;
+  const int lo = win > 0 ? max(0, pos - win + 1) : 0;
+  const int hi = (pos >= nc_lo && pos <= nc_hi) ? nc_hi : pos;
+  __global const float* pp = part + ((size_t)m * nh + h) * FA_SMAX * (HD + 2);
+  float mx = -INFINITY;
+  for (int sp = 0; sp < FA_SMAX; ++sp) {
+    int b0, b1;
+    fa_split_range(lo, hi, sp, &b0, &b1);
+    if (b0 >= b1) break;
+    mx = fmax(mx, pp[(size_t)sp * (HD + 2) + HD + 1]);
+  }
+  float num = 0.0f, den = 0.0f;
+  for (int sp = 0; sp < FA_SMAX; ++sp) {
+    int b0, b1;
+    fa_split_range(lo, hi, sp, &b0, &b1);
+    if (b0 >= b1) break;
+    __global const float* q = pp + (size_t)sp * (HD + 2);
+    const float w = exp(q[HD + 1] - mx);
+    num = fma(q[d], w, num);
+    den = fma(q[HD], w, den);
+  }
+  out[((size_t)m * nh + h) * HD + d] = num / den;
 }
 #undef FDC
 #endif  // FA_G

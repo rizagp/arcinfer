@@ -3083,6 +3083,7 @@ class Engine {
   size_t q2m_hq_ = 0, q2m_sc_ = 0;  // (the experts' down input: residual offsets in mhq_ / mhsc_, bytes)
   bool q2_off_ = false;
   bool q2_nocap_ = false;  // (the output head's two passes run without their softcap epilogue)
+  cl_mem fa_part_ = nullptr;  // (attn_fa_g -DFA_SPLIT partials: 8 rows x heads x 64 splits x (head dim + 2) floats)
   bool q2_fuse_ = false, q2_fused_ = false;  // (matmul -> matmul1: run the fused two-pass GEMV; it ran)
   const bool q2_fuse_on_ = !getenv("ARC_Q2_FUSE") || atoi(getenv("ARC_Q2_FUSE")) != 0;  // (0: two launches, for A/B)
   bool q2_att_ = !getenv("ARC_Q2_ATT") || atoi(getenv("ARC_Q2_ATT")) != 0;  // (ARC_Q2_ATT=0: the int8 attention with two-pass matrices, for KL studies)
@@ -3432,7 +3433,32 @@ class Engine {
     //  ARC_FA_GH=0: attn_fa_g; ARC_FA_FS: sub-groups per work-group, default 4)
     static const bool fa_gh = !getenv("ARC_FA_GH") || atoi(getenv("ARC_FA_GH")) != 0;
     static const int fa_fs = getenv("ARC_FA_FS") ? std::max(1, atoi(getenv("ARC_FA_FS"))) : 4;
+    // (generation / verification, <= 8 rows: flash-decoding, the key range split over many sub-groups and combined;
+    //  ARC_FA_SPLIT=0: one sub-group per (row, q-head pair) over every key, as the prompt kernel)
+    static const bool fa_split = !getenv("ARC_FA_SPLIT") || atoi(getenv("ARC_FA_SPLIT")) != 0;
     auto fa_g = [&](int r0, int n, int p0) {
+      if (fa_split && n <= 8) {
+        const int gq = std::min(hpg, fa_gq ? fa_gq : hd >= 512 ? 2 : 4);
+        const std::string fd = std::string(q2_kf32_ ? "-DKF32 " : "") + "-cl-intel-256-GRF-per-thread -DFA_G -DFA_SPLIT -DHD=" +
+                               std::to_string(hd) + " -DGQ=" + std::to_string(gq);
+        cl_kernel k = kernel("ops", fd, "attn_fa_g");
+        // (splits of the launch: those of its widest row, as the kernel computes them)
+        const int nlo = L.swa ? nc_lo_ : -1, nhi = L.swa ? nc_hi_ : -1, last = p0 + n - 1;
+        int hi = last, lo0 = win > 0 ? std::max(0, p0 - win + 1) : 0;
+        if (nhi >= p0 && nlo <= last) hi = std::max(hi, nhi);
+        const int nb = hi / 16 - lo0 / 16 + 1, ns = std::min(64, (nb + 7) / 8);
+        if (!fa_part_) fa_part_ = buf((size_t)8 * hp.n_head * 64 * (std::max({hp.head_dim, hp.hd_swa, hp.hd_full}) + 2) * 4);
+        int cp = L.cap, nn = nh, nk = nkv, pp = p0, MM = n, w = win, sg = ns, nl = nlo, nh2 = nhi;
+        set_args(k, 0, from(qf_, (size_t)r0 * nh * hd * 4), L.kc, L.vc, cp, nn, nk, pp, MM,
+                 from(o_, (size_t)r0 * nh * hd * 4), w, nl, nh2, sg, fa_part_);
+        size_t gws[3] = {16, (size_t)(nh / gq), (size_t)n * ns}, lws[3] = {16, 1, 1};
+        run(L.swa ? "attn_swa" : "attn_global", k, 3, gws, lws);
+        cl_kernel kc2 = kernel("ops", fd, "attn_fa_gc");
+        set_args(kc2, 0, fa_part_, nn, pp, MM, from(o_, (size_t)r0 * nh * hd * 4), w, nl, nh2);
+        size_t g2[3] = {(size_t)hd, (size_t)nh, (size_t)n};
+        run(L.swa ? "attn_swa" : "attn_global", kc2, 3, g2, nullptr);
+        return;
+      }
       if (fa_gh && n > 8 && hd >= 512 && hd % (fa_fs * 16) == 0 && (hd / fa_fs / 16 == 8 || hd / fa_fs / 16 == 16)) {
         cl_kernel k = kernel("ops", std::string(q2_kf32_ ? "-DKF32 " : "") + "-cl-intel-256-GRF-per-thread -DFA_GH -DHD=" +
                                         std::to_string(hd) + " -DHPG=" + std::to_string(hpg) + " -DFS=" + std::to_string(fa_fs),
