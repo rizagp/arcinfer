@@ -1471,8 +1471,6 @@ class Engine {
   // prompt chunks of standard-type experts: a group of moe_group_ experts at a time decoded into W8 (moe_wq_ /
   // moe_wh_), then the int8 GEMM over that group's slot tiles (gemm.cl MOE_TILES)
   cl_mem moe_wq_ = nullptr, moe_wh_ = nullptr;
-  cl_mem pf_rl_ = nullptr, pf_tiles_ = nullptr, pf_dummy_ = nullptr;  // next-layer routing guess (generation)
-  bool pf_next_ = false;
   // one token, streamed experts: the tiles of its cached and of its missing experts (layer_moe, ARC_XSPLIT)
   cl_mem xt_hit_ = nullptr, xt_miss_ = nullptr;
   std::vector<int> xt_hit_h_, xt_miss_h_;
@@ -1657,8 +1655,7 @@ class Engine {
   // layer, 4 per kv head (Qwen3.5 9B) 531 -> 468 ms; 6 per kv head (27B) stays at 3 (6 per sub-group spills: slower)
   int attn_hs() const {
     const int hpg = hp.n_head / hp.n_head_kv;
-    static const bool old = getenv("ARC_ATTN_HS_OLD") != nullptr;  // (A/B)
-    if (!hp.gemma && !old && hpg % 4 == 0 && hpg / 4 <= 32 && ((hpg / 4) & (hpg / 4 - 1)) == 0) return 4;
+    if (!hp.gemma && hpg % 4 == 0 && hpg / 4 <= 32 && ((hpg / 4) & (hpg / 4 - 1)) == 0) return 4;
     return attn_hs_for(hpg);
   }
   static int attn_hs_for(int hpg) {
@@ -1692,35 +1689,6 @@ class Engine {
   // int8 attention scale blocks per row: Gemma 4 one per 64 dims (its V rows have a few large dims, which a single
   // row scale lets swamp the others: measured against an f32 reference), Qwen one per row (as accurate there, faster)
   std::string sb_opt(int hd) const { return " -DSB=" + std::to_string(hp.gemma ? hd / 64 : 1); }
-  // Experiment, not a feature: ARC_KV4 = "K32V32", "V32", "K64" ... (block sizes 16-256) simulates a 4-bit K and / or V
-  // cache inside the int8 one (ops.cl kv4_fake), to measure its accuracy. Anything else is refused.
-  static std::string kv4_opts() {
-    const char* e = getenv("ARC_KV4");
-    if (!e || !*e) return "";
-    std::string out;
-    const std::string s = e;
-    for (size_t i = 0; i < s.size();) {
-      const char c = s[i];
-      size_t j = i + 1;
-      while (j < s.size() && isdigit((unsigned char)s[j])) ++j;
-      const int b = j > i + 1 ? atoi(s.substr(i + 1, j - i - 1).c_str()) : 0;
-      if ((c != 'K' && c != 'V') || (b != 16 && b != 32 && b != 64 && b != 128 && b != 256))
-        throw std::runtime_error("ARC_KV4: expected e.g. K32V32 or V32 (block sizes 16, 32, 64, 128, 256), got " + s);
-      out += std::string(" -DKV4") + c + "=" + std::to_string(b);
-      i = j;
-      if (i < s.size() && s[i] == 'S') {  // ("V64S": 16 symmetric levels with an unsigned scale instead of q4_0's)
-        out += " -DKV4SYM";
-        ++i;
-      } else if (i < s.size() && (s[i] == 'Z' || s[i] == 'E')) {  // ("V64Z" / "V64E": (n - 8) * amax / 7 or / 8)
-        out += s[i] == 'Z' ? " -DKV4ZD=7" : " -DKV4ZD=8";
-        ++i;
-      } else if (i < s.size() && s[i] == 'O') {  // ("V64O": (n - 8) * d, d chosen per block by squared error)
-        out += " -DKV4OPT";
-        ++i;
-      }
-    }
-    return out;
-  }
 
   int gq() const {
     const int r = hp.n_head / hp.n_head_kv;
@@ -1794,7 +1762,7 @@ class Engine {
     }
     k_conv_upd_ = p("conv_state_update");
     k_gnorm_ = hp.hc ? kernel("ops", "-DGATE_SIGMOID", "gated_norm_quant") : p("gated_norm_quant");
-    k_attn_prep_ = kernel("ops", sb_opt(256) + kv4_opts(), "attn_prep");
+    k_attn_prep_ = kernel("ops", sb_opt(256), "attn_prep");
     k_attn_gate_ = p("attn_gate_quant");
     k_gdn_gates_ = p("gdn_gates");
     const std::string big = "-cl-intel-256-GRF-per-thread -DGQ=" + std::to_string(gq());
@@ -2195,21 +2163,13 @@ class Engine {
     const auto h0 = hclk::now();
     static std::vector<int> ids;
     ids.resize((size_t)T * NU);
-    std::vector<int> guess;
     if (T == 1) {
-      std::vector<int> tl(1 + 3 * NU), tg;
-      if (pf_next_) {  // (the guess of the next layer's routing, computed with this layer's)
-        tg.resize(1 + 3 * NU);
-        CL_CHECK(clEnqueueReadBuffer(cl_.queue, pf_tiles_, tl1 ? CL_TRUE : CL_FALSE, 0, tg.size() * 4, tg.data(), 0,
-                                     nullptr, nullptr));
-      }
+      std::vector<int> tl(1 + 3 * NU);
       if (tl1)
         std::copy(tl1, tl1 + tl.size(), tl.begin());
       else
         CL_CHECK(clEnqueueReadBuffer(cl_.queue, mtiles_, CL_TRUE, 0, tl.size() * 4, tl.data(), 0, nullptr, nullptr));
       for (int k = 0; k < NU; ++k) ids[k] = tl[1 + 3 * k];
-      if (pf_next_)
-        for (int k = 0; k < NU; ++k) guess.push_back(tg[1 + 3 * k]);
     } else {
       CL_CHECK(clEnqueueReadBuffer(cl_.queue, mids_, CL_TRUE, 0, ids.size() * 4, ids.data(), 0, nullptr, nullptr));
     }
@@ -2217,8 +2177,6 @@ class Engine {
     hst_sync_ms_ += std::chrono::duration<double, std::milli>(h1 - h0).count();
     xc_->ensure(L.il, ids.data(), ids.size(), T > 8, gemm);
     hst_ensure_ms_ += hms(h1);
-    if (!guess.empty()) xc_->prefetch_ids(L.il + 1, guess.data(), (int)guess.size());
-    pf_next_ = false;
     static const bool xcheck = getenv("ARC_XCHECK") != nullptr;  // (debug: every tile's expert address is in a pool)
     if (xcheck) {
       const int max_t = T * NU + hp.n_expert + 1;
@@ -3140,25 +3098,24 @@ class Engine {
       // token-outer kernels (each token's activations loaded once for all of a sub-group's rows, no per-token
       // branches; bit-identical to the earlier row-outer ones), built for exactly T tokens with 256 registers.
       // 27B, 8 rows (bench/gemv_bench): IQ3_XXS gate 23.4 -> 42.9 GB/s with 4 rows per sub-group, IQ3_S down (now
-      // gemv_mt_v) 22.6 -> 38.9 with 2; Q6_K one row (it spills with more). ARC_MT_OLD=1: the earlier choice
-      static const bool old = getenv("ARC_MT_OLD") != nullptr;
-      const int tb = old ? (cur_T_ <= 2 ? 2 : cur_T_ <= 4 ? 4 : 8) : cur_T_;
-      const bool vk = gemv_v_ok(w) || (!old && w.type == GGML_IQ3_S);
+      // gemv_mt_v) 22.6 -> 38.9 with 2; Q6_K one row (it spills with more)
+      const int tb = cur_T_;
+      const bool vk = gemv_v_ok(w) || w.type == GGML_IQ3_S;
       int gr = vk ? gemv_v_rows(w) : w.N <= 4096 ? 1 : w.N <= 8192 ? 2 : 4;
       // Below 6 tokens (MTP verification of prose: 2-3 rows) 4 rows per sub-group for the codebook types and for long
       // rows (K >= 8192, the FFN down projection), Q4_K / IQ4_XS short rows 2: 27B, bench/gemv_bench, 3 tokens: gate
       // IQ3_XXS 57.8 -> 64.7 GB/s, down Q4_K 57.5 -> 70.6; Indonesian prose with MTP 6.95 -> 7.2 tok/s. With 6-8
       // tokens the earlier rule stays: there 4 for the down projection and 2 for gate / up were faster only in
       // bench/gemv_bench (code with 7 drafts or DFlash2 2 % slower in the model). Bit-identical either way.
-      if (!old) {
+      {
         const bool cb = vk && w.type != GGML_IQ4_XS;
         if (w.type == GGML_Q6_K) gr = 1;
         else if (cur_T_ < 6 && (vk || w.type == GGML_Q4_K)) gr = w.K >= 8192 || cb ? 4 : 2;
         else gr = w.type == GGML_IQ3_S ? 2 : vk ? (w.N >= 8192 ? 4 : 2) : std::min(gr, 2);
       }
       // (two-pass mode, 2-4 tokens: gemv_mt_v with the residuals as TB further slots, -DQ2F, both passes in one launch)
-      const bool fuse = q2_fuse_ && vk && !old && a <= 1;
-      cl_kernel k = kernel("decode", std::string(old ? "" : "-cl-intel-256-GRF-per-thread ") + "-DQT=" +
+      const bool fuse = q2_fuse_ && vk && a <= 1;
+      cl_kernel k = kernel("decode", std::string("-cl-intel-256-GRF-per-thread ") + "-DQT=" +
                                          std::to_string(w.type) + " -DGROWS=" + std::to_string(gr) + " -DTB=" +
                                          std::to_string(fuse ? 2 * tb : tb) + head_defs(w) + mt_lazy_opt() +
                                          (fuse ? " -DQ2F" + q2_defs_ : std::string()),
@@ -4227,23 +4184,6 @@ class Engine {
       if (g4) set_args(k, 6, L.escale);
       size_t g1 = 16, l1 = 16;
       run("moe_route", k, 1, &g1, &l1);
-      // streamed experts: guess the next layer's experts with its router on this layer's FFN input (the residual
-      // stream changes little from one layer to the next), so stream_layer can read them while the GPU works on
-      // this layer. Only a prefetch: the next layer still routes on its own input. Off by default (ARC_XGUESS=1:
-      // on): Flash Next 16 % cache, 37 % of the guesses used, 48 % of the misses caught, SSD reads +55 %, no faster
-      static const bool guess = getenv("ARC_XGUESS") && atoi(getenv("ARC_XGUESS")) != 0;
-      const int nx = L.il + 1;
-      if (guess && xc_ && nx < hp.n_layer && layers_[nx].router.raw) {
-        if (!pf_rl_) {
-          pf_rl_ = buf((size_t)hp.router_rows() * 16 * 4);
-          pf_tiles_ = buf((1 + 3 * (size_t)NU) * 4);
-          pf_dummy_ = buf((size_t)64 * 4 * 4);
-        }
-        matmul("moe_guess", layers_[nx].router, Mp, pf_rl_, NR, 0, 0, true);
-        set_args(k, 0, pf_rl_, pf_dummy_, pf_tiles_, pf_dummy_, pf_dummy_, pf_dummy_);
-        run("moe_guess", k, 1, &g1, &l1);
-        pf_next_ = true;
-      }
     } else {
       {
         cl_kernel k = kernel("moe", defs, "moe_route");
@@ -4736,14 +4676,9 @@ class Engine {
       for (int c = 0; c < K; ++c) v[(size_t)r * K + c] = bf16_to_f32(b[(size_t)r * Kf + k0 + c]);
     // Q4_0: the drafter's weights are read for every draft block; at half the bytes of Q8_0 its layers take ~45 %
     // less time (27B code: 539 -> 296 ms per answer, 16.9 -> 17.2 tok/s; 35B 160 -> 105 ms), the drafts are taken
-    // as often (27B code 84.5 vs 85.4 %, 35B equal) and the drafter needs 0.84 GiB less (27B). ARC_DFL_Q8=1: Q8_0.
-    static const bool q4 = getenv("ARC_DFL_Q8") == nullptr;
-    if (q4) {
-      auto q = quantize_rows_q4_0(v.data(), N, K);
-      return make_weight(GGML_Q4_0, q.data(), q.size(), N, K);
-    }
-    auto q8 = quantize_rows_q8_0(v.data(), N, K);
-    return make_weight(GGML_Q8_0, q8.data(), q8.size(), N, K);
+    // as often (27B code 84.5 vs 85.4 %, 35B equal) and the drafter needs 0.84 GiB less (27B; Q8_0 before 17 Oct)
+    auto q = quantize_rows_q4_0(v.data(), N, K);
+    return make_weight(GGML_Q4_0, q.data(), q.size(), N, K);
   }
   void load_dflash(std::string path) {
     namespace fs = std::filesystem;
@@ -5030,19 +4965,15 @@ class Engine {
     int prev = tok;
     const int rk = dfl_rank_, K = std::min(dfl_topk_, V);
     std::vector<int> idx(V);
-    // (ARC_DFL_SEL_OLD=1: nth_element over the whole vocabulary per position, ~2 ms each on the host: the one-pass
-    //  top-K below made code answers 35B 48.4 -> 52.7, 27B 16.9 -> 18.3 tok/s with the same drafts)
-    static const bool sel_old = getenv("ARC_DFL_SEL_OLD") != nullptr;
+    // (the top-K in one pass instead of nth_element over the whole vocabulary per position, ~2 ms each on the host:
+    //  code answers 35B 48.4 -> 52.7, 27B 16.9 -> 18.3 tok/s with the same drafts)
     // drafts are kept while the drafter's own probability of the chosen path stays >= ARC_DFL_P (each draft verified
     // costs more rows in the main model's pass: an unlikely tail is cheaper not to check)
     static const double min_p = getenv("ARC_DFL_P") ? atof(getenv("ARC_DFL_P")) : 0.3;  // (code 11.4 -> 11.6 tok/s, prose up)
     double path_p = 1.0;
     for (int t = 0; t < std::min(nd, max_drafts); ++t) {
       const float* l = &dfl_lg_[(size_t)t * V];
-      if (sel_old) {
-        for (int i = 0; i < V; ++i) idx[i] = i;
-        std::nth_element(idx.begin(), idx.begin() + K, idx.end(), [&](int a, int b) { return l[a] > l[b]; });
-      } else {
+      {
         // the K largest logits in one pass (kept sorted, largest first; almost every logit fails the first test)
         int n = 0;
         for (int i = 0; i < V; ++i) {

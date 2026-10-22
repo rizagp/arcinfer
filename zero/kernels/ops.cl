@@ -427,62 +427,6 @@ __kernel void gated_norm_quant(__global const float* o, __global const float* z,
   }
 }
 
-#if defined(KV4K) || defined(KV4V)
-// (experiment, ARC_KV4: a 4-bit K / V cache simulated in the int8 one: each block of B dims (B / 16 lanes of 16)
-//  rounded as llama.cpp's q4_0 does (d = signed absmax / -8, 16 levels) before the int8 rounding, to measure the
-//  accuracy of a 4-bit cache before writing its kernels)
-inline void kv4_fake(float* v, int B) {
-  float m = 0.0f;
-#pragma unroll
-  for (int i = 0; i < 16; ++i)
-    if (fabs(v[i]) > fabs(m) || (fabs(v[i]) == fabs(m) && v[i] > m)) m = v[i];
-  for (int o = 1; o < B / 16; o <<= 1) {
-    const float t = intel_sub_group_shuffle_xor(m, o);
-    if (fabs(t) > fabs(m) || (fabs(t) == fabs(m) && t > m)) m = t;
-  }
-#if defined(KV4SYM)  // (16 symmetric levels (n - 7.5) * amax / 7.5, n = 0..15: an unsigned scale, the form a P x V kernel can use)
-  const float d = fabs(m) / 7.5f, id = d > 0.0f ? 1.0f / d : 0.0f;
-#pragma unroll
-  for (int i = 0; i < 16; ++i) v[i] = ((float)clamp((int)floor(v[i] * id + 8.0f), 0, 15) - 7.5f) * d;
-#elif defined(KV4OPT)  // ((n - 8) * d with the scale chosen per block: the smallest that covers the block, d0 =
-                       //  max(max / 7, -min / 8), or 0.95 / 0.9 / 0.85 of it (a little clipping), whichever gives the
-                       //  smallest squared error over the block)
-  float pmax = 0.0f, nmax = 0.0f;
-#pragma unroll
-  for (int i = 0; i < 16; ++i) { pmax = fmax(pmax, v[i]); nmax = fmax(nmax, -v[i]); }
-  for (int o = 1; o < B / 16; o <<= 1) {
-    pmax = fmax(pmax, intel_sub_group_shuffle_xor(pmax, o));
-    nmax = fmax(nmax, intel_sub_group_shuffle_xor(nmax, o));
-  }
-  const float d0 = fmax(pmax / 7.0f, nmax / 8.0f);
-  float best = INFINITY, bd = d0;
-#pragma unroll
-  for (int c = 0; c < 4; ++c) {
-    const float d = d0 * (1.0f - 0.05f * (float)c), id = d > 0.0f ? 1.0f / d : 0.0f;
-    float e = 0.0f;
-#pragma unroll
-    for (int i = 0; i < 16; ++i) {
-      const float r = (float)(clamp((int)floor(v[i] * id + 8.5f), 0, 15) - 8) * d - v[i];
-      e = fma(r, r, e);
-    }
-    for (int o = 1; o < B / 16; o <<= 1) e += intel_sub_group_shuffle_xor(e, o);
-    if (e < best) { best = e; bd = d; }
-  }
-  const float d = bd, id = d > 0.0f ? 1.0f / d : 0.0f;
-#pragma unroll
-  for (int i = 0; i < 16; ++i) v[i] = (float)(clamp((int)floor(v[i] * id + 8.5f), 0, 15) - 8) * d;
-#elif defined(KV4ZD)  // (unsigned scale amax / KV4ZD with an exact zero: (n - 8) * d, n = 0..15; 7: the range is
-                      //  [-8/7, 1] amax, 8: [-1, 7/8] amax, the top clipped)
-  const float d = fabs(m) / (float)KV4ZD, id = d > 0.0f ? 1.0f / d : 0.0f;
-#pragma unroll
-  for (int i = 0; i < 16; ++i) v[i] = (float)(clamp((int)floor(v[i] * id + 8.5f), 0, 15) - 8) * d;
-#else
-  const float d = m / -8.0f, id = d != 0.0f ? 1.0f / d : 0.0f;
-#pragma unroll
-  for (int i = 0; i < 16; ++i) v[i] = (float)(min(15, (int)(v[i] * id + 8.5f)) - 8) * d;
-#endif
-}
-#endif
 
 // Full-attention prep: per-head RMSNorm of q and k, NeoX RoPE on the first n_rot dims, q scaled by kq_scale.
 // qkv row: [q|gate interleaved per head (nh*512) | k (nkv*256) | v (nkv*256)], row stride ldq.
@@ -554,9 +498,6 @@ __kernel void attn_prep(__global const float* qkv, int ldq, int nh, int nkv, __g
     }
     return;
   }
-#ifdef KV4K
-  if (!isq) kv4_fake(v, KV4K);
-#endif
   // int8 copy of the row (absmax scale per 64-dim block = 4 lanes)
   float amax = 0.0f;
 #pragma unroll
@@ -580,9 +521,6 @@ __kernel void attn_prep(__global const float* qkv, int ldq, int nh, int nkv, __g
   float vv[16], vmax = 0.0f;
 #pragma unroll
   for (int i = 0; i < 16; ++i) vv[i] = vs[i];
-#ifdef KV4V
-  kv4_fake(vv, KV4V);
-#endif
 #pragma unroll
   for (int i = 0; i < 16; ++i) vmax = fmax(vmax, fabs(vv[i]));
 #pragma unroll
@@ -2242,63 +2180,6 @@ __kernel void vit_ln(__global const float* x, int E, __global const float* w, __
   for (int i = get_local_id(0); i < E; i += get_local_size(0)) qv += (xr[i] - mean) * (xr[i] - mean);
   const float r = rsqrt(work_group_reduce_add(qv) / E + eps);
   for (int i = get_local_id(0); i < E; i += get_local_size(0)) out[(size_t)m * E + i] = (xr[i] - mean) * r * w[i] + b[i];
-}
-
-// Non-causal attention over the n patches of one image, head size 64 (f32 arithmetic, f16 inputs). A work-group
-// takes 64 query rows of one head (one per work-item, q and the output accumulator in registers); keys and values
-// pass through local memory in tiles of VT, with an online softmax per tile. out[m][h*64 + d]. grid (ceil(n/64)*64,
-// nh), local (64, 1).
-#define VT 32
-__attribute__((intel_reqd_sub_group_size(8)))
-__kernel void vit_attn(__global const half* q, __global const half* k, __global const half* v, int n, int Mp, int nh,
-                       __global float* out) {
-  const int h = get_group_id(1), lid = get_local_id(0), m = get_global_id(0);
-  __local float ks[VT * 64], vs[VT * 64];
-  float qr[64], acc[64];
-  const bool live = m < n;
-#pragma unroll
-  for (int d = 0; d < 64; ++d) {
-    qr[d] = live ? vload_half(((size_t)h * Mp + m) * 64 + d, q) : 0.0f;
-    acc[d] = 0.0f;
-  }
-  float mx = -INFINITY, l = 0.0f;
-  for (int t0 = 0; t0 < n; t0 += VT) {
-    barrier(CLK_LOCAL_MEM_FENCE);
-    for (int e = lid; e < VT * 64; e += 64) {
-      const int j = t0 + e / 64;
-      ks[e] = j < n ? vload_half(((size_t)h * Mp + j) * 64 + e % 64, k) : 0.0f;
-      vs[e] = j < n ? vload_half(((size_t)h * Mp + j) * 64 + e % 64, v) : 0.0f;
-    }
-    barrier(CLK_LOCAL_MEM_FENCE);
-    const int nt = min(VT, n - t0);
-    float sc[VT];
-    float tmax = -INFINITY;
-#pragma unroll
-    for (int j = 0; j < VT; ++j) {
-      float s = 0.0f;
-#pragma unroll
-      for (int d = 0; d < 64; ++d) s += qr[d] * ks[j * 64 + d];
-      sc[j] = j < nt ? s : -INFINITY;
-      tmax = fmax(tmax, sc[j]);
-    }
-    const float mnew = fmax(mx, tmax), corr = exp(mx - mnew);
-    l *= corr;
-#pragma unroll
-    for (int d = 0; d < 64; ++d) acc[d] *= corr;
-#pragma unroll
-    for (int j = 0; j < VT; ++j) {
-      const float pj = exp(sc[j] - mnew);
-      l += pj;
-#pragma unroll
-      for (int d = 0; d < 64; ++d) acc[d] += pj * vs[j * 64 + d];
-    }
-    mx = mnew;
-  }
-  if (!live) return;
-  const float inv = 1.0f / l;
-  __global float* o = out + (size_t)m * nh * 64 + h * 64;
-#pragma unroll
-  for (int d = 0; d < 64; ++d) o[d] = acc[d] * inv;
 }
 
 // int8 vision attention input. As vit_qkv_rope (bias, 2-D rotary, q pre-scaled by 1/8), but each row of each head

@@ -146,12 +146,7 @@ class VisionQwen3VL {
         size_t g[2] = {(size_t)n_head * hd_ / 2, (size_t)N};
         e_.run("vit_qkv_rope", k, 2, g, nullptr);
         int n = N;
-        if (getenv("ARC_VIT_ATTOLD")) {  // (A/B: the one-row-per-work-item kernel)
-          cl_kernel k2 = kern("vit_attn", "-cl-intel-256-GRF-per-thread");
-          set_args(k2, 0, q_, k_, v_, n, mp, nh, o_);
-          size_t g2[2] = {(size_t)(N + 63) / 64 * 64, (size_t)n_head}, lw2[2] = {64, 1};
-          e_.run("vit_attn", k2, 2, g2, lw2);
-        } else {
+        {
           cl_kernel k2 = kern("vit_attn_rows", "-cl-intel-256-GRF-per-thread -DHD=" + std::to_string(hd_) + " " + ardefs_);
           set_args(k2, 0, q_, k_, v_, n, mp, nh, o_);
           const size_t rows = (size_t)8 * arsg_;
