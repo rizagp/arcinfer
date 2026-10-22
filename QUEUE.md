@@ -19,6 +19,7 @@ Everything below this list is history plus the details of these items; a row not
 | 6 | Voice conversation in the web UI (24.1-24.3 can go first with E4B; 24.5 after F22) | F24 |
 | 7 | Batch decode for E4B and Flash Next | F20.5 / F20.6 |
 | 8 | Copy 4B / E4B (and 12B) from the D: backups to C: (the user decides) | F20.8 |
+| 9 | Slim the code after F21.11: audit the ARC_* switches, drop lost experiments and the inaccurate Gemma path | F26 |
 | low | Jump-forward in tool calls; first prompt of a new session | F25.2 / F25.3 |
 | parked | Fused FFN gate + up and small DeltaNet kernels (F17.2); review leftovers (F18.14); 35B expert decode once per layer (F19.6); larger staging (F19.2) | |
 
@@ -393,4 +394,21 @@ asks something else. That test showed sampled tool calls were slow (2.45 tok/s).
 | 25.1 | Sampled tool calls: skip the negligible vocabulary tail in constrained sampling | ✅ 3ba7880 | 35B short call 4.8 -> 20.4 tok/s, long `write` call 24.3 (greedy 24.4); same tokens in the seeded tests |
 | 25.2 | Jump-forward in tool calls | 💡 low priority | when the constraint allows only one continuation (the tool name, `":"`, closing tokens), append it without a decode step per token; output unchanged; estimate 10-20 % on tool calls, ~half a day; MTP already drafts most of these (78/92 accepted) |
 | 25.3 | First prompt of a new session | 💡 check | Pi's 1,206-token system prompt ran at 204 tok/s on the 35B (vs ~600 on long prompts), ~6 s once per session (later turns hit the system-prompt cache); check whether expert cache misses explain it |
+
+## F26: slim the code (requested 2026-10-22, after F21.11)
+
+The user finds the code swollen. Measured: total C++ / kernel code went down (39,914 lines on 10-17 -> 30,455 on
+10-22, the OpenCL engine removed), but `zero/engine.h` grew 4,525 -> 5,384 lines (+19 % in four days: Gemma's
+two-pass mode, drafter, verification, slots), `ops.cl` 157 -> 170 KB, `server.cpp` 137 -> 157 KB; the code reads
+102 different `ARC_*` environment switches. Rule: every step bit-identical (logits of every model compared byte for
+byte before / after; a step that changes one bit is dropped), `tests/run_tests.ps1` passes.
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 26.1 | Audit the 102 `ARC_*` switches | ⏳ after F21.11 | per switch: a default kept (fold it in), a diagnostic worth keeping (profiles, KL, `ARC_ZE_KPROPS`, fault injection), or a lost experiment (e.g. `ARC_GEMMA_VROWS`, `ARC_XSTAGE`, old `ARC_HC_F32` modes) to delete with its code path; the list goes into docs |
+| 26.2 | Drop the inaccurate Gemma path | ⏳ after F21.11 | once the two-pass mode is the only Gemma mode: remove the single-pass Gemma code except what the drafter still runs (its int8 KV, `q2_off_`) |
+| 26.3 | Split `zero/engine.h` by model family | ⏳ | Qwen dense / DeltaNet, Gemma 4, Flash Next, MoE streaming, drafters (MTP, DFlash2, Gemma assistant) in their own headers; no change in behaviour, easier to read and audit |
+| 26.4 | Leftovers of F18.14 worth doing | 💡 | kernel lane guards + a non-multiple-dims test; Ctrl+C session save (RAII writers) |
+
+Estimate: 26.1 + 26.2 remove roughly 10-20 % of `engine.h` and the kernels (to be measured).
 
