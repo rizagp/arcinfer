@@ -17,7 +17,7 @@ Everything below this list is history plus the details of these items; a row not
 | ✅ 10-22 | Web search / fetch in the web UI (text chat; the async variant comes with voice, F24.5) | F22 |
 | ✅ 10-23 | Voice conversation in the web UI (24.1-24.3 built with E4B; a real microphone test by the user pending; 24.4-24.7 open) | F24 |
 | 5 | Slim the code: audit the remaining ARC_* switches, split engine.h by model family | F26.1 / F26.3 |
-| 6 | Gemma 4 26B leftovers: vision encoder (11.8 s per image), auto context, prompt speed (two-pass prompt ~220 vs ~525 tok/s) | F21.5-21.9 |
+| 6 | Gemma 4 26B leftovers: vision encoder (11.8 s per image), auto context, prompt speed (two-pass 4K 254 tok/s after the 2026-10-23 attention work, one-pass was ~525; tried and dropped that night: both passes of moe_rg gate / up in one launch (bit-identical, +1 %, 2.5 KB spill), 16 sub-groups in attn_fa_gh (slower), attn_fa_gh rows for 26B global layers beyond 2 (same speed)) | F21.5-21.9 |
 | 7 | Batch decode for Flash Next (E4B done) | F20.6 |
 | 8 | Flint (unsloth/flint-GGUF on D:, MoE 256 experts): new architecture | F28 |
 | 9 | Copy 4B / E4B / 12B from D: to C: (the user decides) | F20.8 |
