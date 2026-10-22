@@ -1990,6 +1990,12 @@ __kernel void moe_down_q(__global const uchar* rd, int N, int K, __global const 
 #endif
 #define RG_TM 16
 #define RG_B(x, i) intel_sub_group_shuffle((x), (i))
+// (Q4_0 / Q8_0: each 32-block read straight from global memory with vblock, gemv_v's decoder, instead of copying the
+// whole superblock into registers first: that copy (36 / 68 words per lane) made moe_rg spill 2.6 KB per thread on
+// Gemma 4's Q4_0 experts. The same bytes and the same weights: bit-identical. -DRG_COPY: the copy, for A/B)
+#if (QT == Q4_0 || QT == Q8_0) && !defined(RG_COPY)
+#define RG_VB 1
+#endif
 #ifdef XCACHE
 #define XARGS_RG , __global const ulong* xaddr, int xoff
 #else
@@ -2018,6 +2024,9 @@ __kernel void moe_rg(__global const uchar* raw, int N, int K, __global const uin
   const uint* aux = tabs;
 #endif
   barrier(CLK_LOCAL_MEM_FENCE);
+#ifdef RG_VB
+  __local uint kt[VB_TABLES];  // (unused by these types)
+#endif
   const int lane = get_sub_group_local_id(), gc = get_group_id(0), nsb = K / 256, t_end = tstart[ne];
   for (int t = tstart[0] + gy; t < t_end; t += ngy) {
     const int e = tiles[1 + 3 * t], r0 = tiles[2 + 3 * t], nr = tiles[3 + 3 * t];
@@ -2033,6 +2042,9 @@ __kernel void moe_rg(__global const uchar* raw, int N, int K, __global const uin
 #pragma unroll
     for (int m = 0; m < RG_TM; ++m) res[m] = 0.0f;
     for (int s = 0; s < nsb; ++s) {
+#ifdef RG_VB
+      __global const uchar* sbp = wrow + (size_t)s * BBP;
+#else
       uint sbu[BBP / 4];
       {
         __global const uint* src = (__global const uint*)(wrow + (size_t)s * BBP);
@@ -2044,6 +2056,7 @@ __kernel void moe_rg(__global const uchar* raw, int N, int K, __global const uin
         }
       }
       const uchar* p = (const uchar*)sbu;
+#endif
       float tq[RG_TM];
 #pragma unroll
       for (int m = 0; m < RG_TM; ++m) tq[m] = 0.0f;
@@ -2054,8 +2067,13 @@ __kernel void moe_rg(__global const uchar* raw, int N, int K, __global const uin
         uint lo[8], hi[8];
         int a0, a1, b0, b1, mn0, mn1;
         float dl, dmin;
+#ifdef RG_VB
+        vblock(sbp, 2 * j, kt, lo, &dl, &dmin, &a0, &a1, &mn0, &mn1);
+        vblock(sbp, 2 * j + 1, kt, hi, &d, &dmin, &b0, &b1, &mn0, &mn1);
+#else
         decode32(p, 2 * j, grid, aux, lo, &a0, &a1, &mn0, &mn1, &dl, &dmin);
         decode32(p, 2 * j + 1, grid, aux, hi, &b0, &b1, &mn0, &mn1, &d, &dmin);
+#endif
         // the decoded scales as the W8 header holds them (int8)
         a0 = (int)(char)a0; a1 = (int)(char)a1; b0 = (int)(char)b0; b1 = (int)(char)b1;
         const float avl = asc[((size_t)s * 8 + 2 * j) * M + tokl], avh = asc[((size_t)s * 8 + 2 * j + 1) * M + tokl];
