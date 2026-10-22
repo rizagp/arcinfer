@@ -73,6 +73,7 @@ That property is what every speed change is held to:
 
 | Date | Change | Before | After | Answers |
 |---|---|---|---|---|
+| 10-22 | Gemma 4 two-pass mode (`--q2`): one-token GEMVs read the weights once for both passes (`-DQ2F`, F21.11 phase 1) | 26B, 128 tokens, A/B alternated: 9.42 / 9.45 tok/s | **11.18 / 11.60** (+18-23 %); with the drafter 15.9 (200 tokens) | logits of 64 generated tokens bit-identical to the two-launch form (so KL unchanged, 0.0044); greedy text with the drafter = without (200 tokens) |
 | 10-21 | Sampled tool calls: constrained sampling skips a negligible vocabulary tail (`tools/sampler.h`) | 35B, temperature 0.7 / top_k 20 (as Pi): short tool call 4.8 tok/s, Pi's first `monitor_start` call 2.45 (greedy 32.2) | **20.4**; a 1,240-token `write` call 24.3 (greedy 24.4) | the same tokens as before in all 9,000 seeded test draws (`test_sampler`); greedy unchanged (it never reaches the tail) |
 | 10-20 | **Gemma 4 26B drafter** (Unsloth's assistant, 3 drafts) | server, 400-token answers: code 18.8 tok/s, Indonesian 19.4 | **27.0**, **21.7** | greedy text bit-identical to plain decoding (128 tokens) |
 | 10-20 | Gemma 4 verification attention one row per launch | drafter logits off plain decoding (26B up to 2.2, text changed after 7 tokens; 12B 1.3; E4B 0.85); 12B short / 11K 21.3 / 14.8, E4B 47.4 / 30.9, 26B 11K 21.0 tok/s | bit-identical; 23.2 / 14.9, 48.9 / 30.0, 21.0 | 12B KL 0.02061 (unchanged), greedy = llama.cpp |

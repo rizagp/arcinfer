@@ -3083,6 +3083,8 @@ class Engine {
   size_t q2m_hq_ = 0, q2m_sc_ = 0;  // (the experts' down input: residual offsets in mhq_ / mhsc_, bytes)
   bool q2_off_ = false;
   bool q2_nocap_ = false;  // (the output head's two passes run without their softcap epilogue)
+  bool q2_fuse_ = false, q2_fused_ = false;  // (matmul -> matmul1: run the fused two-pass GEMV; it ran)
+  const bool q2_fuse_on_ = !getenv("ARC_Q2_FUSE") || atoi(getenv("ARC_Q2_FUSE")) != 0;  // (0: two launches, for A/B)
   bool q2_att_ = !getenv("ARC_Q2_ATT") || atoi(getenv("ARC_Q2_ATT")) != 0;  // (ARC_Q2_ATT=0: the int8 attention with two-pass matrices, for KL studies)
   bool q2_kf32_ = !getenv("ARC_Q2_KF32") || atoi(getenv("ARC_Q2_KF32")) != 0;  // K rows in f32 (0: f16)  // (single pass for now: the Gemma assistant drafter keeps its own arithmetic)
   size_t q2_aq_ = 0, q2_sc_ = 0, q2_ab_ = 0;  // bytes
@@ -3106,17 +3108,23 @@ class Engine {
     //  cap in their epilogue, so both run without it and softcap_rows caps the sum)
     const bool cap = q2_ && !q2_off_ && &w == &lm_head_ && hp.softcap > 0.0f;
     q2_nocap_ = cap;
+    // (one token: the GEMV runs both passes over one read of the weights, -DQ2F; it says so in q2_fused_)
+    q2_fuse_ = q2_ && !q2_off_ && cur_T_ == 1 && q2_fuse_on_;
+    q2_fused_ = false;
     matmul1(name, w, Mp, C, ldc, c_off, acc, act32);
+    q2_fuse_ = false;
     if (!q2_ || q2_off_) return;
     if (acc > 1) throw std::logic_error(std::string("two-pass activations with a fused epilogue: ") + name);
-    const cl_mem a = aq_, s = asc_, b = absum_;
-    aq_ = from(a, q2_aq_);
-    asc_ = from(s, q2_sc_);
-    absum_ = from(b, q2_ab_);
-    matmul1(name, w, Mp, C, ldc, c_off, 1, act32);
-    aq_ = a;
-    asc_ = s;
-    absum_ = b;
+    if (!q2_fused_) {
+      const cl_mem a = aq_, s = asc_, b = absum_;
+      aq_ = from(a, q2_aq_);
+      asc_ = from(s, q2_sc_);
+      absum_ = from(b, q2_ab_);
+      matmul1(name, w, Mp, C, ldc, c_off, 1, act32);
+      aq_ = a;
+      asc_ = s;
+      absum_ = b;
+    }
     if (cap) {
       q2_nocap_ = false;
       if (cur_T_ > 8) throw std::logic_error("two-pass output head over more than 8 rows (no softcap there)");
@@ -3161,8 +3169,11 @@ class Engine {
         run(name, k2, 1, &g2, &l2);
         return;
       }
-      cl_kernel k = kernel("decode", "-DQT=" + std::to_string(w.type) + " -DGROWS=" + std::to_string(grows) + head_defs(w),
+      if (q2_fuse_ && a > 1) throw std::logic_error(std::string("fused two-pass GEMV with an epilogue: ") + name);
+      cl_kernel k = kernel("decode", "-DQT=" + std::to_string(w.type) + " -DGROWS=" + std::to_string(grows) + head_defs(w) +
+                                         (q2_fuse_ ? " -DQ2F" + q2_defs_ : std::string()),
                            vk ? "gemv_v" : "gemv");
+      q2_fused_ = q2_fuse_;
       set_args(k, 0, w.raw, N, K, tabs_, aq_, asc_, absum_, M, C, c_off, a);
       size_t g1 = ((size_t)(N + grows - 1) / grows * 16 + 255) / 256 * 256, l1 = 256;
       run(name, k, 1, &g1, &l1);

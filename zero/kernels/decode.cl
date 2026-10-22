@@ -657,6 +657,17 @@ __kernel void splitk_sum(__global const float* p, int S, int N, __global float* 
   for (int i = 0; i < S; ++i) v += p[(size_t)i * N + n];
   C[c_off + n] = accumulate ? C[c_off + n] + v : v;
 }
+// -DQ2F (Gemma 4 two-pass mode, one token): the second pass fused in. Next to the activations' int8 values the
+// buffers hold their rounding residuals at fixed offsets (-DQ2_AQ bytes into aq, -DQ2_SC floats into asc, -DQ2_AB
+// halves into absum, as ops.cl's quant_store16 writes them); each weight block read is dotted with both and kept in
+// two accumulators. The output is what the two launches gave, value pass then residual pass (accumulate = 1):
+// (C + v) + r, or v + r. No soft cap (the two-pass head is capped after both passes) and no split-K.
+#ifdef Q2F
+#if defined(SOFTCAP) || defined(SPLITK)
+#error "Q2F: no soft cap or split-K in the fused two-pass GEMV"
+#endif
+#define Q2F_STORE(n, v, r) C[c_off + (n)] = (accumulate ? C[c_off + (n)] + (v) : (v)) + (r)
+#endif
 #define WIN_U (2 * BBP / 4)          // uints per two-superblock window
 #define WIN_CALLS ((WIN_U + 15) / 16)
 __attribute__((intel_reqd_sub_group_size(16)))
@@ -690,6 +701,11 @@ __kernel void gemv(__global const uchar* raw, int N, int K, __global const uint*
   float acc[GROWS];
 #pragma unroll
   for (int r = 0; r < GROWS; ++r) acc[r] = 0.0f;
+#ifdef Q2F
+  float acc2[GROWS];
+#pragma unroll
+  for (int r = 0; r < GROWS; ++r) acc2[r] = 0.0f;
+#endif
   for (int sp = SK_LO(nsb); sp < SK_HI(nsb); sp += 2) {
     const int b = sp * 8 + lane;  // this lane's 32-block within the row
     const bool has = sp + lane / 8 < nsb;
@@ -697,6 +713,14 @@ __kernel void gemv(__global const uchar* raw, int N, int K, __global const uint*
     const float sa = has ? asc[(size_t)b * M] : 0.0f;
 #if QT == Q2_K || QT == Q4_K || QT == Q5_K
     const int bs0 = has ? (short)absum[(size_t)(2 * b) * M] : 0, bs1 = has ? (short)absum[(size_t)(2 * b + 1) * M] : 0;
+#endif
+#ifdef Q2F
+    const uint8 r8 = has ? vload8(0, (__global const uint*)(aq + Q2_AQ + 32 * b)) : (uint8)0;
+    const float sr = has ? asc[Q2_SC + (size_t)b * M] : 0.0f;
+#if QT == Q2_K || QT == Q4_K || QT == Q5_K
+    const int rs0 = has ? (short)absum[Q2_AB + (size_t)(2 * b) * M] : 0;
+    const int rs1 = has ? (short)absum[Q2_AB + (size_t)(2 * b + 1) * M] : 0;
+#endif
 #endif
 #pragma unroll
     for (int r = 0; r < GROWS; ++r) {
@@ -727,13 +751,34 @@ __kernel void gemv(__global const uchar* raw, int N, int K, __global const uint*
 #else
       acc[r] += sa * d * (float)(sc0 * lo + sc1 * hi);
 #endif
+#ifdef Q2F
+      int lo2 = dot_4x8packed_ss_int(r8.s0, w[0]);
+      lo2 += dot_4x8packed_ss_int(r8.s1, w[1]);
+      lo2 += dot_4x8packed_ss_int(r8.s2, w[2]);
+      lo2 += dot_4x8packed_ss_int(r8.s3, w[3]);
+      int hi2 = dot_4x8packed_ss_int(r8.s4, w[4]);
+      hi2 += dot_4x8packed_ss_int(r8.s5, w[5]);
+      hi2 += dot_4x8packed_ss_int(r8.s6, w[6]);
+      hi2 += dot_4x8packed_ss_int(r8.s7, w[7]);
+#if QT == Q2_K || QT == Q4_K || QT == Q5_K
+      acc2[r] += sr * (d * (float)(sc0 * lo2 + sc1 * hi2) - dmin * (float)(mn0 * rs0 + mn1 * rs1));
+#else
+      acc2[r] += sr * d * (float)(sc0 * lo2 + sc1 * hi2);
+#endif
+#endif
     }
   }
 #pragma unroll
   for (int r = 0; r < GROWS; ++r) {
+#ifdef Q2F
+    const float v = sub_group_reduce_add(acc[r]), v2 = sub_group_reduce_add(acc2[r]);
+    const int n = r0 + r;
+    if (lane == 0 && n < N) Q2F_STORE(n, v, v2);
+#else
     const float v = HEAD_OUT(sub_group_reduce_add(acc[r]));
     const int n = r0 + r;
     if (lane == 0 && n < N) SK_STORE(n, v);
+#endif
   }
 }
 
@@ -1088,12 +1133,21 @@ __kernel void gemv_v(__global const uchar* raw, int N, int K, __global const uin
   float acc[GROWS];
 #pragma unroll
   for (int r = 0; r < GROWS; ++r) acc[r] = 0.0f;
+#ifdef Q2F
+  float acc2[GROWS];
+#pragma unroll
+  for (int r = 0; r < GROWS; ++r) acc2[r] = 0.0f;
+#endif
   for (int sp = SK_LO(nsb); sp < SK_HI(nsb); sp += 2) {
     const int b = sp * 8 + lane;
     const bool has = sp + hs < nsb;
     const int s = has ? sp + hs : sp;
     const uint8 a8 = has ? vload8(0, (__global const uint*)(aq + 32 * b)) : (uint8)0;
     const float sa = has ? asc[(size_t)b * M] : 0.0f;
+#ifdef Q2F
+    const uint8 r8 = has ? vload8(0, (__global const uint*)(aq + Q2_AQ + 32 * b)) : (uint8)0;
+    const float sr = has ? asc[Q2_SC + (size_t)b * M] : 0.0f;
+#endif
 #pragma unroll
     for (int r = 0; r < GROWS; ++r) {
       uint w[8];
@@ -1114,13 +1168,30 @@ __kernel void gemv_v(__global const uchar* raw, int N, int K, __global const uin
       hi += dot_4x8packed_ss_int(a8.s6, w[6]);
       hi += dot_4x8packed_ss_int(a8.s7, w[7]);
       acc[r] += sa * d * (float)(sc0 * lo + sc1 * hi);
+#ifdef Q2F
+      int lo2 = dot_4x8packed_ss_int(r8.s0, w[0]);
+      lo2 += dot_4x8packed_ss_int(r8.s1, w[1]);
+      lo2 += dot_4x8packed_ss_int(r8.s2, w[2]);
+      lo2 += dot_4x8packed_ss_int(r8.s3, w[3]);
+      int hi2 = dot_4x8packed_ss_int(r8.s4, w[4]);
+      hi2 += dot_4x8packed_ss_int(r8.s5, w[5]);
+      hi2 += dot_4x8packed_ss_int(r8.s6, w[6]);
+      hi2 += dot_4x8packed_ss_int(r8.s7, w[7]);
+      acc2[r] += sr * d * (float)(sc0 * lo2 + sc1 * hi2);
+#endif
     }
   }
 #pragma unroll
   for (int r = 0; r < GROWS; ++r) {
+#ifdef Q2F
+    const float v = sub_group_reduce_add(acc[r]), v2 = sub_group_reduce_add(acc2[r]);
+    const int n = r0 + r;
+    if (lane == 0 && n < N) Q2F_STORE(n, v, v2);
+#else
     const float v = HEAD_OUT(sub_group_reduce_add(acc[r]));
     const int n = r0 + r;
     if (lane == 0 && n < N) SK_STORE(n, v);
+#endif
   }
 }
 #ifndef TB
