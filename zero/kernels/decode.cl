@@ -1215,6 +1215,18 @@ __kernel void gemv_mt_v(__global const uchar* raw, int N, int K, __global const 
 #define MT_ONESC 0
 #endif
 #endif
+// -DQ2F (two-pass mode, built with TB = 2 x the tokens): slots TB / 2 .. TB - 1 are the residuals of tokens 0 ..
+// TB / 2 - 1 (at -DQ2_AQ / -DQ2_SC), each slot computed as before; the store adds a token's residual sum to its value
+// as the second launch did. Otherwise slot t is token min(t, T - 1).
+#ifdef Q2F
+#define MT_TH (TB / 2)
+#define MT_TOK(t) min((t) % MT_TH, T - 1)
+#define MT_APO(t) (((t) >= MT_TH ? Q2_AQ / 4 : 0) + (size_t)MT_TOK(t) * K4)
+#define MT_SCO(t) (((t) >= MT_TH ? Q2_SC : 0) + MT_TOK(t))
+#else
+#define MT_APO(t) ((size_t)min((t), T - 1) * K4)
+#define MT_SCO(t) min((t), T - 1)
+#endif
   __local uint kt[VB_TABLES];
   vb_tables(kt, tabs);
   const int lane = get_sub_group_local_id(), r0 = (get_global_id(0) / 16) * GROWS;
@@ -1247,7 +1259,7 @@ __kernel void gemv_mt_v(__global const uchar* raw, int N, int K, __global const 
     }
 #pragma unroll
     for (int t = 0; t < TB; ++t) {
-      __global const uint* apt = ap + (size_t)min(t, T - 1) * K4;
+      __global const uint* apt = ap + MT_APO(t);
       const uint4 al = an;
       const float st = has ? sn : 0.0f;
       an = vload4(1, apt);  // this token's hi half
@@ -1275,8 +1287,8 @@ __kernel void gemv_mt_v(__global const uchar* raw, int N, int K, __global const 
 #endif
       const uint4 ah = an;
       if (t + 1 < TB) {  // next token's lo half and scale
-        an = vload4(0, ap + (size_t)min(t + 1, T - 1) * K4);
-        sn = ascb[min(t + 1, T - 1)];  // (a runtime index: not merged into one 8-float load, 14 registers fewer)
+        an = vload4(0, ap + MT_APO(t + 1));
+        sn = ascb[MT_SCO(t + 1)];  // (a runtime index: not merged into one 8-float load, 14 registers fewer)
       }
 #if MT_ONESC
 #pragma unroll
@@ -1305,6 +1317,19 @@ __kernel void gemv_mt_v(__global const uchar* raw, int N, int K, __global const 
 #endif
     }
   }
+#ifdef Q2F
+#pragma unroll
+  for (int r = 0; r < GROWS; ++r)
+#pragma unroll
+    for (int t = 0; t < MT_TH; ++t) {
+      const float v = sub_group_reduce_add(acc[r][t]), v2 = sub_group_reduce_add(acc[r][t + MT_TH]);
+      const int n = r0 + r;
+      if (lane == 0 && n < N && t < T) {
+        __global float* dst = C + (size_t)t * ldc + c_off + n;
+        *dst = (accumulate ? *dst + v : v) + v2;
+      }
+    }
+#else
 #pragma unroll
   for (int r = 0; r < GROWS; ++r)
 #pragma unroll
@@ -1316,7 +1341,10 @@ __kernel void gemv_mt_v(__global const uchar* raw, int N, int K, __global const 
         *dst = accumulate ? *dst + v : v;
       }
     }
+#endif
 }
+#undef MT_APO
+#undef MT_SCO
 #endif
 #if QT == IQ4_XS || QT == Q4_0
 // Gemma FFN input of the down projection for T <= TB tokens in one launch: y = gelu_tanh(x . gate) * (x . up),

@@ -3109,7 +3109,7 @@ class Engine {
     const bool cap = q2_ && !q2_off_ && &w == &lm_head_ && hp.softcap > 0.0f;
     q2_nocap_ = cap;
     // (one token: the GEMV runs both passes over one read of the weights, -DQ2F; it says so in q2_fused_)
-    q2_fuse_ = q2_ && !q2_off_ && cur_T_ == 1 && q2_fuse_on_;
+    q2_fuse_ = q2_ && !q2_off_ && cur_T_ <= 4 && q2_fuse_on_;  // (2-4 tokens: gemv_mt_v only, see matmul1)
     q2_fused_ = false;
     matmul1(name, w, Mp, C, ldc, c_off, acc, act32);
     q2_fuse_ = false;
@@ -3200,10 +3200,14 @@ class Engine {
         else if (cur_T_ < 6 && (vk || w.type == GGML_Q4_K)) gr = w.K >= 8192 || cb ? 4 : 2;
         else gr = w.type == GGML_IQ3_S ? 2 : vk ? (w.N >= 8192 ? 4 : 2) : std::min(gr, 2);
       }
+      // (two-pass mode, 2-4 tokens: gemv_mt_v with the residuals as TB further slots, -DQ2F, both passes in one launch)
+      const bool fuse = q2_fuse_ && vk && !old && a <= 1;
       cl_kernel k = kernel("decode", std::string(old ? "" : "-cl-intel-256-GRF-per-thread ") + "-DQT=" +
-                                         std::to_string(w.type) + " -DGROWS=" + std::to_string(gr) + " -DTB=" + std::to_string(tb) + head_defs(w) +
-                                         mt_lazy_opt(),
+                                         std::to_string(w.type) + " -DGROWS=" + std::to_string(gr) + " -DTB=" +
+                                         std::to_string(fuse ? 2 * tb : tb) + head_defs(w) + mt_lazy_opt() +
+                                         (fuse ? " -DQ2F" + q2_defs_ : std::string()),
                            vk ? "gemv_mt_v" : "gemv_mt");
+      q2_fused_ = fuse;
       int N = w.N, K = w.K, M = Mp, T = cur_T_;
       rd_bytes += raw_bytes(w);
       set_args(k, 0, w.raw, N, K, tabs_, aq_, asc_, absum_, M, T, C, ldc, c_off, a);
