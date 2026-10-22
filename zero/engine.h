@@ -2670,7 +2670,7 @@ class Engine {
     const int ldq = hp.n_head * hp.head_dim * 2 + 2 * hp.n_head_kv * hp.head_dim;
     const int big_w = std::max({hp.conv_dim(), 2 * hp.n_ff, ldq});
     x_ = buf(M * hp.hce() * 4);
-    aq_ = buf(M * maxK * (q2_ ? 2 : 1));
+    aq_ = buf(M * maxK * (q2mm_ ? 2 : 1));
     if (hp.hc) {
       hc_xn_ = buf(M * hp.hce() * 4);
       hc_gate_ = buf(M * hp.hce() * 4);
@@ -2695,8 +2695,8 @@ class Engine {
         }
       }
     }
-    asc_ = buf(M * (maxK / 32) * 4 * (q2_ ? 2 : 1));
-    absum_ = buf(M * (maxK / 16) * 2 * (q2_ ? 2 : 1));
+    asc_ = buf(M * (maxK / 32) * 4 * (q2mm_ ? 2 : 1));
+    absum_ = buf(M * (maxK / 16) * 2 * (q2mm_ ? 2 : 1));
     big_ = buf(M * big_w * 4);
     // MoE: the expert activations / outputs (mh_ [slots][F], my_ [slots][E] f32) share memory with buffers that are
     // only used inside the attention / DeltaNet part of a layer (z_; conv_out_, o_, qrope_): never live at the same time
@@ -2966,6 +2966,9 @@ class Engine {
   // runs on both and adds them (the f32 reference simulating this: Gemma 4 26B KL 0.0985 -> 0.0053 together with
   // two-pass attention). The offsets come from alloc_buffers' sizes (max_chunk rows of the widest input).
   bool q2_ = false;
+  // (two-pass matmul inputs: Gemma 4's mode, and Flash Next's dense matmuls with ARC_FN_Q2=1, an F21.13 experiment:
+  //  363-token KL against f32 0.0483 -> 0.0384, 4K prompt 191 -> 160 tok/s; its experts stay one pass)
+  bool q2mm_ = false;
   cl_mem qf_ = nullptr, mh2_ = nullptr;
   size_t q2m_hq_ = 0, q2m_sc_ = 0;  // (the experts' down input: residual offsets in mhq_ / mhsc_, bytes)
   bool q2_off_ = false;
@@ -2976,7 +2979,8 @@ class Engine {
   std::string q2_defs_;
   void q2_init() {
     q2_ = hp.gemma;  // (Gemma 4's only mode since 2026-10-22: KL < 0.01 against f32, the one-pass mode removed)
-    if (!q2_) return;
+    q2mm_ = q2_ || (hp.hc && getenv("ARC_FN_Q2") && atoi(getenv("ARC_FN_Q2")) > 0);
+    if (!q2mm_) return;
     const size_t M = max_chunk;
     const int maxK = std::max({hp.n_embd, hp.n_ff, hp.ssm_d_inner, hp.n_head * hp.head_dim, hp.hce(), hp.n_ff_exp_pad});
     q2_aq_ = M * maxK;
@@ -2992,11 +2996,11 @@ class Engine {
     const bool cap = q2_ && !q2_off_ && &w == &lm_head_ && hp.softcap > 0.0f;
     q2_nocap_ = cap;
     // (one token: the GEMV runs both passes over one read of the weights, -DQ2F; it says so in q2_fused_)
-    q2_fuse_ = q2_ && !q2_off_ && cur_T_ <= 4;  // (2-4 tokens: gemv_mt_v only, see matmul1)
+    q2_fuse_ = q2mm_ && !q2_off_ && cur_T_ <= 4;  // (2-4 tokens: gemv_mt_v only, see matmul1)
     q2_fused_ = false;
     matmul1(name, w, Mp, C, ldc, c_off, acc, act32);
     q2_fuse_ = false;
-    if (!q2_ || q2_off_) return;
+    if (!q2mm_ || q2_off_) return;
     if (acc > 1) throw std::logic_error(std::string("two-pass activations with a fused epilogue: ") + name);
     if (!q2_fused_) {
       const cl_mem a = aq_, s = asc_, b = absum_;
@@ -3679,7 +3683,7 @@ class Engine {
         run("hc_lo", k, 2, gws, lws);
       }
       matmul("hc_up", up, Mp, hc_gate_, W, 0, 0, act32);
-      if (f32_mode == 4) {
+      if (f32_mode == 4 && !q2mm_) {  // (two-pass matmuls: hc_lo_quant stored the residual already)
         cl_kernel k = kernel("ops", "", "hc_lo_quant_res");
         int lr = LR, ld = LD, kp = KP, hc = HC, mm = Mp, tt = T, a32 = act32;
         set_args(k, 0, hc_lo_, lr, ld, kp, hc, mm, tt, aq_, asc_, absum_, a32);
@@ -4085,7 +4089,7 @@ class Engine {
     }
     // router + shared expert gate/up (prompt chunks fuse silu(gate) * up into the up GEMM); one token: one GEMV
     // over the stacked rows when the layer has them (router logits at rgu_out_[0], gate / up in rgu_gu_)
-    const int fused = cur_T_ > 8 ? 1 : 0;
+    const int fused = cur_T_ > 8 && !q2mm_ ? 1 : 0;  // (two passes: no fused epilogue)
     cl_mem rl = rl_, gu = big_;
     if (g4) {
       // (done above)

@@ -107,14 +107,28 @@ static void round_int8(float* v, size_t n, int B, int passes) {
   }
 }
 
-// Optional fake-quantization of matmul inputs (env REF_Q = substring of tensor names or "all",
-// REF_QB = block size): int8 absmax per block, as arcinfer does with 256-element blocks. REF_Q2=1: two int8 passes.
+// name matches env var `var`: "all", "1", or a comma-separated list of substrings of tensor names
+static bool name_sel(const char* var, const std::string& name) {
+  const char* sel = getenv(var);
+  if (!sel) return false;
+  const std::string s = sel;
+  if (s == "all" || s == "1") return true;
+  for (size_t a = 0; a <= s.size();) {
+    const size_t b = std::min(s.find(',', a), s.size());
+    if (b > a && name.find(s.substr(a, b - a)) != std::string::npos) return true;
+    a = b + 1;
+  }
+  return false;
+}
+
+// Optional fake-quantization of matmul inputs (env REF_Q = "all" or substrings of tensor names, REF_QX = names left
+// out, REF_QB = block size): int8 absmax per block, as arcinfer does with 256-element blocks. REF_Q2 = "1" or names:
+// two int8 passes for those.
 static std::vector<float> fake_quant(const std::string& name, const std::vector<float>& X, int K) {
-  const char* sel = getenv("REF_Q");
-  if (!sel || !(std::string(sel) == "all" || name.find(sel) != std::string::npos)) return X;
+  if (!name_sel("REF_Q", name) || name_sel("REF_QX", name)) return X;
   const int B = getenv("REF_QB") ? atoi(getenv("REF_QB")) : 256;
   std::vector<float> q = X;
-  round_int8(q.data(), q.size(), B, getenv("REF_Q2") ? 2 : 1);
+  round_int8(q.data(), q.size(), B, name_sel("REF_Q2", name) ? 2 : 1);
   (void)K;
   return q;
 }
@@ -125,6 +139,7 @@ static void matmul(const std::string& name, const std::vector<float>& X0, int T,
   const int K = (int)t.dims[0], N = (int)t.dims[1];
   const std::vector<float> X = fake_quant(name, X0, K);
   const size_t rb = t.nbytes / N;
+  const bool wq8 = name_sel("REF_WQ8", name);  // (REF_WQ8: the weight rows rounded as Q8_0, per 32 values)
   Y.assign((size_t)T * N, 0.0f);
 #pragma omp parallel
   {
@@ -132,6 +147,7 @@ static void matmul(const std::string& name, const std::vector<float>& X0, int T,
 #pragma omp for schedule(dynamic, 16)
     for (int n = 0; n < N; ++n) {
       dequant_row(t.type, t.data + (size_t)n * rb, K, w.data());
+      if (wq8) round_int8(w.data(), (size_t)K, 32, 1);
       for (int i = 0; i < T; ++i) {
         double acc = 0;
         const float* x = &X[(size_t)i * K];
@@ -708,11 +724,14 @@ static void qwen4exp_layers(const std::vector<int>& toks, std::vector<float>& x)
           memcpy(d, &qg[(size_t)t * nh * hd * 2 + hh * hd * 2], hd * 4);
           rmsnorm(d, hd, qn.data(), eps);
           rope(d, t);
+          fq_row(d, hd);  // (REF_ATTQ: rounded as the engine's attention stores q / K / V)
         }
         for (int hh = 0; hh < nkv; ++hh) {
           float* d = &kk[(size_t)t * nkv * hd + hh * hd];
           rmsnorm(d, hd, kn.data(), eps);
           rope(d, t);
+          fq_row(d, hd);
+          if (getenv("REF_ATTQV")) fq_row(&vv[(size_t)t * nkv * hd + hh * hd], hd, true);  // (the engine keeps V f16)
         }
       }
       // QSA (llama.cpp qwen4exp build_qsa_sel): the indexer scores blocks of `ratio` cells (pooled raw keys, normed and
@@ -979,11 +998,14 @@ int main(int argc, char** argv) {
           memcpy(d, &qg[(size_t)t * nh * hd * 2 + hh * hd * 2], hd * 4);
           rmsnorm(d, hd, qn.data(), eps);
           rope(d, t);
+          fq_row(d, hd);  // (REF_ATTQ: rounded as the engine's attention stores q / K / V)
         }
         for (int hh = 0; hh < nkv; ++hh) {
           float* d = &kk[(size_t)t * nkv * hd + hh * hd];
           rmsnorm(d, hd, kn.data(), eps);
           rope(d, t);
+          fq_row(d, hd);
+          if (getenv("REF_ATTQV")) fq_row(&vv[(size_t)t * nkv * hd + hh * hd], hd, true);  // (the engine keeps V f16)
         }
       }
       std::vector<float> att((size_t)T * nh * hd);
