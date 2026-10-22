@@ -1624,11 +1624,22 @@ __kernel void moe_gateup_q(__global const uchar* rg, __global const uchar* ru, i
   for (int r = 0; r < GROWS; ++r)
 #pragma unroll
     for (int m = 0; m < TM; ++m) ag[r][m] = au[r][m] = 0.0f;
+#ifdef Q2F  // (two-pass mode: the residual's terms, from the same decoded blocks; see Q2F above)
+  float bg[GROWS][TM], bu[GROWS][TM];
+#pragma unroll
+  for (int r = 0; r < GROWS; ++r)
+#pragma unroll
+    for (int m = 0; m < TM; ++m) bg[r][m] = bu[r][m] = 0.0f;
+#endif
 #ifdef MOE_T1
   {
     const int tok = stok[r0], hs = lane / 8, ib = lane % 8;
     __global const uint* ap = (__global const uint*)(aq + (size_t)tok * K);
     __global const float* sap = asc + tok;
+#ifdef Q2F
+    __global const uint* ap2 = (__global const uint*)(aq + Q2_AQ + (size_t)tok * K);
+    __global const float* sap2 = asc + Q2_SC + tok;
+#endif
     __global const uchar* pg[GROWS];
     __global const uchar* pu[GROWS];
 #pragma unroll
@@ -1644,6 +1655,12 @@ __kernel void moe_gateup_q(__global const uchar* rg, __global const uchar* ru, i
       float sa = sap[(size_t)bc * M];
       a8 = has ? a8 : (uint8)0;
       sa = has ? sa : 0.0f;
+#ifdef Q2F
+      uint8 r8 = vload8(0, ap2 + 8 * bc);
+      float sr = sap2[(size_t)bc * M];
+      r8 = has ? r8 : (uint8)0;
+      sr = has ? sr : 0.0f;
+#endif
 #pragma unroll
       for (int r = 0; r < GROWS; ++r) {
         uint wg[8], wu[8];
@@ -1652,12 +1669,21 @@ __kernel void moe_gateup_q(__global const uchar* rg, __global const uchar* ru, i
         vblock(pg[r] + sbi * BBP, ib, kt, wg, &dg, &gdmin, &gs0, &gs1, &gm0, &gm1);
 #if GU_ORDER
         ag[r][0] += sa * moe_term(a8, wg, dg, gdmin, gs0, gs1, gm0, gm1);
+#ifdef Q2F
+        bg[r][0] += sr * moe_term(r8, wg, dg, gdmin, gs0, gs1, gm0, gm1);
+#endif
 #endif
         vblock(pu[r] + sbi * BBP, ib, kt, wu, &du, &udmin, &us0, &us1, &um0, &um1);
 #if !GU_ORDER
         ag[r][0] += sa * moe_term(a8, wg, dg, gdmin, gs0, gs1, gm0, gm1);
+#ifdef Q2F
+        bg[r][0] += sr * moe_term(r8, wg, dg, gdmin, gs0, gs1, gm0, gm1);
+#endif
 #endif
         au[r][0] += sa * moe_term(a8, wu, du, udmin, us0, us1, um0, um1);
+#ifdef Q2F
+        bu[r][0] += sr * moe_term(r8, wu, du, udmin, us0, us1, um0, um1);
+#endif
       }
     }
   }
@@ -1697,7 +1723,15 @@ __kernel void moe_gateup_q(__global const uchar* rg, __global const uchar* ru, i
           const uint8 a8 = has ? vload8(0, (__global const uint*)(aq + (size_t)tok * K + 32 * b)) : (uint8)0;
           const float sa = has ? asc[(size_t)b * M + tok] : 0.0f;
           ag[r][m] += sa * moe_term(a8, wg, dg, gdmin, gs0, gs1, gm0, gm1);
+#ifdef Q2F
+          const uint8 r8 = has ? vload8(0, (__global const uint*)(aq + Q2_AQ + (size_t)tok * K + 32 * b)) : (uint8)0;
+          const float sr = has ? asc[Q2_SC + (size_t)b * M + tok] : 0.0f;
+          bg[r][m] += sr * moe_term(r8, wg, dg, gdmin, gs0, gs1, gm0, gm1);
+#endif
           au[r][m] += sa * moe_term(a8, wu, du, udmin, us0, us1, um0, um1);
+#ifdef Q2F
+          bu[r][m] += sr * moe_term(r8, wu, du, udmin, us0, us1, um0, um1);
+#endif
         }
       }
     }
@@ -1707,7 +1741,12 @@ __kernel void moe_gateup_q(__global const uchar* rg, __global const uchar* ru, i
   for (int r = 0; r < GROWS; ++r)
 #pragma unroll
     for (int m = 0; m < TM; ++m) {
+#ifdef Q2F  // (the value pass's sum, then the residual's added, as the two passes stored them)
+      const float g = sub_group_reduce_add(ag[r][m]) + sub_group_reduce_add(bg[r][m]);
+      const float u = sub_group_reduce_add(au[r][m]) + sub_group_reduce_add(bu[r][m]);
+#else
       const float g = sub_group_reduce_add(ag[r][m]), u = sub_group_reduce_add(au[r][m]);
+#endif
       const int n = n0 + r;
 #ifdef MOE_GELU  // (Gemma 4 experts: gelu_tanh(gate) * up)
       if (lane == 0 && n < F && m < nr)
@@ -1749,11 +1788,22 @@ __kernel void moe_down_q(__global const uchar* rd, int N, int K, __global const 
   for (int r = 0; r < GROWS; ++r)
 #pragma unroll
     for (int m = 0; m < TM; ++m) acc[r][m] = 0.0f;
+#ifdef Q2F  // (two-pass mode: h's residual at -DQ2M bytes / -DQ2MS floats, as moe_quant writes it)
+  float acc2[GROWS][TM];
+#pragma unroll
+  for (int r = 0; r < GROWS; ++r)
+#pragma unroll
+    for (int m = 0; m < TM; ++m) acc2[r][m] = 0.0f;
+#endif
 #ifdef MOE_T1
   {
     const int hs = lane / 8, ib = lane % 8;
     __global const uint* ap = (__global const uint*)(hq + (size_t)r0 * K);
     __global const float* sap = hsc + r0;
+#ifdef Q2F
+    __global const uint* ap2 = (__global const uint*)(hq + Q2M + (size_t)r0 * K);
+    __global const float* sap2 = hsc + Q2MS + r0;
+#endif
     __global const uchar* pr[GROWS];
 #pragma unroll
     for (int r = 0; r < GROWS; ++r) pr[r] = XR(ed, min(n0 + r, N - 1), 0);
@@ -1771,6 +1821,12 @@ __kernel void moe_down_q(__global const uchar* rd, int N, int K, __global const 
       float sa = sap[(size_t)bc * S];
       a8 = has ? a8 : (uint8)0;
       sa = has ? sa : 0.0f;
+#ifdef Q2F
+      uint8 r8 = vload8(0, ap2 + 8 * bc);
+      float sr = sap2[(size_t)bc * S];
+      r8 = has ? r8 : (uint8)0;
+      sr = has ? sr : 0.0f;
+#endif
 #pragma unroll
       for (int r = 0; r < GROWS; ++r) {
         uint w[8];
@@ -1778,6 +1834,9 @@ __kernel void moe_down_q(__global const uchar* rd, int N, int K, __global const 
         float d, dmin = 0.0f;
         vblock(pr[r] + sbi * BBP, ib, kt, w, &d, &dmin, &sc0, &sc1, &mn0, &mn1);
         acc[r][0] += sa * moe_term(a8, w, d, dmin, sc0, sc1, mn0, mn1);
+#ifdef Q2F
+        acc2[r][0] += sr * moe_term(r8, w, d, dmin, sc0, sc1, mn0, mn1);
+#endif
       }
     }
 #if defined(FV) && DN_PACK
@@ -1793,6 +1852,13 @@ __kernel void moe_down_q(__global const uchar* rd, int N, int K, __global const 
       const float t = moe_term(a8, w, d, dmin, sc0, sc1, mn0, mn1);
 #pragma unroll
       for (int r = 0; r < GROWS; ++r) acc[r][0] += st * intel_sub_group_shuffle(t, r * DN_REM + j);
+#ifdef Q2F
+      const uint8 r8 = vload8(0, ap2 + 8 * bc);
+      const float sr = sap2[(size_t)bc * S], st2 = lane < DN_REM ? sr : 0.0f;
+      const float t2 = moe_term(r8, w, d, dmin, sc0, sc1, mn0, mn1);
+#pragma unroll
+      for (int r = 0; r < GROWS; ++r) acc2[r][0] += st2 * intel_sub_group_shuffle(t2, r * DN_REM + j);
+#endif
     }
 #elif DN_REM > 0
     {
@@ -1803,6 +1869,12 @@ __kernel void moe_down_q(__global const uchar* rd, int N, int K, __global const 
       float sa = sap[(size_t)bc * S];
       a8 = has ? a8 : (uint8)0;
       sa = has ? sa : 0.0f;
+#ifdef Q2F
+      uint8 r8 = vload8(0, ap2 + 8 * bc);
+      float sr = sap2[(size_t)bc * S];
+      r8 = has ? r8 : (uint8)0;
+      sr = has ? sr : 0.0f;
+#endif
 #pragma unroll
       for (int r = 0; r < GROWS; ++r) {
         uint w[8];
@@ -1810,6 +1882,9 @@ __kernel void moe_down_q(__global const uchar* rd, int N, int K, __global const 
         float d, dmin = 0.0f;
         vblock(pr[r] + sbi * BBP, ib, kt, w, &d, &dmin, &sc0, &sc1, &mn0, &mn1);
         acc[r][0] += sa * moe_term(a8, w, d, dmin, sc0, sc1, mn0, mn1);
+#ifdef Q2F
+        acc2[r][0] += sr * moe_term(r8, w, d, dmin, sc0, sc1, mn0, mn1);
+#endif
       }
     }
 #endif
@@ -1843,6 +1918,11 @@ __kernel void moe_down_q(__global const uchar* rd, int N, int K, __global const 
           const uint8 a8 = has ? vload8(0, (__global const uint*)(hq + (size_t)row * K + 32 * b)) : (uint8)0;
           const float sa = has ? hsc[(size_t)b * S + row] : 0.0f;
           acc[r][m] += sa * moe_term(a8, w, d, dmin, sc0, sc1, mn0, mn1);
+#ifdef Q2F
+          const uint8 r8 = has ? vload8(0, (__global const uint*)(hq + Q2M + (size_t)row * K + 32 * b)) : (uint8)0;
+          const float sr = has ? hsc[Q2MS + (size_t)b * S + row] : 0.0f;
+          acc2[r][m] += sr * moe_term(r8, w, d, dmin, sc0, sc1, mn0, mn1);
+#endif
         }
       }
     }
@@ -1854,7 +1934,12 @@ __kernel void moe_down_q(__global const uchar* rd, int N, int K, __global const 
     for (int m = 0; m < TM; ++m) {
       const float v = sub_group_reduce_add(acc[r][m]);
       const int n = n0 + r;
+#ifdef Q2F  // (as the two passes: the weighted value sum, then the weighted residual sum added)
+      const float v2 = sub_group_reduce_add(acc2[r][m]);
+      if (lane == 0 && n < N && m < nr) y[(size_t)(r0 + m) * N + n] = swt[r0 + m] * v + swt[r0 + m] * v2;
+#else
       if (lane == 0 && n < N && m < nr) y[(size_t)(r0 + m) * N + n] = swt[r0 + m] * v;
+#endif
     }
 }
 

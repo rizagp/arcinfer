@@ -4313,9 +4313,18 @@ class Engine {
     }
     // routing, then the slots grouped by expert and their tiles
     static const int tm_std = getenv("ARC_MOE_TM") ? std::max(1, atoi(getenv("ARC_MOE_TM"))) : 16;  // (standard experts: slots per decoded weight; 2048-token prompt: TM 8 416, 16 473, 32 423, 64 187 tok/s)
-    // (two-pass mode, Gemma 4: every pass through the T > 1 routing and moe_rg, whose two passes it runs)
-    const bool q2g = q2_ && g4;
-    const int tm = T == 1 && !q2g ? 1 : hp.moe_std ? tm_std : 16, n = T * NU;
+    // (two-pass mode, Gemma 4: prompt chunks through the T > 1 routing and moe_rg, whose two passes it runs; generation
+    //  and verification (T <= 8) through the per-tile kernels with both passes fused, -DQ2F, as plain decoding;
+    //  ARC_Q2_FUSE=0: everything through moe_rg as before)
+    static const int rg_min0 = getenv("ARC_MOE_RG_MIN") ? atoi(getenv("ARC_MOE_RG_MIN")) : 320;
+    const bool q2f = q2_ && g4 && q2_fuse_on_ && hp.moe_std && T <= 8 && T < rg_min0;
+    const bool q2g = q2_ && g4 && !q2f;
+    const std::string q2fd = q2f ? " -DQ2F" + q2_defs_ + " -DQ2M=" + std::to_string(q2m_hq_) + " -DQ2MS=" +
+                                       std::to_string(q2m_sc_ / 4)
+                                 : std::string();
+    // (fused two-pass tiles hold twice the sums: as many slots as the tokens (an expert gets at most T, here <= 8);
+    //  TM 16 spilled 4 KB per thread in verification. Each slot's terms are the same at any TM: bit-identical)
+    const int tm = T == 1 && !q2g ? 1 : q2f ? (T <= 4 ? 4 : 8) : hp.moe_std ? tm_std : 16, n = T * NU;
     const std::string defs = "-cl-intel-256-GRF-per-thread -DNE=" + std::to_string(hp.n_expert) +
                              " -DNU=" + std::to_string(NU) + " -DTM=" + std::to_string(tm) +
                              (Fp != F ? " -DFV=" + std::to_string(F) : std::string()) + (g4 ? " -DESCALE" : "");
@@ -4417,8 +4426,9 @@ class Engine {
     // standard expert types, per tile (zero/kernels/decode.cl moe_gateup_q / moe_down_q): the tiles in `tiles`
     auto gateup_q = [&](cl_mem tiles) {
       const int grows = gr_gu;
-      cl_kernel k = kernel("decode", grf_env("ARC_MOE_GRF") + "-DMOE_Q -DQT=" + std::to_string(L.ex_type[0]) + " -DGROWS=" +
-                                         std::to_string(grows) + " -DTM=" + std::to_string(tm) + xdef + hld, "moe_gateup_q");
+      cl_kernel k = kernel("decode", (q2f && tm > 1 ? std::string("-cl-intel-256-GRF-per-thread ") : grf_env("ARC_MOE_GRF")) +
+                                         "-DMOE_Q -DQT=" + std::to_string(L.ex_type[0]) + " -DGROWS=" +
+                                         std::to_string(grows) + " -DTM=" + std::to_string(tm) + xdef + hld + q2fd, "moe_gateup_q");
       int M = Mp, K = E, FF = F;
       if (xc_) {
         set_args(k, 0, xc_->xtab[L.il], xc_->xtab[L.il], FF, K, tabs_, aq_, asc_, M, tiles, stok_, mh_, xc_->xtab[L.il],
@@ -4441,7 +4451,7 @@ class Engine {
       const int grows = T == 1 ? gr_dn : 1;
       cl_kernel k = kernel("decode", "-DMOE_Q -DQT=" + std::to_string(L.ex_type[2]) + " -DGROWS=" + std::to_string(grows) +
                                          " -DTM=" + std::to_string(tm) + xdef +
-                                         (Fp != F ? " -DFV=" + std::to_string(F) : std::string()), "moe_down_q");
+                                         (Fp != F ? " -DFV=" + std::to_string(F) : std::string()) + q2fd, "moe_down_q");
       int NN = E, K = Fp, S = slots_;
       if (xc_)
         set_args(k, 0, xc_->xtab[L.il], NN, K, tabs_, mhq_, mhsc_, S, tiles, swt_, my_, xc_->xtab[L.il], xoff(L, 2));
