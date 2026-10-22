@@ -1802,7 +1802,9 @@ __kernel void attn_fa_gh(__global const float* qf, __global const KC_T* kc, __gl
   __global const KC_T* kb = kc + (size_t)g * cap * HD;
   __global const half* vb = vc + (size_t)g * cap * HD;
   float mx[HPG], lp[HPG];
-#if GD == 8
+#if GD == 4
+  float4 o[HPG];
+#elif GD == 8
   float8 o[HPG];
 #else
   float16 o[HPG];
@@ -1861,7 +1863,11 @@ __kernel void attn_fa_gh(__global const float* qf, __global const KC_T* kc, __gl
         const int pj = t0 + j;
         if (pj < lo || pj > hi) continue;  // (the same for every lane)
         __global const half* vrow = vb + (size_t)(pj % cap) * HD + sgi * (HD / FS) + GD * lane;
-#if GD == 8
+#if GD == 4
+        const float4 vv = vload_half4(0, vrow);
+#pragma unroll
+        for (int h = 0; h < HPG; ++h) o[h] = fma((float4)sub_group_broadcast(pr[h], j), vv, o[h]);
+#elif GD == 8
         const float8 vv = vload_half8(0, vrow);
 #pragma unroll
         for (int h = 0; h < HPG; ++h) o[h] = fma((float8)sub_group_broadcast(pr[h], j), vv, o[h]);
@@ -1878,7 +1884,9 @@ __kernel void attn_fa_gh(__global const float* qf, __global const KC_T* kc, __gl
   for (int h = 0; h < HPG; ++h) {
     const float L = sub_group_reduce_add(lp[h]);
     __global float* op = out + ((size_t)m * nh + g * HPG + h) * HD + sgi * (HD / FS) + GD * lane;
-#if GD == 8
+#if GD == 4
+    vstore4(o[h] / L, 0, op);
+#elif GD == 8
     vstore8(o[h] / L, 0, op);
 #else
     vstore16(o[h] / L, 0, op);

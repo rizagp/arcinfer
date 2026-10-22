@@ -20,10 +20,10 @@ character. "Bit-identical" below means exactly that, not "close". Changes that a
 |---|---|---|---|
 | Qwen3.6 35B-A3B UD-IQ4_XS (MoE, experts on the SSD) | 604 tok/s (32K prompt), 324 tok/s (128K) | 20.6 tok/s; Python code 49.9 with DFlash2, Indonesian 21.9 with MTP; 12.6 at 128K depth | KL 0.004-0.008 against an f32 reference (generation path) |
 | Qwen3.8 27B (IQ3_S GSQ, dense) | ~135 tok/s (4K prompt) | 4.9 tok/s; code 18.1 with DFlash2 + MTP | KL 0.0003-0.0004 |
-| Qwen3.8 Flash Next (IQ3_S, 512 experts on the SSD) | ~159 tok/s (4K; 166 before the two-pass mixers), 163 (32K), 123 (125K) | 6-7 tok/s | KL 0.020 against the CPU reference with QSA (3.5K prompt); 0.048 on 363 tokens of README text (0.065 before) |
+| Qwen3.8 Flash Next (IQ3_S, 512 experts on the SSD) | ~191 tok/s (4K, measured 2026-10-23), 163 (32K), 123 (125K) | 6-7 tok/s | KL 0.020 against the CPU reference with QSA (3.5K prompt); 0.048 on 363 tokens of README text (0.065 before) |
 | Qwen3.5 4B | 911 tok/s (2K prompt) | 17.6 tok/s | KL 0.0021; perplexity 6.056 (llama.cpp 6.141) |
-| Gemma 4 12B (Google QAT) | 240 tok/s (2K prompt) | 7.5 tok/s | KL 0.021; greedy text equal to llama.cpp |
-| Gemma 4 26B-A4B (Google QAT Q4_0, MoE, experts on the SSD) | 450 tok/s (4K prompt), 410 (8K) | 19.6-20.6 tok/s | KL 0.068-0.073 against the CPU reference (440 tokens); the reference's own int8-input copy differs by 0.063 |
+| Gemma 4 12B (Google QAT) | 100 tok/s (14K prompt) | 19.0 tok/s with its drafter | KL 0.0002 (two-pass mode, the only one since 2026-10-22) |
+| Gemma 4 26B-A4B (Google QAT Q4_0, MoE, experts on the SSD) | 230 tok/s (4K prompt), 178 (14K) | ~25 tok/s with its drafter; 13.0 after a 14K prompt without | KL 0.0042 against the CPU reference (480 tokens; two-pass mode, the only one since 2026-10-22) |
 
 Two conversations at once (`--slots 2`), both writing their answers, their next tokens in one engine pass (tok/s of
 the two together): 27B prose 7.3 -> 10.5, code 11.6 -> 15.4; 35B 20.2 -> 24.7, 29.0 -> 30.7; Gemma 4 26B 19.8 -> 26.2
@@ -73,6 +73,7 @@ That property is what every speed change is held to:
 
 | Date | Change | Before | After | Answers |
 |---|---|---|---|---|
+| 10-23 | Gemma 4 head-512 prompt attention (`attn_fa_gh`): 8 sub-groups per work-group, 4 output dims per lane (was 4 and 8); the 12B's 16 q heads per kv head now fit it too (64 floats per lane, no spill) | 26B 13,921-token prompt 90.7 s, 4K 220 tok/s; E4B 13,921 tokens 83.5 s; 12B 194-210 s (attn_fa_g) | **77.7 s** (+17 %), **230**; **71.1 s**; **138-144 s** (+40 %) | logits bit-identical (26B 480 tokens, E4B / 12B 13,921 tokens against the old kernel choice); Qwen 35B / 27B, Flash Next unchanged |
 | 10-23 | Flash Next, opt-in experiment `ARC_FN_Q2=1`: the dense matmuls' inputs as two int8 passes (Gemma 4's mechanism; experts, attention and the Q8_0 HC weights unchanged) | KL 0.0483 (363 tokens, top token 331 / 363), generation path 0.0375; 4K prompt 191 tok/s | KL **0.0384** (337 / 363), generation path 0.0353; **160 tok/s** (-16 %) | not the default: the simulation shows the HC weights as Q8_0 alone cost 0.035, so < 0.01 needs every part precise (QUEUE F21.13, the user decides) |
 | 10-22 | Gemma 4: the int8 K / V copy only for the layers the assistant drafter reads (the sources of the last sliding and global layers; none without the drafter) | context memory per 1K tokens: 26B 42.6 MB, E4B 34.3 MB; a saved 1,511-token 26B conversation 492 MB | **33.7** (31.5 without the drafter), **27.7**; **363 MB**; the freed memory goes to the 26B's expert cache | logits bit-identical (26B, E4B; with and without the drafter); session round trip identical; `--slots-check` passed (26B, both) |
 | 10-22 | Gemma 4 E2B / E4B (shared KV layers): sliding-window layers keep the ring of window + chunk + 4096 like the others instead of the full context | E4B: ~115 KB per token in the sliding layers' caches, auto context 94,208 (110,592 without images); ctx 16K 8.84 GiB | **auto context 131,072** (the trained maximum); ctx 16K **7.96 GiB** | 13,921-token prompt in a 16K context (the ring wraps) + 32 tokens: logits bit-identical with and without the drafter; `--slots-check` passed |

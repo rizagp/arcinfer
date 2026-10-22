@@ -3290,9 +3290,11 @@ class Engine {
     static const int fa_rows = getenv("ARC_FA_ROWS") ? std::max(1, atoi(getenv("ARC_FA_ROWS"))) : 0;
     static const int fa_gq = getenv("ARC_FA_GQ") ? std::max(1, atoi(getenv("ARC_FA_GQ"))) : 0;
     // (prompt chunks of the head-512 layers: attn_fa_gh, each key row read once per row for all q heads of its kv head;
-    //  ARC_FA_GH=0: attn_fa_g; ARC_FA_FS: sub-groups per work-group, default 4)
+    //  ARC_FA_GH=0: attn_fa_g; ARC_FA_FS: sub-groups per work-group, default 8 (each holds 4 output dims per lane:
+    //  26B, 13,921-token prompt 90.7 -> 77.7 s, bit-identical; 4 sub-groups: 8 dims; two rows per work-group, each
+    //  key row read once for both, were not faster)
     static const bool fa_gh = !getenv("ARC_FA_GH") || atoi(getenv("ARC_FA_GH")) != 0;
-    static const int fa_fs = getenv("ARC_FA_FS") ? std::max(1, atoi(getenv("ARC_FA_FS"))) : 4;
+    static const int fa_fs = getenv("ARC_FA_FS") ? std::max(1, atoi(getenv("ARC_FA_FS"))) : 8;
     // (generation / verification, <= 8 rows: flash-decoding, the key range split over many sub-groups and combined;
     //  ARC_FA_SPLIT=0: one sub-group per (row, q-head pair) over every key, as the prompt kernel)
     static const bool fa_split = !getenv("ARC_FA_SPLIT") || atoi(getenv("ARC_FA_SPLIT")) != 0;
@@ -3319,11 +3321,12 @@ class Engine {
         run(L.swa ? "attn_swa" : "attn_global", kc2, 3, g2, nullptr);
         return;
       }
-      // (at most 8 q heads per kv head: the 12B's 16 hold 128 output floats per lane, spilled 6.4 KB per thread and
-      //  made its global attention slower, 3.4 -> 4.4-4.9 s for a 4K prompt; DeepSeek's audit)
-      if (fa_gh && n > 8 && hd >= 512 && hpg <= 8 && hd % (fa_fs * 16) == 0 && (hd / fa_fs / 16 == 8 || hd / fa_fs / 16 == 16)) {
-        cl_kernel k = kernel("ops", "-cl-intel-256-GRF-per-thread -DFA_GH -DHD=" +
-                                        std::to_string(hd) + " -DHPG=" + std::to_string(hpg) + " -DFS=" + std::to_string(fa_fs),
+      // (at most 64 output floats per lane, q heads x dims: with 4 sub-groups the 12B's 16 q heads held 128, spilled
+      //  6.4 KB per thread and made its global attention slower, 3.4 -> 4.4-4.9 s for a 4K prompt; DeepSeek's audit)
+      if (fa_gh && n > 8 && hd >= 512 && hpg * (hd / fa_fs / 16) <= 64 && hd % (fa_fs * 16) == 0 &&
+          (hd / fa_fs / 16 == 4 || hd / fa_fs / 16 == 8 || hd / fa_fs / 16 == 16)) {
+        cl_kernel k = kernel("ops", "-cl-intel-256-GRF-per-thread -DFA_GH -DHD=" + std::to_string(hd) + " -DHPG=" +
+                                        std::to_string(hpg) + " -DFS=" + std::to_string(fa_fs),
                              "attn_fa_gh");
         int cp = L.cap, nn = nh, nk = nkv, pp = p0, MM = n, w = win, nlo = L.swa ? nc_lo_ : -1, nhi = L.swa ? nc_hi_ : -1;
         set_args(k, 0, from(qf_, (size_t)r0 * nh * hd * 4), L.kc, L.vc, cp, nn, nk, pp, MM,
