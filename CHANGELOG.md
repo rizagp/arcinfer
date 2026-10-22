@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-22: the accurate Gemma mode as an option; faster sampled tool calls
+
+- **`--q2` (server, runz; `arc-server -Q2`, `pi-arc --q2`)** turns on Gemma 4's two-pass mode, as `ARC_Q2=1` did.
+  It is part of the server's context key, its saved conversations and system-prompt cache get their own folders
+  (`-q2`), and the saved state carries a flag and the float K / V rows: a conversation saved, a second one held,
+  the first one loaded again gives the same greedy answer as a fresh server (26B, 1,511 tokens); a plain server
+  refuses the file. Saved states of the other modes are unchanged.
+- **Sampled tool calls 4x faster**: constrained sampling with top_k > 1 sorted and tested the whole 248K vocabulary
+  whenever the 512 most likely tokens held too few allowed ones (after every JSON key); it now stops when the rest
+  could not be drawn (e^-20 below the best allowed token). 35B, as Pi samples: 4.8 -> 20.4 tok/s; a 1,240-token
+  `write` call 24.3 (greedy 24.4). The same tokens as before in the seeded tests.
+
 ## 2026-10-20: the OpenCL engine removed; robustness fixes
 
 - **Two-pass mode for Gemma 4 (`ARC_Q2=1`, opt-in, slow for now)**: every activation in two int8 passes (the value,

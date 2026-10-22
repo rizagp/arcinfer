@@ -68,6 +68,8 @@ struct EngineOptions {
   bool act32_all = true;      // per-32 activation scales for every GEMM (false: only for the sensitive inputs)
   bool attn_int8 = true;      // int8 (DP4a) attention scores; false = f32 scores
   bool v4 = false;            // + a 4-bit copy of V for generation (Qwen; prompts read the int8 V; opt-in)
+  bool q2 = false;            // Gemma 4: two-pass int8 activations + float attention (KL < 0.01, slower; opt-in for
+                              // now, also ARC_Q2=1; other models ignore it)
   bool mtp = false;           // load the MTP (nextn) block for speculative decoding (mtp_draft / verify)
   int mtp_drafts = 0;         // drafts per step (1..7; later ones chained on the MTP block's own output); 0 = auto:
                               // 3 for wide dense Qwen models (27B: code 7.8 -> 9.5 tok/s, text +2.5 %), else 2
@@ -1025,7 +1027,7 @@ class Engine {
     if (!get(f, hdr.data(), hdr.size() * 4)) return false;
     const int spos = hdr[7], swh = hdr[8], slo = hdr[9];
     if (hdr[0] != kStateMagic || hdr[1] != 2 || hdr[2] != hp.n_layer || hdr[3] != hp.n_embd || hdr[4] != hp.n_vocab ||
-        hdr[5] != ((hp.gemma ? 1 : 0) | (opt.v4 ? 2 : 0)) || hdr[6] != (has_mtp ? 1 : 0) || hdr[10] != (int)kl.size() || spos < 0 ||
+        hdr[5] != state_flags() || hdr[6] != (has_mtp ? 1 : 0) || hdr[10] != (int)kl.size() || spos < 0 ||
         spos > ctx || swh > ctx || slo < 0)
       return false;
     std::vector<int32_t> geo(kl.size() * 5);
@@ -1276,6 +1278,14 @@ class Engine {
           if (first > 0) v.push_back({b, (base + s0) * unit, (size_t)first * unit});
           if (n > first) v.push_back({b, base * unit, (size_t)(n - first) * unit});
         }
+      if (q2_)  // (two-pass mode: the float K / V rows attn_fa_g reads, [kv head][cap][hd], the same 16-row blocks)
+        for (int g = 0; g < k.nkv; ++g)
+          for (int t = 0; t < 2; ++t) {
+            const size_t unit = (size_t)16 * k.hd * (t == 0 ? (q2_kf32_ ? 4 : 2) : 2), base = (size_t)g * nbc;
+            cl_mem b = t == 0 ? k.L->kc : k.L->vc;
+            if (first > 0) v.push_back({b, (base + s0) * unit, (size_t)first * unit});
+            if (n > first) v.push_back({b, base * unit, (size_t)(n - first) * unit});
+          }
     }
     if (hp.n_qsa && !br.empty())  // QSA pooled keys of the blocks below the saved positions (the KV blocks' range)
       for (auto& L : layers_)
@@ -1297,12 +1307,14 @@ class Engine {
     if (has_mtp) v.push_back({hlast_, 0, (size_t)hp.n_embd * 4});
     return v;
   }
+  // (a saved state loads only into the same layout: Gemma, the 4-bit V copy, the two-pass mode's float K / V rows)
+  int state_flags() const { return (hp.gemma ? 1 : 0) | (opt.v4 ? 2 : 0) | (q2_ ? 4 : 0); }
   // header and device ranges of save_state()
   void save_layout(int keep_from, std::vector<int32_t>& hdr, std::vector<Seg>& segs, bool host_snapshot = true) {
     const auto kl = kv_layers();
     // positions [0, pos) (beyond pos a Gemma cache may still hold a longer, rewound conversation: not needed)
     const int hi = pos, slo = hp.gemma ? swa_save_lo(keep_from) : 0;
-    hdr = {kStateMagic, 2, hp.n_layer, hp.n_embd, hp.n_vocab, (hp.gemma ? 1 : 0) | (opt.v4 ? 2 : 0), has_mtp ? 1 : 0, pos, pos, slo,
+    hdr = {kStateMagic, 2, hp.n_layer, hp.n_embd, hp.n_vocab, state_flags(), has_mtp ? 1 : 0, pos, pos, slo,
            (int)kl.size()};
     std::vector<std::pair<int, int>> br;  // blocks [b0, b1) saved per KV layer
     for (const KvGeom& k : kl) {
@@ -3076,7 +3088,9 @@ class Engine {
   size_t q2_aq_ = 0, q2_sc_ = 0, q2_ab_ = 0;  // bytes
   std::string q2_defs_;
   void q2_init() {
-    q2_ = hp.gemma && getenv("ARC_Q2") && atoi(getenv("ARC_Q2")) != 0;
+    if (getenv("ARC_Q2") && atoi(getenv("ARC_Q2")) != 0) opt.q2 = true;
+    q2_ = hp.gemma && opt.q2;
+    opt.q2 = q2_;
     if (!q2_) return;
     const size_t M = max_chunk;
     const int maxK = std::max({hp.n_embd, hp.n_ff, hp.ssm_d_inner, hp.n_head * hp.head_dim, hp.hce(), hp.n_ff_exp_pad});
@@ -3085,7 +3099,7 @@ class Engine {
     q2_ab_ = M * (maxK / 16) * 2;
     q2_defs_ = " -DQ2_AQ=" + std::to_string(q2_aq_) + " -DQ2_SC=" + std::to_string(q2_sc_ / 4) + " -DQ2_AB=" +
                std::to_string(q2_ab_ / 2);
-    fprintf(stderr, "two-pass int8 activations (ARC_Q2): on\n");
+    fprintf(stderr, "two-pass int8 activations (--q2): on\n");
   }
   void matmul(const char* name, const GpuWeight& w, int Mp, cl_mem C, int ldc, int c_off, int acc, bool act32) {
     // (the output head with a logit softcap: the cap applies to the sum of both passes, not to each; the head GEMVs

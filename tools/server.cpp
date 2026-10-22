@@ -2256,7 +2256,7 @@ static std::string ctx_key(const std::string& model, const EngineOptions& eo) {
   for (auto& c : p) c = (char)tolower((unsigned char)c);
   return p + "|" + std::to_string(fs::file_size(model, ec)) + "|" + std::to_string(eo.chunk) +
          "|z" + std::to_string((int)(eo.windows_reserve_gb * 10)) + (eo.stream_experts ? "s" : "n") +
-         (eo.dflash.empty() ? std::string() : eo.mtp_block ? "|dflash" : "|dflash-only") + (eo.v4 ? "|v4" : "") +
+         (eo.dflash.empty() ? std::string() : eo.mtp_block ? "|dflash" : "|dflash-only") + (eo.v4 ? "|v4" : "") + (eo.q2 ? "|q2" : "") +
          (eo.slots > 1 ? "|slots" + std::to_string(eo.slots) + "/" + std::to_string(Engine::kSlotCtxFloor) : std::string()) +
          "|md" + std::to_string(eo.mtp_drafts) + "|" +  // (DFlash2 drafter: its weights and buffers; 4-bit V)
          (eo.min_chunk ? "/" + std::to_string(eo.min_chunk) : std::string()) + "|" + (eo.mtp ? "mtp" : "-") + "|" + (eo.attn_int8 ? "i8" : "f32") + "|" + std::to_string(device_global_mem()) +
@@ -2676,6 +2676,7 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
   if (!eo.mtp) layout += "-std";
   if (eo.mtp && !eo.dflash.empty() && !eo.mtp_block) layout += "-nomtp";
   if (eo.v4) layout += "-v4";
+  if (L->eng->opt.q2) layout += "-q2";  // (only when the model took it: Gemma 4)
   if (so.prefix_cache && eo.attn_int8) {  // %LOCALAPPDATA%\arcinfer\prefix\<model>-<size>[<layout>]
     std::error_code ec;
     const std::filesystem::path mp(model);
@@ -2745,6 +2746,7 @@ int main(int argc, char** argv) {
     else if (a == "--budget") { so.eo.w8_budget_gb = std::stod(next()); so.budget_given = true; }
     else if (a == "--attn-f32") so.eo.attn_int8 = false;
     else if (a == "--v4") so.eo.v4 = true;  // (4-bit V cache, Qwen, experimental)
+    else if (a == "--q2") so.eo.q2 = true;  // (Gemma 4 two-pass mode)
     else if (a == "--mtp") so.eo.mtp = true;
     else if (a == "--dflash") { so.eo.dflash = next(); so.eo.mtp = true; }
     else if (a == "--no-dflash") { so.eo.dflash.clear(); so.dflash_auto = false; }
@@ -2774,6 +2776,7 @@ int main(int argc, char** argv) {
   // (ARC_V4=1 turns the engine's 4-bit V copy on as --v4 does: the server must know it too, for its context key and
   //  the folders of saved states)
   if (getenv("ARC_V4") && atoi(getenv("ARC_V4")) > 0) so.eo.v4 = true;
+  if (getenv("ARC_Q2") && atoi(getenv("ARC_Q2")) != 0) so.eo.q2 = true;  // (the same for the two-pass mode)
   if (model.empty() || help) {
     fprintf(stderr,
             "usage: arcinfer-server -m model.gguf [options]   OpenAI-compatible server (API at /v1, web UI at /)\n"
@@ -2823,6 +2826,8 @@ int main(int argc, char** argv) {
             "  --no-stream           every expert on the GPU (no SSD streaming; MoE models then get less context)\n"
             "  --v4                  + a 4-bit copy of V for generation (Qwen, experimental): faster long answers deep in\n"
             "                        long contexts, ~25 %% more attention-cache memory\n"
+            "  --q2                  Gemma 4: two-pass activations + float attention, KL < 0.01 against an f32\n"
+            "                        reference (default ~0.03-0.1), slower for now; its saved states are kept apart\n"
             "  --attn-f32            f32 attention (tests)\n"
             "  --kernels DIR         kernel folder (default zero\\kernels);  --webui DIR  web UI folder\n"
             "  --session-cache-gb N  disk space for saved conversations (default 0 = off): switching between\n"

@@ -21,7 +21,7 @@ $ErrorActionPreference = "Stop"
 $shortcuts = @("27b", "35b", "35b-s", "35b-m", "35b-mtp", "flash", "9b", "4b", "g12", "e4b", "g26")
 # (a shortcut with a variant suffix: 27b-std, 9b-vision, 35b-mtp-std, g12-mtp, ...)
 function Test-Shortcut([string]$s) { $s = $s.ToLower(); return ($shortcuts | Where-Object { $s -match "^$([regex]::Escape($_))(-mtp|-vision|-std)?(-df|-nodf)?$" }).Count -gt 0 }
-$model = ""; $pick = $false; $thinking = "low"; $noMtp = $false; $ctx = ""; $chunk = 0; $sessGb = $null; $vision = ""; $noStream = $false; $preserve = $false; $v4 = $false; $slots = 0
+$model = ""; $pick = $false; $thinking = "low"; $noMtp = $false; $ctx = ""; $chunk = 0; $sessGb = $null; $vision = ""; $noStream = $false; $preserve = $false; $v4 = $false; $q2 = $false; $slots = 0
 $piArgs = New-Object System.Collections.Generic.List[string]
 for ($i = 0; $i -lt $args.Count; $i++) {
   $a = [string]$args[$i]
@@ -123,6 +123,8 @@ LAUNCHER OPTIONS
                                  system prompt (in memory; from disk after a restart or a model switch).
   --v4                           a 4-bit copy of V for generation (Qwen): ~5-9 % faster answers deep in a long
                                  context (100K+ tokens), ~25 % more attention-cache memory; opt-in
+  --q2                           Gemma 4: the accurate two-pass mode (KL < 0.01 against an f32 reference;
+                                 slower for now; opt-in)
   --slots <N>, -Slots            the server holds N conversations at once (default 1): start the first Pi with
                                  --slots 2, a second Pi (another terminal, plain pi-arc) shares the server; each
                                  keeps its own KV cache and they take turns step by step; while both write their
@@ -162,7 +164,7 @@ SERVER COMMANDS (arc-server)
   arc-server stop                stop the server and free the GPU memory
   arc-server clear-cache         delete all saved conversations (session cache)
   arc-server help                its own options:
-    -Model <shortcut|text|path>  -Ctx <N|auto>  -Chunk <N>  -SessionCacheGb <N>  -NoMtp  -Vision on|off  -NoStream  -V4
+    -Model <shortcut|text|path>  -Ctx <N|auto>  -Chunk <N>  -SessionCacheGb <N>  -NoMtp  -Vision on|off  -NoStream  -V4  -Q2
     -Slots <N>
     -Port <N> (default 8090)  -MtpDrafts <1..7>  -ThinkBudget <N>  -ImageMinTokens / -ImageMaxTokens <N>
     -BudgetGb <GB>  -AttnF32  -NoPrefixCache  -PrefixCacheGb <N>  -NoSwap  -ListenHost <addr>  -SessionDir <dir>
@@ -250,7 +252,8 @@ shortens a long conversation (the details it drops are gone for the model).
   elseif ($a -in "--vision", "-Vision" -and $i + 1 -lt $args.Count) { $i++; $vision = ([string]$args[$i]).ToLower() }
   elseif ($a -in "--preserve-thinking", "-PreserveThinking") { $preserve = $true }
   elseif ($a -in "--no-stream", "-NoStream") { $noStream = $true }
-  elseif ($a -in "--v4", "-V4") { $v4 = $true }  # (4-bit V copy for generation at long contexts)
+  elseif ($a -in "--v4", "-V4") { $v4 = $true }
+  elseif ($a -in "--q2", "-Q2") { $q2 = $true }  # (Gemma 4: the accurate two-pass mode)  # (4-bit V copy for generation at long contexts)
   elseif ($a -in "--slots", "-Slots") { $slots = [int]$args[++$i] }  # (conversations the server holds at once)
   else { $piArgs.Add($a) }
 }
@@ -275,7 +278,7 @@ if (-not $model -and -not $pick) {
 $sessArg = @{}; if ($null -ne $sessGb) { $sessArg.SessionCacheGb = $sessGb }  # (not given: the server's default, 8 GB)
 if ($preserve) { $sessArg.PreserveThinking = $true }  # (only when given: a plain start keeps the running server)
 if ($slots -gt 0) { $sessArg.Slots = $slots }  # (only when given, as above)
-& (Join-Path $PSScriptRoot "arc-server.ps1") start -Model $model -Ctx $ctx -Chunk $chunk @sessArg -NoMtp:$noMtp -Vision $vision -NoStream:$noStream -V4:$v4
+& (Join-Path $PSScriptRoot "arc-server.ps1") start -Model $model -Ctx $ctx -Chunk $chunk @sessArg -NoMtp:$noMtp -Vision $vision -NoStream:$noStream -V4:$v4 -Q2:$q2
 if (-not $?) { exit 1 }
 
 # (arc-server start has brought Pi's model list up to date: every model on disk, each with its own context)
