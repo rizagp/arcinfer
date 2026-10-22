@@ -8,7 +8,7 @@
 // The CPU only decodes, resizes and lays out the image (milliseconds). The matrix products run in floating point
 // (the mmproj's f16 weights, f32 activations and accumulation: zero/kernels/ops.cl vit_gemm_f16): with the language
 // model's int8 GEMM the encoder's output drifted 10-23 % from the f32 reference on photos (every layer's int8
-// activations contributed), in f16 0.6-1.8 %. Attention is int8 (vit_attn_lr), norms and activations f32.
+// activations contributed), in f16 0.6-1.8 %. Attention f16 q / K / V with f32 math, norms and activations f32.
 // Weights are uploaded on the first image, buffers grow with the largest image seen.
 #pragma once
 #include "engine.h"
@@ -139,36 +139,19 @@ class VisionQwen3VL {
     for (const Layer& l : L_) {
       ln(x_, l.ln1w, l.ln1b, Mp, N, hn_);
       gemm(hn_, E, l.qkv, h_, 3 * E, 0, false, Mp, N);
-      if (att16_) {  // bias, 2-D rotary, f16 q / K / V; f32 attention
-        cl_kernel k = kern("vit_qkv_rope", "-DQD=" + std::to_string(hd_));
-        int nh = n_head, mp = Mp;
-        set_args(k, 0, h_, l.qkv_b, bpos_, nh, log2_base, mp, q_, k_, v_);
-        size_t g[2] = {(size_t)n_head * hd_ / 2, (size_t)N};
-        e_.run("vit_qkv_rope", k, 2, g, nullptr);
-        int n = N;
-        {
-          cl_kernel k2 = kern("vit_attn_rows", "-cl-intel-256-GRF-per-thread -DHD=" + std::to_string(hd_) + " " + ardefs_);
-          set_args(k2, 0, q_, k_, v_, n, mp, nh, o_);
-          const size_t rows = (size_t)8 * arsg_;
-          size_t g2[2] = {((size_t)N + rows - 1) / rows * rows, (size_t)n_head}, lw2[2] = {rows, 1};
-          e_.run("vit_attn", k2, 2, g2, lw2);
-        }
-      } else {
-      {  // bias, 2-D rotary, int8 q / K / V
-        cl_kernel k = kern("vit_qkv_rope8", attn_defs_);
-        int nh = n_head, mp = Mp;
-        set_args(k, 0, h_, l.qkv_b, bpos_, nh, log2_base, mp, q_, qsc_, k_, ksc_, v_, vsc_);
-        size_t g[2] = {(size_t)n_head * 16, (size_t)N}, lw[2] = {16, 1};
-        e_.run("vit_qkv_rope", k, 2, g, lw);
-      }
+      // bias, 2-D rotary, f16 q / K / V; f32 attention (an int8 attention was 7-9 % off on photos, f32 0.2-0.5 %)
+      cl_kernel k = kern("vit_qkv_rope", "-DQD=" + std::to_string(hd_));
+      int nh = n_head, mp = Mp;
+      set_args(k, 0, h_, l.qkv_b, bpos_, nh, log2_base, mp, q_, k_, v_);
+      size_t g[2] = {(size_t)n_head * hd_ / 2, (size_t)N};
+      e_.run("vit_qkv_rope", k, 2, g, nullptr);
+      int n = N;
       {
-        cl_kernel k = kern("vit_attn_lr", attn_defs_ + " -cl-intel-256-GRF-per-thread");
-        int n = N, mp = Mp, nh = n_head;
-        set_args(k, 0, q_, qsc_, k_, ksc_, v_, vsc_, n, mp, nh, o_);
-        const int rows = 64;  // 8 sub-groups of 8 query rows
-        size_t g[2] = {(size_t)(N + rows - 1) / rows * rows, (size_t)n_head}, lw[2] = {(size_t)rows, 1};
-        e_.run("vit_attn", k, 2, g, lw);
-      }
+        cl_kernel k2 = kern("vit_attn_rows", "-cl-intel-256-GRF-per-thread -DHD=" + std::to_string(hd_) + " " + ardefs_);
+        set_args(k2, 0, q_, k_, v_, n, mp, nh, o_);
+        const size_t rows = (size_t)8 * arsg_;
+        size_t g2[2] = {((size_t)N + rows - 1) / rows * rows, (size_t)n_head}, lw2[2] = {rows, 1};
+        e_.run("vit_attn", k2, 2, g2, lw2);
       }
       gemm(o_, E, l.out, x_, E, 0, true, Mp, N);
       add(x_, E, l.out_b, false, N);
@@ -211,10 +194,7 @@ class VisionQwen3VL {
   std::vector<float> pos_table_, patch_b_host_;
   int cap_ = 0;  // rows the buffers hold
   cl_mem bin_ = nullptr, badd_ = nullptr, bpos_ = nullptr, x_ = nullptr, hn_ = nullptr, h_ = nullptr, o_ = nullptr,
-         q_ = nullptr, k_ = nullptr, v_ = nullptr, qsc_ = nullptr, ksc_ = nullptr, vsc_ = nullptr, dummy_ = nullptr;
-  // int8 attention: 64-key tiles, softmax denominator from the quantized weights (zero/kernels/ops.cl vit_attn_lr)
-  const std::string attn_defs_ = "-DVLR -DVKT=64 -DVCONS";
-  bool att16_ = !getenv("ARC_VIT_ATT8");  // f32 attention (int8: 7-9 % error on photos, f32: 0.2-0.5 %)
+         q_ = nullptr, k_ = nullptr, v_ = nullptr, dummy_ = nullptr;
   const int vcg_ = getenv("ARC_VCG") ? atoi(getenv("ARC_VCG")) : 1, vwgy_ = getenv("ARC_VWGY") ? atoi(getenv("ARC_VWGY")) : 8;
   const std::string vgdefs_ = getenv("ARC_VGDEFS") ? getenv("ARC_VGDEFS") : "";
   const int arsg_ = getenv("ARC_ARSG") ? atoi(getenv("ARC_ARSG")) : 4;  // sub-groups (of 8 query rows) per work-group
@@ -291,12 +271,9 @@ class VisionQwen3VL {
     hn_ = e_.buf((size_t)Mp * E * 4);
     h_ = e_.buf((size_t)Mp * F * 4);
     o_ = e_.buf((size_t)Mp * std::max<size_t>(E, n_out) * 4);
-    q_ = e_.buf((size_t)Mp * E * 2);  // (f16 for the f32 attention, int8 for vit_attn_lr)
+    q_ = e_.buf((size_t)Mp * E * 2);
     k_ = e_.buf((size_t)Mp * E * 2);
     v_ = e_.buf((size_t)Mp * E * 2);
-    qsc_ = e_.buf((size_t)Mp * n_head * 4);
-    ksc_ = e_.buf((size_t)Mp * n_head * 4);
-    vsc_ = e_.buf((size_t)Mp * n_head * 4);
     if (!dummy_) dummy_ = e_.buf(64);
     cap_ = Mp;
   }

@@ -2936,9 +2936,8 @@ class Engine {
   // gemv_v / gemv_mt_v (zero/kernels/decode.cl: weights loaded straight into registers, bit-identical to gemv): for IQ4_XS,
   // whose codebook decoding made gemv compute-bound, and Q6_K output heads; other types are as fast or faster in gemv.
   static bool gemv_v_ok(const GpuWeight& w) {
-    static const bool off = getenv("ARC_NO_GEMV_V") != nullptr;  // (A/B tests: the gemv / gemv_mt path)
     // (measured per type with bench/gemv_bench on the regrouped GPU forms; IQ3_S stays faster in gemv)
-    return !off && (w.type == GGML_IQ4_XS || w.type == GGML_Q4_0 || w.type == GGML_IQ3_XXS || w.type == GGML_IQ2_XXS ||
+    return (w.type == GGML_IQ4_XS || w.type == GGML_Q4_0 || w.type == GGML_IQ3_XXS || w.type == GGML_IQ2_XXS ||
                     w.type == GGML_IQ2_XS || w.type == GGML_IQ2_S || w.type == GGML_IQ1_M || w.type == GGML_Q6_K);
     // (Q6_K: every matrix, not only output heads: 27B MTP block FFN 63-67 -> 71-77 GB/s, attn_output 0.41 -> 0.34 ms,
     //  eh_proj 0.78 -> 0.61 ms; tiny matrices equal; 16 Oct)
@@ -4180,16 +4179,15 @@ class Engine {
     // GEMM, bit for bit, so a prompt's logits no longer depend on its chunk size there, without the decode pass).
     // Qwen3.6 35B: 384 / 512 / 768 / 1024 / 1152 tokens 412 -> 424, 440 -> 459, 449 -> 511, 486 -> 520, 529 -> 548
     // tok/s; 256 tokens: 369 vs 359 with the per-tile kernels, 1536: 595 vs 565 with decode + GEMM (each expert's rows
-    // are decoded once per 16-token tile here, once per chunk there). ARC_NO_MOE_RG=1: those two only.
+    // are decoded once per 16-token tile here, once per chunk there).
     static const int rg_min = getenv("ARC_MOE_RG_MIN") ? atoi(getenv("ARC_MOE_RG_MIN")) : 320,
                      rg_max = getenv("ARC_MOE_RG_MAX") ? atoi(getenv("ARC_MOE_RG_MAX")) : 1280;
-    static const bool no_rg = getenv("ARC_NO_MOE_RG") != nullptr;
     // Without decode + GEMM (Flash Next: F padded) only the down projection takes moe_rg, at every chunk size from
     // rg_min: Flash Next, 8K prompt in 2048-token chunks: down 13.8 -> 6.2 s GPU time, 145 -> 165 tok/s, and KL to the
     // CPU reference 0.0221 -> 0.0191 (337 tokens; max 0.96 -> 0.27); its gate / up stay per tile (15.4 vs 13.7 s, KL
     // 0.0230 with both).
     const bool gemm_ok = moe_group_ > 0 && Fp == F && moe_gemm_layer_ok(L);
-    const bool rg_ok = !no_rg && hp.moe_std && tm == 16 && (T >= rg_min || q2g) && F % 64 == 0 && moe_rg_layer_ok(L);
+    const bool rg_ok = hp.moe_std && tm == 16 && (T >= rg_min || q2g) && F % 64 == 0 && moe_rg_layer_ok(L);
     // (Gemma 4 26B-A4B, F 704 padded to 768: no decode + GEMM, so gate / up take moe_rg at every chunk size from
     //  rg_min as the down projection does; ARC_G4_RG_GU=0: per tile)
     static const bool g4_rg_gu = !getenv("ARC_G4_RG_GU") || atoi(getenv("ARC_G4_RG_GU")) != 0;
@@ -4329,7 +4327,7 @@ class Engine {
     return true;
   }
   bool moe_gemm_ok() const {
-    if (!hp.moe_std || getenv("ARC_NO_MOE_GEMM")) return false;
+    if (!hp.moe_std) return false;
     for (const Layer& L : layers_)
       if (!moe_gemm_layer_ok(L)) return false;
     return true;
