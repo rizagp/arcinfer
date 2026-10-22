@@ -3428,7 +3428,7 @@ class Engine {
     };
     const std::string ao = attn_opts(hd, hpg);
     // (two-pass mode: float attention over the f16 rows for every pass; rows r0 .. r0 + n at position p0)
-    // (prompt chunks of the sliding layers (head 256): 16 rows per work-group sharing each key block in local memory;
+    // (prompt chunks of the sliding layers (head 256): 32 rows per work-group sharing each key block in local memory;
     //  the global layers (head 512) do better without, but with 2 q heads per sub-group instead of 4 (11.4 KB spill
     //  -> less). 26B, 4K prompt: sliding 10.5 -> 4.5 s, global 6.2 -> 2.2 s. ARC_FA_ROWS / ARC_FA_GQ override them;
     //  every choice is bit-identical)
@@ -3476,7 +3476,7 @@ class Engine {
         return;
       }
       const int gq = std::min(hpg, fa_gq ? fa_gq : hd >= 512 ? 2 : 4);
-      const int R = n <= 8 ? 1 : fa_rows ? fa_rows : hd >= 512 ? 1 : 16;
+      const int R = n <= 8 ? 1 : fa_rows ? fa_rows : hd >= 512 ? 1 : 32;  // (sliding: 32 rows 4.43 -> 4.16 s; 64: too large)
       cl_kernel k = kernel("ops", std::string(q2_kf32_ ? "-DKF32 " : "") + "-cl-intel-256-GRF-per-thread -DFA_G -DHD=" + std::to_string(hd) + " -DGQ=" +
                                       std::to_string(gq) + (R > 1 ? " -DFA_ROWS=" + std::to_string(R) : std::string()), "attn_fa_g");
       int cp = L.cap, nn = nh, nk = nkv, pp = p0, MM = n, w = win, nlo = L.swa ? nc_lo_ : -1, nhi = L.swa ? nc_hi_ : -1;
