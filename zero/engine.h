@@ -522,7 +522,7 @@ class Engine {
     c = (c + 15) / 16 * 16;
     size_t n = ctx_buf_bytes(c);
     if (hp.gemma) {
-      const int swa_cap = hp.n_layer_kv < hp.n_layer ? c : std::min(c, (hp.n_swa + max_chunk + 4096 + 255) / 256 * 256);
+      const int swa_cap = std::min(c, (hp.n_swa + max_chunk + 4096 + 255) / 256 * 256);
       for (const Layer& L : layers_)
         if (L.kv_src < 0) {
           const size_t cap = L.swa ? swa_cap : c;
@@ -2498,9 +2498,11 @@ class Engine {
   void load_weights_gemma4() {
     layers_.resize(hp.n_layer);
     cl_mem rope_ff = f_.find("rope_freqs.weight") ? load_f32("rope_freqs.weight") : nullptr;
-    // sliding-window layers keep a ring of the last n_swa + chunk (+ room to rewind an agent's reply) positions.
-    // Models with shared KV layers read another layer's ring later in the pass, so they keep full caches.
-    swa_cap_ = hp.n_layer_kv < hp.n_layer ? ctx : std::min(ctx, (hp.n_swa + max_chunk + 4096 + 255) / 256 * 256);
+    // sliding-window layers keep a ring of the last n_swa + chunk (+ room to rewind an agent's reply) positions. The
+    // layers that share another layer's KV (E2B / E4B) read its ring later in the same pass over the same key range,
+    // so the ring is enough for them too (they kept full caches before 2026-10-22: E4B 13,921-token prompt in a
+    // 16K context, ring vs full, logits bit-identical with and without the drafter; ~115 KB less per token)
+    swa_cap_ = std::min(ctx, (hp.n_swa + max_chunk + 4096 + 255) / 256 * 256);
     if (hp.n_ple) {
       ple_tok_embd_ = &f_.get("per_layer_token_embd.weight");
       ple_model_proj_ = load_w("per_layer_model_proj.weight");
