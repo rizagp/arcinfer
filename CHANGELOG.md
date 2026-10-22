@@ -1,9 +1,16 @@
 # Changelog
 
-## 2026-10-22: the accurate Gemma mode as an option; faster sampled tool calls
+## 2026-10-22: Gemma 4 runs only in its accurate mode; faster sampled tool calls
 
-- **`--q2` (server, runz; `arc-server -Q2`, `pi-arc --q2`)** turns on Gemma 4's two-pass mode, as `ARC_Q2=1` did.
-  It is part of the server's context key, its saved conversations and system-prompt cache get their own folders
+- **Gemma 4's two-pass mode is its only mode** (the user's decision: "buat apa mode tidak akurat"; Qwen models are
+  unchanged). KL against an f32 reference, 480-token code prompt: 26B 0.0042, 12B 0.0002, E4B 0.00003 (one-pass:
+  0.0985 / 0.033 / 0.0010). The day's speed work for it: one-token and verification GEMVs and the experts read each
+  weight once for both passes, head-512 prompt attention reads each key row once per row, flash-decoding for
+  generation, 2048-token chunks with streamed experts. 26B with its drafter ~25 tok/s (one-pass 26.8), after a 14K
+  prompt 13.0 (14.9), 4K prompt ~220 tok/s (526); E4B with its drafter 38.1 (42.5). `--q2`, `-Q2` and `ARC_Q2` are
+  gone; saved one-pass Gemma conversations are not loaded.
+
+- **The two-pass mode's saved state** (first as the option `--q2`). It is part of the server's context key, its saved conversations and system-prompt cache get their own folders
   (`-q2`), and the saved state carries a flag and the float K / V rows: a conversation saved, a second one held,
   the first one loaded again gives the same greedy answer as a fresh server (26B, 1,511 tokens); a plain server
   refuses the file. Saved states of the other modes are unchanged.

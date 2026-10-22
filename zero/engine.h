@@ -68,8 +68,6 @@ struct EngineOptions {
   bool act32_all = true;      // per-32 activation scales for every GEMM (false: only for the sensitive inputs)
   bool attn_int8 = true;      // int8 (DP4a) attention scores; false = f32 scores
   bool v4 = false;            // + a 4-bit copy of V for generation (Qwen; prompts read the int8 V; opt-in)
-  bool q2 = false;            // Gemma 4: two-pass int8 activations + float attention (KL < 0.01, slower; opt-in for
-                              // now, also ARC_Q2=1; other models ignore it)
   bool mtp = false;           // load the MTP (nextn) block for speculative decoding (mtp_draft / verify)
   int mtp_drafts = 0;         // drafts per step (1..7; later ones chained on the MTP block's own output); 0 = auto:
                               // 3 for wide dense Qwen models (27B: code 7.8 -> 9.5 tok/s, text +2.5 %), else 2
@@ -146,8 +144,7 @@ class Engine {
     //  window + a chunk + 4096 rows, 4.1 GB at 8192 on the 26B, which left the expert cache at 39 %. 26B, ctx 16K,
     //  chunk 8192 / 4096 / 2048: expert cache 39 / 64 / 77 %, 4K prompt 216 / 184 / 217 tok/s, generation after a
     //  14K prompt 9.9 / 12.3 / 13.0 tok/s)
-    const bool q2_want = hp.gemma && (o.q2 || (getenv("ARC_Q2") && atoi(getenv("ARC_Q2")) != 0));
-    max_chunk = o.chunk > 0 ? o.chunk : stream_ ? (hp.hc || q2_want ? 2048 : 8192) : hp.moe ? 2048 : (w8_resident ? 512 : 4096);
+    max_chunk = o.chunk > 0 ? o.chunk : stream_ ? (hp.hc || hp.gemma ? 2048 : 8192) : hp.moe ? 2048 : (w8_resident ? 512 : 4096);
     max_chunk = (std::max(max_chunk, o.min_chunk) + 127) / 128 * 128;
     q2_init();
     if (!opt.dry) build_kernels();
@@ -3079,7 +3076,7 @@ class Engine {
   }
   // C[:, c_off : c_off+N] (+)= act * W^T for the current chunk. A single token uses the raw-row GEMV.
   // acc: 0 = store, 1 = accumulate into C, 2 = C = silu(C) * result (fused SwiGLU, GEMM path only)
-  // ---- two int8 passes (ARC_Q2=1, Gemma 4; QUEUE F21.4): every activation row is stored twice by quant_store16,
+  // ---- two int8 passes (Gemma 4, always; QUEUE F21.4): every activation row is stored twice by quant_store16,
   // the int8 values and, at fixed offsets in the same buffers, their rounding residual in int8; a matrix product
   // runs on both and adds them (the f32 reference simulating this: Gemma 4 26B KL 0.0985 -> 0.0053 together with
   // two-pass attention). The offsets come from alloc_buffers' sizes (max_chunk rows of the widest input).
@@ -3096,9 +3093,7 @@ class Engine {
   size_t q2_aq_ = 0, q2_sc_ = 0, q2_ab_ = 0;  // bytes
   std::string q2_defs_;
   void q2_init() {
-    if (getenv("ARC_Q2") && atoi(getenv("ARC_Q2")) != 0) opt.q2 = true;
-    q2_ = hp.gemma && opt.q2;
-    opt.q2 = q2_;
+    q2_ = hp.gemma;  // (Gemma 4's only mode since 2026-10-22: KL < 0.01 against f32, the one-pass mode removed)
     if (!q2_) return;
     const size_t M = max_chunk;
     const int maxK = std::max({hp.n_embd, hp.n_ff, hp.ssm_d_inner, hp.n_head * hp.head_dim, hp.hce(), hp.n_ff_exp_pad});
@@ -3107,7 +3102,7 @@ class Engine {
     q2_ab_ = M * (maxK / 16) * 2;
     q2_defs_ = " -DQ2_AQ=" + std::to_string(q2_aq_) + " -DQ2_SC=" + std::to_string(q2_sc_ / 4) + " -DQ2_AB=" +
                std::to_string(q2_ab_ / 2);
-    fprintf(stderr, "two-pass int8 activations (--q2): on\n");
+
   }
   void matmul(const char* name, const GpuWeight& w, int Mp, cl_mem C, int ldc, int c_off, int acc, bool act32) {
     // (the output head with a logit softcap: the cap applies to the sum of both passes, not to each; the head GEMVs

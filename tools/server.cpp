@@ -2256,14 +2256,14 @@ static std::string ctx_key(const std::string& model, const EngineOptions& eo) {
   for (auto& c : p) c = (char)tolower((unsigned char)c);
   return p + "|" + std::to_string(fs::file_size(model, ec)) + "|" + std::to_string(eo.chunk) +
          "|z" + std::to_string((int)(eo.windows_reserve_gb * 10)) + (eo.stream_experts ? "s" : "n") +
-         (eo.dflash.empty() ? std::string() : eo.mtp_block ? "|dflash" : "|dflash-only") + (eo.v4 ? "|v4" : "") + (eo.q2 ? "|q2" : "") +
+         (eo.dflash.empty() ? std::string() : eo.mtp_block ? "|dflash" : "|dflash-only") + (eo.v4 ? "|v4" : "") +
          (eo.slots > 1 ? "|slots" + std::to_string(eo.slots) + "/" + std::to_string(Engine::kSlotCtxFloor) : std::string()) +
          "|md" + std::to_string(eo.mtp_drafts) + "|" +  // (DFlash2 drafter: its weights and buffers; 4-bit V)
          (eo.min_chunk ? "/" + std::to_string(eo.min_chunk) : std::string()) + "|" + (eo.mtp ? "mtp" : "-") + "|" + (eo.attn_int8 ? "i8" : "f32") + "|" + std::to_string(device_global_mem()) +
-         "|m15";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
+         "|m16";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
                  // for 27B, m6: MoE prompt GEMM staging, m7: MoE buffers shared, m8: MoE MTP 1 draft, Q3_K experts, m9: memory parts in the cache,
                  // m12: streamed MoE reserves 128K of context before the expert cache, m13: streamed MoE chunk 8192, m14: slot_bytes with every
-                 // slot buffer, f16 K / V with --attn-f32, m15: --q2 Gemma MoE chunk 2048);
+                 // slot buffer, f16 K / V with --attn-f32, m15: --q2 Gemma MoE chunk 2048, m16: Gemma 4 always two-pass);
                  // bump on changes
 }
 // "ctx\tresident" lines (older lines without the second field are computed again)
@@ -2487,7 +2487,7 @@ static int list_models() {
           }
       }
       // (the engine's default: streamed experts 8192, Flash Next 2048, resident decoded weights 512)
-      int chunk = m.arch == "qwen4exp" || (gemma && moe && eo.q2) ? 2048 : moe ? 8192 : a.resident ? 512 : 4096;  // (as the engine)
+      int chunk = m.arch == "qwen4exp" || (gemma && moe) ? 2048 : moe ? 8192 : a.resident ? 512 : 4096;  // (as the engine)
       if (gemma && m.vision) chunk = std::max(chunk, 2048);  // (an image is one chunk)
       d.set("chunk", chunk);
       d.set("mtp_drafts", !m.mtp ? 0 : !eo.dflash.empty() ? 7 : gemma ? (moe ? 3 : 2) : moe ? 5 : n_embd >= 5120 ? 7 : n_embd <= 2560 ? 3 : 2);
@@ -2676,7 +2676,7 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
   if (!eo.mtp) layout += "-std";
   if (eo.mtp && !eo.dflash.empty() && !eo.mtp_block) layout += "-nomtp";
   if (eo.v4) layout += "-v4";
-  if (L->eng->opt.q2) layout += "-q2";  // (only when the model took it: Gemma 4)
+  if (L->eng->hp.gemma) layout += "-q2";  // (Gemma 4: two-pass states; the one-pass ones of before 2026-10-22 stay unused)
   if (so.prefix_cache && eo.attn_int8) {  // %LOCALAPPDATA%\arcinfer\prefix\<model>-<size>[<layout>]
     std::error_code ec;
     const std::filesystem::path mp(model);
@@ -2764,7 +2764,6 @@ int main(int argc, char** argv) {
     else if (a == "--budget") { so.eo.w8_budget_gb = to_double(a, next()); so.budget_given = true; }
     else if (a == "--attn-f32") so.eo.attn_int8 = false;
     else if (a == "--v4") so.eo.v4 = true;  // (4-bit V cache, Qwen, experimental)
-    else if (a == "--q2") so.eo.q2 = true;  // (Gemma 4 two-pass mode)
     else if (a == "--mtp") so.eo.mtp = true;
     else if (a == "--dflash") { so.eo.dflash = next(); so.eo.mtp = true; }
     else if (a == "--no-dflash") { so.eo.dflash.clear(); so.dflash_auto = false; }
@@ -2805,7 +2804,6 @@ int main(int argc, char** argv) {
   // (ARC_V4=1 turns the engine's 4-bit V copy on as --v4 does: the server must know it too, for its context key and
   //  the folders of saved states)
   if (getenv("ARC_V4") && atoi(getenv("ARC_V4")) > 0) so.eo.v4 = true;
-  if (getenv("ARC_Q2") && atoi(getenv("ARC_Q2")) != 0) so.eo.q2 = true;  // (the same for the two-pass mode)
   if (model.empty() || help) {
     fprintf(stderr,
             "usage: arcinfer-server -m model.gguf [options]   OpenAI-compatible server (API at /v1, web UI at /)\n"
@@ -2819,7 +2817,7 @@ int main(int argc, char** argv) {
             "                        " ARC_DATA_HELP "ctx-auto.txt)\n"
             "  --chunk N             prompt tokens per step (default 4096; MoE with experts on the SSD 8192, Flash\n"
             "                        Next 2048; MoE with --no-stream 2048; 512 when decoded weights stay resident;\n"
-            "                        Gemma with images at least 2048; Gemma MoE with --q2 2048)\n"
+            "                        Gemma with images at least 2048; Gemma MoE 2048)\n"
             "  --mtp                 speculative decoding with the model's MTP block or Gemma assistant drafter\n"
             "  --mtp-drafts N        drafts per step: Qwen 1..7, Gemma 1..3 (default: 7 for Qwen 27B-class and with\n"
             "                        DFlash2, 5 for MoE, 3 for 4B and Gemma 4 26B, 2 otherwise)\n"
@@ -2855,8 +2853,6 @@ int main(int argc, char** argv) {
             "  --no-stream           every expert on the GPU (no SSD streaming; MoE models then get less context)\n"
             "  --v4                  + a 4-bit copy of V for generation (Qwen, experimental): faster long answers deep in\n"
             "                        long contexts, ~25 %% more attention-cache memory\n"
-            "  --q2                  Gemma 4: two-pass activations + float attention, KL < 0.01 against an f32\n"
-            "                        reference (default ~0.03-0.1), slower for now; its saved states are kept apart\n"
             "  --attn-f32            f32 attention (tests)\n"
             "  --kernels DIR         kernel folder (default zero\\kernels);  --webui DIR  web UI folder\n"
             "  --session-cache-gb N  disk space for saved conversations (default 0 = off): switching between\n"

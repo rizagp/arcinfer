@@ -176,13 +176,13 @@ use: `-df` for code, `-nodf` for Indonesian and other prose (the drafter was tra
 code), the default (both) when the text is mixed. Speeds of each variant:
 [docs/before-after.md, "Where it stands"](docs/before-after.md#where-it-stands-2026-10-20).
 
-**Accurate mode for Gemma 4 (`--q2`, opt-in for now).** `arc-server start -Model g26 -Q2` (or `pi-arc g26 --q2`,
-`serverz.exe ... --q2`, or `ARC_Q2=1`) runs every activation in two int8 passes (the value, then its rounding
-residual) and the attention in float. Its logits are much closer to the full-precision model: KL against an f32
-reference on a 480-token code prompt 26B 0.0985 -> 0.0045, 12B 0.033 -> 0.0003, E4B 0.0010 -> 0.00003. For now it
-is slower (26B generation ~8-9 instead of ~20 tokens/s, prompts ~3x slower); the speed work is QUEUE F21.11, after
-which it becomes the only Gemma mode. Its saved conversations and system-prompt cache are kept in their own folders
-(`...-q2`), and a plain server refuses to load them.
+**Gemma 4 runs in its accurate mode (since 2026-10-22, the only one).** Every activation goes through two int8
+passes (the value, then its rounding residual) and the attention is computed in float (f32 queries and keys, f16
+values). Its logits are close to the full-precision model's: KL against an f32 reference on a 480-token code prompt
+26B 0.0042, 12B 0.0002, E4B 0.00003 (the earlier one-pass mode: 0.0985 / 0.033 / 0.0010). Generation is about as fast
+as the one-pass mode was (26B with its drafter ~25 tokens/s, E4B ~38); prompts are slower (26B 4K prompt ~220
+tokens/s against ~525). Its saved conversations and system-prompt cache live in their own folders (`...-q2`);
+conversations saved by the one-pass mode are not loaded.
 
 **4-bit V copy for long answers at long contexts (`--v4`, arcinferzero, Qwen models, experimental).**
 `arc-server start -Model 35b -V4` (or `serverz.exe ... --v4`) keeps the normal int8 attention cache for reading
