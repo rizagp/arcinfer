@@ -231,6 +231,8 @@ While the server is running:
   answer is read aloud while it is written. Speak while it talks to interrupt it; press Talk again to stop. Pick
   the reading voice and speed in the settings (Windows: Settings > Time & language > Speech adds an Indonesian
   voice). The audio goes only to this server. Headphones avoid the AI hearing itself.
+  With **Web** ticked as well, searches run in the background while you talk: the AI says it is looking, and
+  talks about the results when they arrive.
 - **OpenAI API**: base URL `http://127.0.0.1:8090/v1`, any API key (for example `arcinfer`), model `qwen3.8-27b`
   (or the model currently loaded; other models in the list are loaded automatically). Supports streaming,
   `reasoning_content`, tool calls, `usage`, repetition penalties (`frequency_penalty`, `repeat_penalty`),

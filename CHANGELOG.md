@@ -6,6 +6,8 @@
   audio to the model, the answer read aloud sentence by sentence while it streams (browser speech synthesis, voice
   and speed settings), speaking interrupts the AI, a pause inside a sentence joins the two parts. Tested with
   synthesized speech fed to the detector (E4B: speech starts 2.3 s after the user stops talking).
+- **Web search while talking** (Talk + Web): the tools run in the background; the AI says it is looking it up
+  and talks about the results when they arrive (a message of their own), as the user designed it (F22.4 / F24.5).
 
 ## 2026-10-22 (night): web search in the web UI
 

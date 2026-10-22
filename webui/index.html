@@ -298,7 +298,7 @@ function compactable() {
   return history.length - 2 - lead;
 }
 function sysMessages() {
-  const s = [$("sys").value.trim(), $("web").checked ? WEB_SYSTEM() : "", voice.on ? VOICE_SYSTEM : ""].filter(Boolean).join("\n\n");
+  const s = [$("sys").value.trim(), $("web").checked ? WEB_SYSTEM() : "", voice.on ? VOICE_SYSTEM : "", voice.on && $("web").checked ? WEB_VOICE_SYSTEM : ""].filter(Boolean).join("\n\n");
   return s ? [{ role: "system", content: s }] : [];
 }
 const textOf = (c) => typeof c === "string" ? c
@@ -384,6 +384,28 @@ const WEB_SYSTEM = () => "You can look things up on the internet with the web_se
   new Date().toDateString() + ". When a question needs current or specific information, search, read the most relevant " +
   "pages, and answer from them, citing the URLs you used.";
 const MAX_ROUNDS = 8;
+// While talking (F24.5), the tools run in the background: a call gets an immediate answer ("search #n started"), the
+// AI says it is looking, and the conversation goes on; when results arrive they come as a message of their own and
+// the AI talks about them (the user's design: as a person who looks something up while still talking)
+const WEB_VOICE_SYSTEM = "In this spoken conversation the web tools run in the background: a call returns at once with a " +
+  "number, and its results arrive later in a message that starts with [Results of #number]. When you call a tool, also " +
+  "say one short sentence that you are looking it up; never guess the results. When results arrive, answer from them.";
+const bg = { n: 0, ready: [], ctl: new AbortController() };
+function bgDeliver() {
+  if (!bg.ready.length || controller || voice.speaking) return;
+  const items = bg.ready.splice(0);
+  voice.last = null;  // (a pause-joined utterance must not take the results message with it)
+  input.value = items.map((r) => "[Results of #" + r.id + ": " + r.label + "]\n" + r.text).join("\n\n");
+  send();
+  const u = [...thread.querySelectorAll(".msg.user")].pop();
+  if (u) {  // (shown folded: the model reads the whole text)
+    const d = document.createElement("details");
+    d.innerHTML = "<summary></summary><div></div>";
+    d.querySelector("summary").textContent = "results arrived: " + items.map((r) => "#" + r.id + " " + r.label).join(", ");
+    d.querySelector("div").textContent = u.textContent;
+    u.replaceChildren(d);
+  }
+}
 
 function toolCard(el) {
   const d = document.createElement("div");
@@ -491,7 +513,7 @@ async function streamTurn(el, st, onOverflow) {
 function turnStats(el, st) {
   el.querySelector(".progress")?.remove();
   const stats = el.querySelector(".stats"), t = st.timings;
-  if (!t) { stats.textContent = "stopped"; return; }
+  if (!t) { stats.textContent = st.note ? "" : "stopped"; return; }
   stats.textContent = "prompt " + (t.prompt_n + t.cache_n) + " tok (" + t.cache_n + " cached) in " + (t.prompt_ms / 1000).toFixed(1) +
     " s · " + t.prompt_per_second.toFixed(1) + " t/s · generated " + t.predicted_n + " tok at " + t.predicted_per_second.toFixed(2) + " t/s";
   used = t.prompt_n + t.cache_n + t.predicted_n;
@@ -537,6 +559,35 @@ async function send() {
       history.push(msg);
       el._h = msg;
       inHistory = true;
+      if (voice.on) {  // in the background: the answers now, the results later (bgDeliver)
+        for (const c of calls) {
+          const id = ++bg.n, card = toolCard(el);
+          let args = {};
+          try { args = JSON.parse(c.function.arguments || "{}"); } catch (e) {}
+          const label = c.function.name + " " + String(args.query ?? args.url ?? "").slice(0, 80);
+          runTool(c, card, bg.ctl.signal).catch((e) => "error: " + (e.message || e)).then((text) => {
+            if (bg.ctl.signal.aborted) return;
+            bg.ready.push({ id, label, text });
+            bgDeliver();
+          });
+          history.push({ role: "tool", tool_call_id: c.id, name: c.function.name,
+            content: "started: #" + id + " runs in the background; its results will arrive in a later message [Results of #" + id + "]" });
+        }
+        el = addAssistant();
+        st = { reasoning: "", answer: "", toolCalls: [], timings: null };
+        inHistory = false;
+        if (!msg.content.trim()) {  // (it said nothing with the call: a short spoken note instead of another turn)
+          const lang = (speechSynthesis.getVoices().find((v) => v.voiceURI === $("tts").value)?.lang || navigator.language || "en").toLowerCase();
+          st.answer = lang.startsWith("id") ? "Sebentar, saya carikan dulu." : "One moment, let me look that up.";
+          el.querySelector(".progress")?.remove();
+          el.querySelector(".content").textContent = st.answer;
+          voice.say(st.answer);
+          st.note = true;
+          break;
+        }
+        scroll();
+        continue;
+      }
       const results = await Promise.all(calls.map((c) => {
         const card = toolCard(el);
         return runTool(c, card, controller.signal).catch((e) => {
@@ -575,6 +626,7 @@ async function send() {
     voice.flush();
     if (!voice.talking && !voice.speaking) voice.status("listening…");
   }
+  setTimeout(bgDeliver, 0);  // (background results that came while this answer ran)
 }
 
 // ---- voice conversation (Talk): the microphone stays open; speech is detected by its loudness against the room's
@@ -656,7 +708,7 @@ const voice = {
       const pcm = this.chunks;
       this.chunks = [];
       if (len - this.quiet >= VOICE_MIN_MS) this.utterance(pcm, rate);
-      else this.status("listening…");
+      else { this.status("listening…"); bgDeliver(); }
     }
   },
   // the user started talking: stop the AI's speech and its answer in progress
@@ -778,6 +830,7 @@ input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey)
 $("newchat").addEventListener("click", () => {
   if (controller) controller.abort();
   history = []; used = 0; showUse();
+  bg.ctl.abort(); bg.ctl = new AbortController(); bg.ready = [];
   thread.innerHTML = '<div class="empty" id="empty">New conversation.</div>';
 });
 $("compact").addEventListener("click", async () => {
