@@ -3291,10 +3291,12 @@ class Engine {
     static const int fa_gq = getenv("ARC_FA_GQ") ? std::max(1, atoi(getenv("ARC_FA_GQ"))) : 0;
     // (prompt chunks of the head-512 layers: attn_fa_gh, each key row read once per row for all q heads of its kv head;
     //  ARC_FA_GH=0: attn_fa_g; ARC_FA_FS: sub-groups per work-group, default 8 (each holds 4 output dims per lane:
-    //  26B, 13,921-token prompt 90.7 -> 77.7 s, bit-identical; 4 sub-groups: 8 dims; two rows per work-group, each
-    //  key row read once for both, were not faster)
+    //  26B, 13,921-token prompt 90.7 -> 77.7 s, bit-identical; 4 sub-groups: 8 dims). ARC_FA_GR: query rows per
+    //  work-group, each key / value row read once for all of them; default as many as fit 64 output floats per lane
+    //  (E4B, 4 q heads per kv head: 4 rows, 13,921 tokens 59.8 -> 47.2 s; 26B: 2, about the same; 12B: 1)
     static const bool fa_gh = !getenv("ARC_FA_GH") || atoi(getenv("ARC_FA_GH")) != 0;
     static const int fa_fs = getenv("ARC_FA_FS") ? std::max(1, atoi(getenv("ARC_FA_FS"))) : 8;
+    static const int fa_gr_env = getenv("ARC_FA_GR") ? std::max(1, atoi(getenv("ARC_FA_GR"))) : 0;
     // (generation / verification, <= 8 rows: flash-decoding, the key range split over many sub-groups and combined;
     //  ARC_FA_SPLIT=0: one sub-group per (row, q-head pair) over every key, as the prompt kernel)
     static const bool fa_split = !getenv("ARC_FA_SPLIT") || atoi(getenv("ARC_FA_SPLIT")) != 0;
@@ -3325,13 +3327,14 @@ class Engine {
       //  6.4 KB per thread and made its global attention slower, 3.4 -> 4.4-4.9 s for a 4K prompt; DeepSeek's audit)
       if (fa_gh && n > 8 && hd >= 512 && hpg * (hd / fa_fs / 16) <= 64 && hd % (fa_fs * 16) == 0 &&
           (hd / fa_fs / 16 == 4 || hd / fa_fs / 16 == 8 || hd / fa_fs / 16 == 16)) {
+        const int fa_gr = fa_gr_env ? fa_gr_env : std::clamp(64 / (hpg * (hd / fa_fs / 16)), 1, 4);
         cl_kernel k = kernel("ops", "-cl-intel-256-GRF-per-thread -DFA_GH -DHD=" + std::to_string(hd) + " -DHPG=" +
-                                        std::to_string(hpg) + " -DFS=" + std::to_string(fa_fs),
+                                        std::to_string(hpg) + " -DFS=" + std::to_string(fa_fs) + " -DGR=" + std::to_string(fa_gr),
                              "attn_fa_gh");
         int cp = L.cap, nn = nh, nk = nkv, pp = p0, MM = n, w = win, nlo = L.swa ? nc_lo_ : -1, nhi = L.swa ? nc_hi_ : -1;
         set_args(k, 0, from(qf_, (size_t)r0 * nh * hd * 4), L.kc, L.vc, cp, nn, nk, pp, MM,
                  from(o_, (size_t)r0 * nh * hd * 4), w, nlo, nhi);
-        size_t gws[3] = {(size_t)16 * fa_fs, (size_t)nkv, (size_t)n}, lws[3] = {(size_t)16 * fa_fs, 1, 1};
+        size_t gws[3] = {(size_t)16 * fa_fs, (size_t)nkv, (size_t)(n + fa_gr - 1) / fa_gr}, lws[3] = {(size_t)16 * fa_fs, 1, 1};
         run(L.swa ? "attn_swa" : "attn_global", k, 3, gws, lws);
         return;
       }

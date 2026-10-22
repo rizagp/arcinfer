@@ -1789,28 +1789,41 @@ __kernel void attn_fa_gc(__global const float* part, int nh, int pos0, int M_val
 // grid (16 * FS, nkv, M), local (16 * FS, 1, 1).
 #ifdef FA_GH
 #define GD (HD / FS / 16)  // output dims per lane
+#ifndef GR
+#define GR 1  // query rows per work-group: each key / value row read once for GR rows x HPG heads
+#endif
+#define GRH (GR * HPG)
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void attn_fa_gh(__global const float* qf, __global const KC_T* kc, __global const half* vc, int cap, int nh,
                          int nkv, int pos0, int M_valid, __global float* out, int win, int nc_lo, int nc_hi) {
-  __local float sc[FS][HPG][16];
+  __local float sc[FS][GRH][16];
   const int lane = get_sub_group_local_id(), sgi = get_sub_group_id();
-  const int g = get_group_id(1), m = get_group_id(2);
-  const int pos = pos0 + m;
-  const int lo = win > 0 ? max(0, pos - win + 1) : 0;
-  const int hi = (pos >= nc_lo && pos <= nc_hi) ? nc_hi : pos;
-  __global const float* qp = qf + ((size_t)m * nh + g * HPG) * HD;
+  const int g = get_group_id(1), m0 = get_group_id(2) * GR;
+  // each row's key range [lo, hi]; the work-group walks the blocks of their union
+  int lor[GR], hir[GR];
+#pragma unroll
+  for (int r = 0; r < GR; ++r) {
+    const int pos = pos0 + min(m0 + r, M_valid - 1);
+    lor[r] = win > 0 ? max(0, pos - win + 1) : 0;
+    hir[r] = (pos >= nc_lo && pos <= nc_hi) ? nc_hi : pos;
+    if (m0 + r >= M_valid) lor[r] = 1, hir[r] = 0;  // (padding row: no keys)
+  }
+  int lo = lor[0], hi = hir[0];
+#pragma unroll
+  for (int r = 1; r < GR; ++r)
+    if (hir[r] >= lor[r]) lo = min(lo, lor[r]), hi = max(hi, hir[r]);
   __global const KC_T* kb = kc + (size_t)g * cap * HD;
   __global const half* vb = vc + (size_t)g * cap * HD;
-  float mx[HPG], lp[HPG];
+  float mx[GRH], lp[GRH];
 #if GD == 4
-  float4 o[HPG];
+  float4 o[GRH];
 #elif GD == 8
-  float8 o[HPG];
+  float8 o[GRH];
 #else
-  float16 o[HPG];
+  float16 o[GRH];
 #endif
 #pragma unroll
-  for (int h = 0; h < HPG; ++h) {
+  for (int h = 0; h < GRH; ++h) {
     mx[h] = -INFINITY;
     lp[h] = 0.0f;
     o[h] = 0.0f;
@@ -1819,16 +1832,17 @@ __kernel void attn_fa_gh(__global const float* qf, __global const KC_T* kc, __gl
   for (int bs = b0; bs <= b1; bs += FS) {
     {  // scores of block bs + sgi
       const int b = bs + sgi, p = b * 16 + lane;
-      const bool valid = b <= b1 && p >= lo && p <= hi;
+      const bool any = b <= b1 && p >= lo && p <= hi;
       __global const KC_T* krow = kb + (size_t)(p % cap) * HD;
-      float s[HPG];
+      float s[GRH];
 #pragma unroll
-      for (int h = 0; h < HPG; ++h) s[h] = 0.0f;
+      for (int h = 0; h < GRH; ++h) s[h] = 0.0f;
       for (int c = 0; c < HD / 16; ++c) {
-        const float16 kv = valid ? vload16(0, krow + 16 * c) : (float16)0.0f;
+        const float16 kv = any ? vload16(0, krow + 16 * c) : (float16)0.0f;
 #pragma unroll
-        for (int h = 0; h < HPG; ++h) {
-          const float qc = as_float(intel_sub_group_block_read((__global const uint*)(qp + h * HD + 16 * c)));
+        for (int h = 0; h < GRH; ++h) {
+          const int r = h / HPG, m = min(m0 + r, M_valid - 1);
+          const float qc = as_float(intel_sub_group_block_read((__global const uint*)(qf + ((size_t)m * nh + g * HPG + h % HPG) * HD + 16 * c)));
           float a = s[h];
           a = fma(BC16(qc, 0), kv.s0, a);  a = fma(BC16(qc, 1), kv.s1, a);
           a = fma(BC16(qc, 2), kv.s2, a);  a = fma(BC16(qc, 3), kv.s3, a);
@@ -1842,18 +1856,23 @@ __kernel void attn_fa_gh(__global const float* qf, __global const KC_T* kc, __gl
         }
       }
 #pragma unroll
-      for (int h = 0; h < HPG; ++h) sc[sgi][h][lane] = valid ? s[h] : -INFINITY;
+      for (int h = 0; h < GRH; ++h) {
+        const int r = h / HPG;
+        sc[sgi][h][lane] = b <= b1 && p >= lor[r] && p <= hir[r] ? s[h] : -INFINITY;
+      }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
     for (int i = 0; i < FS && bs + i <= b1; ++i) {  // the blocks in order, as attn_fa_g takes them
       const int t0 = (bs + i) * 16, p = t0 + lane;
-      const bool valid = p >= lo && p <= hi;
-      float pr[HPG];
+      float pr[GRH];
 #pragma unroll
-      for (int h = 0; h < HPG; ++h) {
+      for (int h = 0; h < GRH; ++h) {
+        const int r = h / HPG;
+        const bool valid = p >= lor[r] && p <= hir[r];
         const float sv = sc[i][h][lane];
         const float mn = fmax(mx[h], sub_group_reduce_max(sv));
-        const float corr = exp(mx[h] - mn);
+        // (a block before a row's first key leaves it untouched: no exp(-inf + inf))
+        const float corr = mn == -INFINITY ? 1.0f : exp(mx[h] - mn);
         pr[h] = valid ? exp(sv - mn) : 0.0f;
         lp[h] = lp[h] * corr + pr[h];
         o[h] *= corr;
@@ -1866,34 +1885,38 @@ __kernel void attn_fa_gh(__global const float* qf, __global const KC_T* kc, __gl
 #if GD == 4
         const float4 vv = vload_half4(0, vrow);
 #pragma unroll
-        for (int h = 0; h < HPG; ++h) o[h] = fma((float4)sub_group_broadcast(pr[h], j), vv, o[h]);
+        for (int h = 0; h < GRH; ++h) o[h] = fma((float4)sub_group_broadcast(pr[h], j), vv, o[h]);
 #elif GD == 8
         const float8 vv = vload_half8(0, vrow);
 #pragma unroll
-        for (int h = 0; h < HPG; ++h) o[h] = fma((float8)sub_group_broadcast(pr[h], j), vv, o[h]);
+        for (int h = 0; h < GRH; ++h) o[h] = fma((float8)sub_group_broadcast(pr[h], j), vv, o[h]);
 #else
         const float16 vv = vload_half16(0, vrow);
 #pragma unroll
-        for (int h = 0; h < HPG; ++h) o[h] = fma((float16)sub_group_broadcast(pr[h], j), vv, o[h]);
+        for (int h = 0; h < GRH; ++h) o[h] = fma((float16)sub_group_broadcast(pr[h], j), vv, o[h]);
 #endif
       }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
   }
 #pragma unroll
-  for (int h = 0; h < HPG; ++h) {
+  for (int h = 0; h < GRH; ++h) {
+    const int m = m0 + h / HPG;
     const float L = sub_group_reduce_add(lp[h]);
-    __global float* op = out + ((size_t)m * nh + g * HPG + h) * HD + sgi * (HD / FS) + GD * lane;
+    if (m < M_valid) {
+      __global float* op = out + ((size_t)m * nh + g * HPG + h % HPG) * HD + sgi * (HD / FS) + GD * lane;
 #if GD == 4
-    vstore4(o[h] / L, 0, op);
+      vstore4(o[h] / L, 0, op);
 #elif GD == 8
-    vstore8(o[h] / L, 0, op);
+      vstore8(o[h] / L, 0, op);
 #else
-    vstore16(o[h] / L, 0, op);
+      vstore16(o[h] / L, 0, op);
 #endif
+    }
   }
 }
 #undef GD
+#undef GRH
 #endif  // FA_GH
 
 // Single-token rows: x[m] = (x[m] + rmsnorm(t[m]) * w) * s (as add_rmsnorm), then the next GEMV input from the new
