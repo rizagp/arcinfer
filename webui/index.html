@@ -42,6 +42,11 @@ details.think { background: var(--think); border: 1px dashed var(--border); bord
 details.think summary { cursor: pointer; }
 details.think div { white-space: pre-wrap; margin-top: 6px; }
 .tool { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; background: var(--code); border-radius: 8px; padding: 8px; margin-top: 8px; white-space: pre-wrap; }
+.tool .st { color: var(--muted); }
+.tool details { margin-top: 4px; }
+.tool summary { cursor: pointer; color: var(--muted); }
+.tool a { color: var(--accent); text-decoration: none; }
+.tool a:hover { text-decoration: underline; }
 .stats { font-size: 12px; color: var(--muted); margin-top: 6px; }
 .progress { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin: 6px 0; }
 .progress > div { height: 100%; background: var(--accent); width: 0; transition: width .2s; }
@@ -96,6 +101,7 @@ textarea { flex: 1; resize: vertical; min-height: 48px; max-height: 40vh; font: 
   </div>
   <div class="settings">
     <label><input type="checkbox" id="thinking" checked> Thinking</label>
+    <label title="Let the model search the web and read pages (the server's web_search / web_fetch tools)"><input type="checkbox" id="web"> Web</label>
     <label>Effort <select id="effort"><option value="low">low</option><option value="medium">medium</option><option value="xhigh" selected>xhigh</option></select></label>
     <label>Temperature <input type="number" id="temp" step="0.1" min="0" max="2" value="0.7"></label>
     <label>Max tokens <input type="number" id="maxtok" step="128" min="16" value="4096"></label>
@@ -112,6 +118,7 @@ function loadPrefs() {
   try {
     const p = JSON.parse(localStorage.getItem("arcinfer-prefs") || "{}");
     if (p.thinking !== undefined) $("thinking").checked = p.thinking;
+    if (p.web !== undefined) $("web").checked = p.web;
     if (p.effort) $("effort").value = p.effort;
     if (p.temp !== undefined) $("temp").value = p.temp;
     if (p.maxtok) $("maxtok").value = p.maxtok;
@@ -120,12 +127,12 @@ function loadPrefs() {
 }
 function savePrefs() {
   try {
-    localStorage.setItem("arcinfer-prefs", JSON.stringify({ thinking: $("thinking").checked, effort: $("effort").value,
-      temp: $("temp").value, maxtok: $("maxtok").value, sys: $("sys").value }));
+    localStorage.setItem("arcinfer-prefs", JSON.stringify({ thinking: $("thinking").checked, web: $("web").checked,
+      effort: $("effort").value, temp: $("temp").value, maxtok: $("maxtok").value, sys: $("sys").value }));
   } catch (e) {}
 }
 loadPrefs();
-["thinking", "effort", "temp", "maxtok", "sys"].forEach((id) => $(id).addEventListener("change", savePrefs));
+["thinking", "web", "effort", "temp", "maxtok", "sys"].forEach((id) => $(id).addEventListener("change", savePrefs));
 
 fetch("/v1/models").then((r) => r.json()).then((j) => {
   modelId = j.data[0].id; ctxLen = j.data[0].context_length || 0; $("model").textContent = modelId + " · ctx " + ctxLen; showUse();
@@ -281,7 +288,10 @@ function compactable() {
   const lead = history.length && history[0].role === "user" && textOf(history[0].content).startsWith(SUMMARY_HEAD) ? 2 : 0;
   return history.length - 2 - lead;
 }
-function sysMessages() { return $("sys").value.trim() ? [{ role: "system", content: $("sys").value.trim() }] : []; }
+function sysMessages() {
+  const s = [$("sys").value.trim(), $("web").checked ? WEB_SYSTEM() : ""].filter(Boolean).join("\n\n");
+  return s ? [{ role: "system", content: s }] : [];
+}
 const textOf = (c) => typeof c === "string" ? c
   : c.map((p) => p.type === "text" ? p.text : p.type === "input_audio" ? "[audio]" : "[image]").join("\n");
 const SUMMARY_HEAD = "[Summary of the earlier part of this conversation]\n";
@@ -348,6 +358,135 @@ async function compact(keep, signal, statsEl) {
   return true;
 }
 
+// ---- web tools (Web on): the model gets web_search and web_fetch; its calls run on the server
+// (/v1/tools/web_search, /v1/tools/web_fetch), all calls of a turn at once, each shown as a card, and the
+// conversation goes on with their results until the model answers without a call (at most MAX_ROUNDS turns)
+const WEB_TOOLS = [
+  { type: "function", function: { name: "web_search",
+    description: "Search the web. Returns the top results: title, URL and a short snippet each. Use it for current " +
+      "events, recent versions or prices, and facts you are not sure of.",
+    parameters: { type: "object", properties: { query: { type: "string", description: "the search query" } }, required: ["query"] } } },
+  { type: "function", function: { name: "web_fetch",
+    description: "Read a web page (HTML or text) as plain text. A long page comes in parts: the result says the offset " +
+      "to pass to read the next part.",
+    parameters: { type: "object", properties: { url: { type: "string", description: "the page's http(s) URL" },
+      offset: { type: "integer", description: "where to continue reading (from the previous part's result)" } }, required: ["url"] } } }];
+const WEB_SYSTEM = () => "You can look things up on the internet with the web_search and web_fetch tools. Today is " +
+  new Date().toDateString() + ". When a question needs current or specific information, search, read the most relevant " +
+  "pages, and answer from them, citing the URLs you used.";
+const MAX_ROUNDS = 8;
+
+function toolCard(el) {
+  const d = document.createElement("div");
+  d.className = "tool";
+  d.innerHTML = '<span class="hd"></span> <span class="st"></span>';
+  el.querySelector(".tools").appendChild(d);
+  scroll();
+  return { head: d.querySelector(".hd"), status: d.querySelector(".st"), links(items) {
+    const det = document.createElement("details");
+    det.innerHTML = "<summary>results</summary>";
+    for (const [title, url] of items) {
+      const a = document.createElement("a");
+      a.textContent = title || url; a.title = url; a.target = "_blank"; a.rel = "noopener noreferrer";
+      if (/^https?:\/\//i.test(url)) a.href = url;
+      det.append(document.createElement("br"), a);
+    }
+    d.appendChild(det);
+  } };
+}
+// one call: its card shows what runs and the outcome; returns the text the model gets as the tool's result
+async function runTool(call, card, signal) {
+  const name = call.function.name;
+  let args;
+  try { args = JSON.parse(call.function.arguments || "{}"); } catch (e) { args = null; }
+  card.head.textContent = name + " " + (args ? (args.query ?? args.url ?? "") + (args.offset ? " @" + args.offset : "") : call.function.arguments);
+  if (name !== "web_search" && name !== "web_fetch") { card.status.textContent = "unknown tool"; return "error: there is no tool " + name; }
+  if (!args) { card.status.textContent = "invalid arguments"; return "error: the arguments are not valid JSON"; }
+  card.status.textContent = name === "web_search" ? "· searching…" : "· reading…";
+  const body = name === "web_search" ? { query: String(args.query ?? ""), max_results: 6 }
+    : { url: String(args.url ?? ""), offset: Math.max(0, parseInt(args.offset, 10) || 0), max_chars: 12000 };
+  const res = await fetch("/v1/tools/" + name, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const m = j.error?.message || "HTTP " + res.status;
+    card.status.textContent = "· failed: " + m;
+    return "error: " + m;
+  }
+  if (name === "web_search") {
+    card.status.textContent = "· " + j.results.length + " results (" + j.engine + ")";
+    card.links(j.results.map((r) => [r.title, r.url]));
+    return j.results.map((r, i) => (i + 1) + ". " + r.title + "\n   " + r.url + "\n   " + r.snippet).join("\n");
+  }
+  card.status.textContent = "· " + (j.title || j.url) + " (" + k1(j.offset + j.content.length) + " of " + k1(j.total_chars) + " characters)";
+  card.links([[j.title, j.url]]);
+  return "Title: " + j.title + "\nURL: " + j.url + "\n\n" + j.content +
+    (j.next_offset ? "\n\n[the page goes on: call web_fetch with offset " + j.next_offset + " to read more]" : "");
+}
+
+// one model turn into the assistant element el, filling st { reasoning, answer, toolCalls, timings } as it streams
+// (so a stop keeps what came); onOverflow: when the server says the prompt does not fit, compact and try once more
+async function streamTurn(el, st, onOverflow) {
+  const thinkBox = el.querySelector(".think"), thinkText = thinkBox.querySelector("div"), content = el.querySelector(".content");
+  const bar = el.querySelector(".progress > div"), stats = el.querySelector(".stats");
+  stats.textContent = "processing prompt…";
+  let res;
+  for (let attempt = 0; ; attempt++) {
+    const body = { model: modelId, messages: [...sysMessages(), ...history], stream: true, stream_options: { include_usage: true },
+      temperature: parseFloat($("temp").value), max_tokens: parseInt($("maxtok").value, 10),
+      chat_template_kwargs: { enable_thinking: $("thinking").checked }, reasoning_effort: $("thinking").checked ? $("effort").value : "none" };
+    if ($("web").checked) body.tools = WEB_TOOLS;
+    res = await fetch("/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: controller.signal });
+    if (res.ok) break;
+    const t = await res.text();
+    if (attempt === 0 && overflow(t) && onOverflow && await onOverflow(stats)) { stats.textContent = "processing prompt…"; continue; }
+    throw new Error(t);
+  }
+  const reader = res.body.getReader(), dec = new TextDecoder();
+  let buf = "", first = true;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf("\n\n")) >= 0) {
+      const ev = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 2);
+      if (ev.startsWith(": prefill")) {
+        const m = ev.match(/(\d+)\/(\d+)/);
+        if (m) { bar.style.width = (100 * m[1] / m[2]).toFixed(1) + "%"; stats.textContent = "processing prompt " + m[1] + " / " + m[2] + " tokens…"; }
+        continue;
+      }
+      if (!ev.startsWith("data:")) continue;
+      const data = ev.slice(5).trim();
+      if (data === "[DONE]") continue;
+      const j = JSON.parse(data);
+      if (j.timings) st.timings = j.timings;
+      const delta = j.choices && j.choices[0] && j.choices[0].delta;
+      if (!delta) continue;
+      if ((delta.reasoning_content || delta.content || delta.tool_calls) && first) { first = false; el.querySelector(".progress")?.remove(); }
+      if (delta.reasoning_content) { st.reasoning += delta.reasoning_content; thinkBox.hidden = false; thinkText.textContent = st.reasoning; }
+      if (delta.content) { st.answer += delta.content; content.innerHTML = markdown(st.answer); }
+      for (const tc of delta.tool_calls || []) {  // streamed in pieces: the arguments of a call are concatenated by index
+        const k = tc.index ?? st.toolCalls.length;
+        const c = st.toolCalls[k] ??= { id: "", type: "function", function: { name: "", arguments: "" } };
+        if (tc.id) c.id = tc.id;
+        if (tc.function?.name) c.function.name = tc.function.name;
+        c.function.arguments += tc.function?.arguments ?? "";
+      }
+      if (!st.timings) stats.textContent = "generating…";
+      scroll();
+    }
+  }
+}
+function turnStats(el, st) {
+  el.querySelector(".progress")?.remove();
+  const stats = el.querySelector(".stats"), t = st.timings;
+  if (!t) { stats.textContent = "stopped"; return; }
+  stats.textContent = "prompt " + (t.prompt_n + t.cache_n) + " tok (" + t.cache_n + " cached) in " + (t.prompt_ms / 1000).toFixed(1) +
+    " s · " + t.prompt_per_second.toFixed(1) + " t/s · generated " + t.predicted_n + " tok at " + t.predicted_per_second.toFixed(2) + " t/s";
+  used = t.prompt_n + t.cache_n + t.predicted_n;
+}
+
 async function send() {
   const text = input.value.trim();
   if ((!text && !pending.length) || controller) return;
@@ -361,95 +500,63 @@ async function send() {
     : { type: "image_url", image_url: { url: m.url } };
   const userMsg = { role: "user", content: media.length ? [...media.map(part), ...(text ? [{ type: "text", text }] : [])] : text };
   userEl._h = userMsg;
-  const el = addAssistant();
-  const thinkBox = el.querySelector(".think"), thinkText = thinkBox.querySelector("div"), content = el.querySelector(".content");
-  const bar = el.querySelector(".progress > div"), stats = el.querySelector(".stats");
+  let el = addAssistant();
   scroll(true);
   controller = new AbortController();
   $("send").disabled = true; $("stop").disabled = false; showUse();
   const maxTok = parseInt($("maxtok").value, 10);
-  let reasoning = "", answer = "", toolCalls = [], timings = null;
-  const t0 = performance.now();
-  let tFirst = 0;
-  stats.textContent = "processing prompt…";
+  let st = { reasoning: "", answer: "", toolCalls: [], timings: null }, inHistory = false;
   try {
     // nearly full (the last reply's size + this message + room for the answer): compact first
     const need = used + Math.ceil(text.length / 3) + 300 * media.length + Math.min(maxTok, 2048);
-    if (ctxLen && used && need > 0.9 * ctxLen) await compact(2, controller.signal, stats);
+    if (ctxLen && used && need > 0.9 * ctxLen) await compact(2, controller.signal, el.querySelector(".stats"));
     history.push(userMsg);
-    let res;
-    for (let attempt = 0; ; attempt++) {
-      const body = { model: modelId, messages: [...sysMessages(), ...history], stream: true, stream_options: { include_usage: true },
-        temperature: parseFloat($("temp").value), max_tokens: maxTok,
-        chat_template_kwargs: { enable_thinking: $("thinking").checked }, reasoning_effort: $("thinking").checked ? $("effort").value : "none" };
-      res = await fetch("/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: controller.signal });
-      if (res.ok) break;
-      const t = await res.text();
-      // the server says it does not fit: compact everything before this message and try again (once)
-      if (attempt === 0 && overflow(t)) {
-        history.pop();
-        const done = await compact(0, controller.signal, stats);
-        history.push(userMsg);
-        if (done) { stats.textContent = "processing prompt…"; continue; }
-      }
-      throw new Error(t);
-    }
-    const reader = res.body.getReader(), dec = new TextDecoder();
-    let buf = "";
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf("\n\n")) >= 0) {
-        const ev = buf.slice(0, idx).trim();
-        buf = buf.slice(idx + 2);
-        if (ev.startsWith(": prefill")) {
-          const m = ev.match(/(\d+)\/(\d+)/);
-          if (m) { bar.style.width = (100 * m[1] / m[2]).toFixed(1) + "%"; stats.textContent = "processing prompt " + m[1] + " / " + m[2] + " tokens…"; }
-          continue;
-        }
-        if (!ev.startsWith("data:")) continue;
-        const data = ev.slice(5).trim();
-        if (data === "[DONE]") continue;
-        const j = JSON.parse(data);
-        if (j.timings) timings = j.timings;
-        const delta = j.choices && j.choices[0] && j.choices[0].delta;
-        if (!delta) continue;
-        if ((delta.reasoning_content || delta.content) && !tFirst) { tFirst = performance.now(); el.querySelector(".progress").remove(); }
-        if (delta.reasoning_content) { reasoning += delta.reasoning_content; thinkBox.hidden = false; thinkText.textContent = reasoning; }
-        if (delta.content) { answer += delta.content; content.innerHTML = markdown(answer); }
-        for (const tc of delta.tool_calls || []) {  // streamed in pieces: the arguments of a call are concatenated by index
-          const k = tc.index ?? toolCalls.length;
-          const c = toolCalls[k] ??= { function: { name: "", arguments: "" } };
-          if (tc.function?.name) c.function.name = tc.function.name;
-          c.function.arguments += tc.function?.arguments ?? "";
-        }
-        if (!timings) stats.textContent = "generating…";
-        scroll();
-      }
+    // the server says it does not fit: compact everything before this message and try again (once)
+    const refit = async (stats) => {
+      history.pop();
+      const done = await compact(0, controller.signal, stats);
+      history.push(userMsg);
+      return done;
+    };
+    for (let round = 0; ; round++) {
+      await streamTurn(el, st, round === 0 ? refit : null);
+      turnStats(el, st);
+      if (!st.toolCalls.length || !$("web").checked || round + 1 >= MAX_ROUNDS) break;
+      const calls = st.toolCalls.map((c, i) => ({ ...c, id: c.id || "call_" + round + "_" + i }));
+      const msg = { role: "assistant", content: st.answer, reasoning_content: st.reasoning, tool_calls: calls };
+      history.push(msg);
+      el._h = msg;
+      inHistory = true;
+      const results = await Promise.all(calls.map((c) => {
+        const card = toolCard(el);
+        return runTool(c, card, controller.signal).catch((e) => {
+          card.status.textContent = e.name === "AbortError" ? "· stopped" : "· failed: " + (e.message || e);
+          if (e.name === "AbortError") throw e;
+          return "error: " + (e.message || e);
+        });
+      }));
+      calls.forEach((c, i) => history.push({ role: "tool", tool_call_id: c.id, name: c.function.name, content: results[i] }));
+      el = addAssistant();
+      st = { reasoning: "", answer: "", toolCalls: [], timings: null };
+      inHistory = false;
+      scroll();
     }
   } catch (e) {
-    if (e.name !== "AbortError") content.innerHTML += '<div style="color:var(--danger)">' + esc(String(e.message || e)) + "</div>";
+    if (e.name !== "AbortError") el.querySelector(".content").innerHTML += '<div style="color:var(--danger)">' + esc(String(e.message || e)) + "</div>";
   }
-  el.querySelector(".progress")?.remove();
-  for (const tc of toolCalls) {
-    const d = document.createElement("div");
-    d.className = "tool";
-    d.textContent = "tool call: " + tc.function.name + " " + tc.function.arguments;
-    el.querySelector(".tools").appendChild(d);
+  turnStats(el, st);
+  if (!inHistory) {  // calls that did not run (Web off, or the last round): shown as they are
+    for (const tc of st.toolCalls) toolCard(el).head.textContent = "tool call: " + tc.function.name + " " + tc.function.arguments;
   }
-  if (timings) {
-    stats.textContent = "prompt " + (timings.prompt_n + timings.cache_n) + " tok (" + timings.cache_n + " cached) in " + (timings.prompt_ms / 1000).toFixed(1) +
-      " s · " + timings.prompt_per_second.toFixed(1) + " t/s · generated " + timings.predicted_n + " tok at " + timings.predicted_per_second.toFixed(2) + " t/s";
-    used = timings.prompt_n + timings.cache_n + timings.predicted_n;
-  } else {
-    stats.textContent = "stopped";
+  if (!history.includes(userMsg)) history.push(userMsg);  // (stopped while compacting)
+  // stopped while tools ran: every call gets a result, so the conversation stays valid
+  const last = history[history.length - 1];
+  for (const c of last.tool_calls || []) history.push({ role: "tool", tool_call_id: c.id, name: c.function.name, content: "error: stopped by the user" });
+  if (!inHistory) {
+    const reply = { role: "assistant", content: st.answer, reasoning_content: st.reasoning };
+    history.push(reply);
+    el._h = reply;
   }
-  if (history[history.length - 1] !== userMsg) history.push(userMsg);  // (stopped while compacting)
-  const reply = { role: "assistant", content: answer, reasoning_content: reasoning };
-  history.push(reply);
-  el._h = reply;
   controller = null;
   $("send").disabled = false; $("stop").disabled = true;
   showUse();

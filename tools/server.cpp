@@ -27,6 +27,7 @@
 #include "json_constraint.h"
 #include "tool_constraint.h"
 #include "sampler.h"
+#include "web_tools.h"
 #include <atomic>
 #include <condition_variable>
 #include <chrono>
@@ -2707,7 +2708,7 @@ int main(int argc, char** argv) {
     if (std::string(argv[i]) == "--list-models") return list_models();
   std::string model, host = "127.0.0.1", alias;
   int port = 8080;
-  bool swap = true, help = false;
+  bool swap = true, help = false, web_tools = true;
   ServeOpts so;
   so.eo.ctx = 40960;
   // A bad option value is a message, not an uncaught std::stoi exception (which aborted the process).
@@ -2785,6 +2786,7 @@ int main(int argc, char** argv) {
     else if (a == "--session-dir") so.sess_dir = next();
     else if (a == "--slots") so.eo.slots = std::clamp(to_int(a, next()), 1, 8);
     else if (a == "--no-swap") swap = false;
+    else if (a == "--no-web-tools") web_tools = false;
     else if (a == "--no-prefix-cache") so.prefix_cache = false;
     else if (a == "--prefix-cache-gb") so.prefix_gb = to_double(a, next());
     else if (a == "--help" || a == "-h") help = true;
@@ -2810,7 +2812,7 @@ int main(int argc, char** argv) {
             "  --host H, --port P    listen address (default 127.0.0.1:8080)\n"
             "  --alias NAME          model id in the API (default: the file name)\n"
             "  -c, --ctx N|auto      context in tokens (default 40960); auto: the largest that fits the GPU memory with\n"
-            "                        ~1 GiB left for other apps, at most the trained context (remembered in\n"
+            "                        1.2 GiB left for the driver, at most the trained context (remembered in\n"
             "                        " ARC_DATA_HELP "ctx-auto.txt)\n"
             "  --chunk N             prompt tokens per step (default 4096; MoE with experts on the SSD 8192, Flash\n"
             "                        Next 2048; MoE with --no-stream 2048; 512 when decoded weights stay resident;\n"
@@ -2860,6 +2862,8 @@ int main(int argc, char** argv) {
             "                        used go first)\n"
             "  --no-swap             keep the loaded model (default: a request whose \"model\" is another model of\n"
             "                        --list-models, by id, name or file, makes the server load that one, context auto)\n"
+            "  --no-web-tools        no POST /v1/tools/web_search and /v1/tools/web_fetch (the web UI's search and page\n"
+            "                        tools; default: on, public http(s) addresses only)\n"
             "  A client that closes its connection (Pi: Esc) cancels its request: prompt processing stops within a\n"
             "  layer, generation before the next token.\n");
     return help ? 0 : 1;
@@ -2897,6 +2901,62 @@ int main(int argc, char** argv) {
   HttpServer http;
   std::function<void(const HttpRequest&, HttpResponse&)> dispatch;
   http.handler = [&](const HttpRequest& rq, HttpResponse& rs) {
+    // the web UI's tools (tools/web_tools.h): no model involved, so they answer while a model loads or generates
+    if (rq.method == "POST" && (rq.path == "/v1/tools/web_search" || rq.path == "/v1/tools/web_fetch")) {
+      auto fail = [&](int st, const std::string& m) {
+        Json er = Json::object(), r = Json::object();
+        er.set("message", m);
+        r.set("error", er);
+        return rs.send(st, "application/json", r.dump());
+      };
+      if (!web_tools) return fail(404, "web tools are off (--no-web-tools)");
+      Json in;
+      if (!Json::try_parse(rq.body, in) || !in.is_object()) return fail(400, "invalid JSON body");
+      Json r = Json::object();
+      if (rq.path == "/v1/tools/web_search") {
+        const std::string q = in["query"].str();
+        if (q.empty()) return fail(400, "query required");
+        std::string used, err;
+        const auto res = webt::search(q, (size_t)std::clamp<int64_t>(in["max_results"].as_int(8), 1, 20), in["engine"].str("auto"), &used, &err);
+        if (res.empty()) return fail(502, "search failed: " + err);
+        Json a = Json::array();
+        for (const webt::Result& x : res) {
+          Json o = Json::object();
+          o.set("title", x.title);
+          o.set("url", x.url);
+          size_t n = std::min<size_t>(x.snippet.size(), 360);  // (some snippets run to whole paragraphs)
+          while (n < x.snippet.size() && ((unsigned char)x.snippet[n] & 0xc0) == 0x80) --n;
+          o.set("snippet", x.snippet.substr(0, n) + (n < x.snippet.size() ? "..." : ""));
+          a.push(o);
+        }
+        r.set("query", q);
+        r.set("engine", used);
+        r.set("results", a);
+        return rs.send(200, "application/json", r.dump());
+      }
+      const std::string url = in["url"].str();
+      if (url.empty()) return fail(400, "url required");
+      const webt::Page pg = webt::get(url);
+      if (!pg.error.empty()) return fail(502, pg.error);
+      if (pg.status != 200) return fail(502, "HTTP " + std::to_string(pg.status) + " from " + pg.url);
+      const std::string ct = webt::lower(pg.content_type);
+      std::string title, text;
+      if (ct.find("html") != std::string::npos || ct.empty()) text = webt::html_to_text(pg.body, &title);
+      else if (ct.rfind("text/", 0) == 0 || ct.find("json") != std::string::npos || ct.find("xml") != std::string::npos) text = pg.body;
+      else return fail(415, "unsupported content type " + pg.content_type + " (text and HTML pages only)");
+      // a window of the text: offset, max_chars (cut on a UTF-8 character boundary)
+      const size_t total = text.size(), max_chars = (size_t)std::clamp<int64_t>(in["max_chars"].as_int(12000), 500, 100000);
+      size_t off = (size_t)std::clamp<int64_t>(in["offset"].as_int(0), 0, (int64_t)total), end = std::min(total, off + max_chars);
+      while (off < total && ((unsigned char)text[off] & 0xc0) == 0x80) ++off;
+      while (end < total && ((unsigned char)text[end] & 0xc0) == 0x80) --end;
+      r.set("url", pg.url);
+      r.set("title", title);
+      r.set("content", text.substr(off, end - off));
+      r.set("offset", (double)off);
+      r.set("total_chars", (double)total);
+      if (end < total) r.set("next_offset", (double)end);
+      return rs.send(200, "application/json", r.dump());
+    }
     // other API formats (tools/api_compat.h): translated into a chat request; the answer is translated back
     static const std::map<std::string, std::string> kinds = {
         {"/v1/completions", "completions"}, {"/completions", "completions"}, {"/api/chat", "ollama_chat"},

@@ -300,7 +300,7 @@ else {
   else {
     [string[]]$tools = @("tools\tok_test.cpp", "tools\chat_render.cpp", "tools\ref_forward.cpp", "tools\tool_stream_test.cpp",
                          "tests\test_http.cpp", "tests\test_api_compat.cpp", "tests\test_xcache_pools.cpp", "tests\test_sampler.cpp",
-                         "tests\test_hc.cpp", "tests\test_quant_rows.cpp")
+                         "tests\test_hc.cpp", "tests\test_quant_rows.cpp", "tests\test_web_tools.cpp")
     Write-Host "  building the test tools..."
     Build $tools
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "scripts\arc-server.ps1") stop | Out-Null  # (GPU memory)

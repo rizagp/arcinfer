@@ -220,6 +220,12 @@ While the server is running:
 - **Web UI**: open http://127.0.0.1:8090/ in a browser to chat directly (text files can be attached with
   drag-and-drop; images too for Gemma 4 12B / E4B, Qwen3.5 4B / 9B and Qwen3.6 35B: the **Image** button,
   drag-and-drop, or paste).
+- **Web UI: web search.** Tick **Web** under the message box and the model can search the web (`web_search`) and
+  read pages (`web_fetch`): each search or page shows as a card in its answer (with the links), and the answer goes
+  on with what it found. The server does the requests itself (Brave Search, Bing when Brave gives nothing) and
+  turns pages into plain text; it only reaches public http(s) addresses (nothing on this machine or the local
+  network). Other clients can use the same endpoints: `POST /v1/tools/web_search` with `{"query": "..."}` and
+  `POST /v1/tools/web_fetch` with `{"url": "...", "offset": 0}`. `--no-web-tools` turns them off.
 - **OpenAI API**: base URL `http://127.0.0.1:8090/v1`, any API key (for example `arcinfer`), model `qwen3.8-27b`
   (or the model currently loaded; other models in the list are loaded automatically). Supports streaming,
   `reasoning_content`, tool calls, `usage`, repetition penalties (`frequency_penalty`, `repeat_penalty`),

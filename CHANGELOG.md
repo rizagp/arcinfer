@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-22 (night): web search in the web UI
+
+- **Web search and page reading in the web UI** (the **Web** checkbox): the model gets `web_search` and
+  `web_fetch`; the server runs them (`tools/web_tools.h`, WinHTTP: Brave Search's result page, Bing as the
+  fallback; HTML to plain text with headings and lists) at `POST /v1/tools/web_search` / `web_fetch`, also while a
+  model loads or generates. Each call shows as a card; the answer continues with the results (8 tool turns at
+  most); Stop keeps the conversation valid. Only public http(s) addresses are fetched (every host and redirect is
+  resolved first; loopback, private, link-local and multicast addresses are refused). `--no-web-tools` turns the
+  endpoints off. An independent implementation (no code from the AGPL `pi-unsloth-webtools`).
+
 ## 2026-10-22: Gemma 4 runs only in its accurate mode; faster sampled tool calls
 
 - **Gemma 4's two-pass mode is its only mode** (the user's decision: "buat apa mode tidak akurat"; Qwen models are
