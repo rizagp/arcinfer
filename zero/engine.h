@@ -163,7 +163,10 @@ class Engine {
       //  One slot: as before)
       const int ns = std::max(opt.slots, 1), per = (131072 / ns + 4095) / 4096 * 4096;
       auto ctx_all = [&](int c) { return (double)ctx_bytes(c) + (double)(ns - 1) * (double)slot_bytes(c); };
-      const double room = std::max(left - ctx_all(per), std::min(0.75 * left, left - ctx_all(kSlotCtxFloor)));
+      // (Gemma 4 26B-A4B: a floor of 0.6, 128K instead of 49K: generation at 36K of depth 11.4 tok/s with 89 % of the
+      //  experts cached (49K), 10.5 with 70 % (131K), 8.8 with 39 % (262K); the user ran 131K by hand. 2026-10-23)
+      const double fl = hp.gemma ? 0.6 : 0.75;
+      const double room = std::max(left - ctx_all(per), std::min(fl * left, left - ctx_all(kSlotCtxFloor)));
       gpu_bytes += (size_t)std::max(0.0, std::min(0.9 * (double)stream_bytes_, room));
     }
     mem_load_ = gpu_bytes;

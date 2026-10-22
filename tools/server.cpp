@@ -2261,12 +2261,12 @@ static std::string ctx_key(const std::string& model, const EngineOptions& eo) {
          (eo.slots > 1 ? "|slots" + std::to_string(eo.slots) + "/" + std::to_string(Engine::kSlotCtxFloor) : std::string()) +
          "|md" + std::to_string(eo.mtp_drafts) + "|" +  // (DFlash2 drafter: its weights and buffers; 4-bit V)
          (eo.min_chunk ? "/" + std::to_string(eo.min_chunk) : std::string()) + "|" + (eo.mtp ? "mtp" : "-") + "|" + (eo.attn_int8 ? "i8" : "f32") + "|" + std::to_string(device_global_mem()) +
-         "|m19";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
+         "|m20";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
                  // for 27B, m6: MoE prompt GEMM staging, m7: MoE buffers shared, m8: MoE MTP 1 draft, Q3_K experts, m9: memory parts in the cache,
                  // m12: streamed MoE reserves 128K of context before the expert cache, m13: streamed MoE chunk 8192, m14: slot_bytes with every
                  // slot buffer, f16 K / V with --attn-f32, m15: --q2 Gemma MoE chunk 2048, m16: Gemma 4 always two-pass, m17: shared-KV Gemma
                  // sliding rings, m18: Gemma int8 KV copies only for the drafter's layers,
-                 // m19: GPU share - 1.2 GB, no Windows reserve);
+                 // m19: GPU share - 1.2 GB, no Windows reserve, m20: Gemma streamed experts' cache floor 0.6);
                  // bump on changes
 }
 // "ctx\tresident" lines (older lines without the second field are computed again)
