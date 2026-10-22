@@ -226,7 +226,8 @@ if ($Models) {
 $todo = @($catalog | Where-Object { $want -contains $_.key -and -not $_.have })
 if ($todo | Where-Object { $_.key -eq "35b" }) {  # its tokenizer comes from the 4B GGUF
   $m4 = $catalog | Where-Object { $_.key -eq "4b" }
-  if (-not $m4.have -and -not ($todo -contains $m4)) { Note "the 35B conversion takes its tokenizer from the 4B model: downloading it too"; $todo = @($m4) + $todo }
+  $m4Queued = @($todo | Where-Object { $_.key -eq "4b" }).Count -gt 0
+  if (-not $m4.have -and -not $m4Queued) { Note "the 35B conversion takes its tokenizer from the 4B model: downloading it too"; $todo = @($m4) + $todo }
 }
 if ($todo) {
   if (-not $py) { Bad "downloading models needs Python 3.10+" "Install Python (https://www.python.org/downloads/, tick 'Add to PATH'), then run setup again." }

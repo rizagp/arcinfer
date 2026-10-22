@@ -48,6 +48,10 @@ int main(int argc, char** argv) {
       {"chunk 1 TB", "POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n10000000000\r\n", "413"},
       {"request line without spaces", "GARBAGE\r\n\r\n", "400"},
       {"handler throws a non-exception", "GET /throw HTTP/1.1\r\n\r\n", ""},
+      {"Origin of a local page", "GET /x HTTP/1.1\r\nOrigin: http://localhost:3000\r\n\r\n", "200 OK"},
+      {"Origin = Host (own web UI)", "GET /x HTTP/1.1\r\nHost: 192.168.1.5:8090\r\nOrigin: http://192.168.1.5:8090\r\n\r\n", "200 OK"},
+      {"Origin of another site", "GET /x HTTP/1.1\r\nOrigin: https://evil.example\r\n\r\n", "403"},
+      {"Origin != Host", "GET /x HTTP/1.1\r\nHost: 192.168.1.5:8090\r\nOrigin: http://192.168.1.6:8090\r\n\r\n", "403"},
       {"still alive", "GET /x HTTP/1.1\r\n\r\n", "200 OK"},
   };
   int fails = 0;

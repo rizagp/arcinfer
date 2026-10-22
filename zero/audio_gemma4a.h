@@ -97,7 +97,7 @@ class AudioGemma4A : public GemmaAudioEncoder {
   std::vector<float> host(const std::string& name) const {
     const GgufTensor& t = f_.get(name);
     std::vector<float> v(t.nelements());
-    dequant_row(t.type, t.data, (int64_t)v.size(), v.data());
+    dequant_row(t.type, t.data, (int)v.size(), v.data());
     return v;
   }
   float scalar(const std::string& name, float dflt) const { return f_.find(name) ? host(name)[0] : dflt; }

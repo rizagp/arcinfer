@@ -7,6 +7,11 @@
   (`-q2`), and the saved state carries a flag and the float K / V rows: a conversation saved, a second one held,
   the first one loaded again gives the same greedy answer as a fresh server (26B, 1,511 tokens); a plain server
   refuses the file. Saved states of the other modes are unchanged.
+- **Server hardening (audit by DeepSeek, reviewed)**: a request with an `Origin` from another site gets 403 (a web
+  page elsewhere could otherwise drive this no-authentication server; local pages and the server's own web UI, also
+  opened from another device with `--host`, keep working; command-line clients send no Origin), CORS only for those,
+  at most 64 connections, request heads up to 1 MB, an unknown `--host` is an error instead of every interface (IPv6
+  literals and names accepted), and a bad option value (`--port abc`) is a message instead of a crash.
 - **Sampled tool calls 4x faster**: constrained sampling with top_k > 1 sorted and tested the whole 248K vocabulary
   whenever the 512 most likely tokens held too few allowed ones (after every JSON key); it now stops when the rest
   could not be drawn (e^-20 below the best allowed token). 35B, as Pi samples: 4.8 -> 20.4 tok/s; a 1,240-token

@@ -116,7 +116,7 @@ class VisionGemma4 : public GemmaImageEncoder {
   std::vector<float> vec(const std::string& name) const {
     const GgufTensor& t = f_.get(name);
     std::vector<float> v(t.nelements());
-    dequant_row(t.type, t.data, (int64_t)v.size(), v.data());
+    dequant_row(t.type, t.data, (int)v.size(), v.data());
     return v;
   }
   void layer_norm(float* x, int n, const float* w, const float* b) const {

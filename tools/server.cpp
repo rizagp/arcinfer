@@ -2709,21 +2709,39 @@ int main(int argc, char** argv) {
   bool swap = true, help = false;
   ServeOpts so;
   so.eo.ctx = 40960;
+  // A bad option value is a message, not an uncaught std::stoi exception (which aborted the process).
+  auto to_int = [](const std::string& opt, const std::string& s) {
+    try {
+      size_t used = 0;
+      const int v = std::stoi(s, &used);
+      if (used == s.size()) return v;
+    } catch (...) {}
+    throw std::runtime_error(opt + ": expected an integer (got \"" + s + "\")");
+  };
+  auto to_double = [](const std::string& opt, const std::string& s) {
+    try {
+      size_t used = 0;
+      const double v = std::stod(s, &used);
+      if (used == s.size()) return v;
+    } catch (...) {}
+    throw std::runtime_error(opt + ": expected a number (got \"" + s + "\")");
+  };
+  try {
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     auto next = [&]() { return i + 1 < argc ? std::string(argv[++i]) : std::string(); };
     if (a == "-m" || a == "--model") model = next();
     else if (a == "--host") host = next();
-    else if (a == "--port") port = std::stoi(next());
+    else if (a == "--port") port = to_int(a, next());
     else if (a == "--ctx" || a == "-c") {
       const std::string v = next();
       if (v == "auto") so.ctx_auto = true;
-      else so.eo.ctx = std::stoi(v);
+      else so.eo.ctx = to_int(a, v);
     }
-    else if (a == "--chunk") so.eo.chunk = std::stoi(next());
-    else if (a == "--expert-cache-gb") so.eo.expert_cache_gb = std::stod(next());
-    else if (a == "--expert-cache-pct") so.eo.expert_cache_pct = std::stod(next());
-    else if (a == "--windows-reserve-gb") so.eo.windows_reserve_gb = std::stod(next());
+    else if (a == "--chunk") so.eo.chunk = to_int(a, next());
+    else if (a == "--expert-cache-gb") so.eo.expert_cache_gb = to_double(a, next());
+    else if (a == "--expert-cache-pct") so.eo.expert_cache_pct = to_double(a, next());
+    else if (a == "--windows-reserve-gb") so.eo.windows_reserve_gb = to_double(a, next());
     else if (a == "--no-stream") so.eo.stream_experts = false;
     else if (a == "--pack") {  // make an arcinferzero package of a MoE GGUF, then exit
       const std::string src = next();
@@ -2743,7 +2761,7 @@ int main(int argc, char** argv) {
     }
     else if (a == "--alias") alias = next();
     else if (a == "--webui") so.webui = next();
-    else if (a == "--budget") { so.eo.w8_budget_gb = std::stod(next()); so.budget_given = true; }
+    else if (a == "--budget") { so.eo.w8_budget_gb = to_double(a, next()); so.budget_given = true; }
     else if (a == "--attn-f32") so.eo.attn_int8 = false;
     else if (a == "--v4") so.eo.v4 = true;  // (4-bit V cache, Qwen, experimental)
     else if (a == "--q2") so.eo.q2 = true;  // (Gemma 4 two-pass mode)
@@ -2761,17 +2779,28 @@ int main(int argc, char** argv) {
     else if (a == "--no-mmproj") so.mmproj = "-";
     else if (a == "--image-min-tokens") so.img_min = atoi(next().c_str());
     else if (a == "--image-max-tokens") so.img_max = atoi(next().c_str());
-    else if (a == "--mtp-drafts") so.eo.mtp_drafts = std::stoi(next());
-    else if (a == "--think-budget") so.think_budget = std::stoi(next());
+    else if (a == "--mtp-drafts") so.eo.mtp_drafts = to_int(a, next());
+    else if (a == "--think-budget") so.think_budget = to_int(a, next());
     else if (a == "--preserve-thinking") so.preserve_thinking = true;
     else if (a == "--kernels") so.eo.kernel_dir = next();
-    else if (a == "--session-cache-gb") so.sess_gb = std::stod(next());
+    else if (a == "--session-cache-gb") so.sess_gb = to_double(a, next());
     else if (a == "--session-dir") so.sess_dir = next();
-    else if (a == "--slots") so.eo.slots = std::clamp(std::stoi(next()), 1, 8);
+    else if (a == "--slots") so.eo.slots = std::clamp(to_int(a, next()), 1, 8);
     else if (a == "--no-swap") swap = false;
     else if (a == "--no-prefix-cache") so.prefix_cache = false;
-    else if (a == "--prefix-cache-gb") so.prefix_gb = std::stod(next());
+    else if (a == "--prefix-cache-gb") so.prefix_gb = to_double(a, next());
     else if (a == "--help" || a == "-h") help = true;
+  }
+  if (!help) {
+    if (port < 1 || port > 65535) throw std::runtime_error("--port: expected 1..65535 (got " + std::to_string(port) + ")");
+    if (host.empty()) throw std::runtime_error("--host: an address or name is required");
+    if (!so.ctx_auto && so.eo.ctx < 1) throw std::runtime_error("--ctx: expected 1 or more tokens (or auto)");
+    if (so.eo.chunk < 0) throw std::runtime_error("--chunk: expected 0 (auto) or more tokens");
+    if (so.eo.mtp_drafts < 0) throw std::runtime_error("--mtp-drafts: expected 0 or more");
+  }
+  } catch (const std::exception& e) {
+    fprintf(stderr, "arcinfer-server: %s\n", e.what());
+    return 2;
   }
   // (ARC_V4=1 turns the engine's 4-bit V copy on as --v4 does: the server must know it too, for its context key and
   //  the folders of saved states)

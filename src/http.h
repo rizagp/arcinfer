@@ -6,6 +6,7 @@
 #include <ws2tcpip.h>
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <charconv>
 #include <functional>
 #include <map>
@@ -25,6 +26,8 @@ struct HttpRequest {
 class HttpResponse {
  public:
   explicit HttpResponse(SOCKET s) : s_(s) {}
+  // Only a page served from this machine may read a response cross-origin (see HttpServer::serve_requests).
+  std::string cors_origin;
   // Taps: another API format served by the same handler (the server's Ollama / Anthropic / Responses endpoints run
   // its OpenAI chat handler): with on_send set a complete response goes there instead of the socket, with on_event
   // set the handler's server-sent events do (sse_begin then writes nothing; the tap writes its own stream).
@@ -86,13 +89,17 @@ class HttpResponse {
  private:
   SOCKET s_;
   bool done_ = false, streaming_ = false, ok_ = true;
-  static std::string cors() {
-    return "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\n";
+  std::string cors() const {
+    if (cors_origin.empty()) return "";
+    return "Access-Control-Allow-Origin: " + cors_origin + "\r\nVary: Origin\r\n" +
+           "Access-Control-Allow-Headers: Content-Type, Authorization\r\n" +
+           "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n";
   }
   static const char* reason(int s) {
     switch (s) {
-      case 200: return "OK"; case 204: return "No Content"; case 400: return "Bad Request"; case 404: return "Not Found";
-      case 413: return "Payload Too Large"; case 500: return "Internal Server Error"; case 503: return "Service Unavailable"; default: return "OK";
+      case 200: return "OK"; case 204: return "No Content"; case 400: return "Bad Request"; case 403: return "Forbidden";
+      case 404: return "Not Found"; case 413: return "Payload Too Large"; case 500: return "Internal Server Error";
+      case 503: return "Service Unavailable"; default: return "OK";
     }
   }
   bool raw(const std::string& d) {
@@ -111,32 +118,80 @@ class HttpServer {
   using Handler = std::function<void(const HttpRequest&, HttpResponse&)>;
   Handler handler;
 
+  // host may be an IPv4 / IPv6 literal or a name (localhost). An unknown host is an error: it must never silently
+  // become INADDR_ANY (that exposed the server on every interface when --host was mistyped).
   bool listen(const std::string& host, int port) {
     WSADATA w;
     if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return false;
-    ls_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (ls_ == INVALID_SOCKET) return false;
-    BOOL yes = TRUE;
-    setsockopt(ls_, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof yes);
-    sockaddr_in a{};
-    a.sin_family = AF_INET;
-    a.sin_port = htons((u_short)port);
-    inet_pton(AF_INET, host.c_str(), &a.sin_addr);
-    if (bind(ls_, (sockaddr*)&a, sizeof a) != 0 || ::listen(ls_, 64) != 0) return false;
-    return true;
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    addrinfo* ai = nullptr;
+    const std::string service = std::to_string(port);
+    if (getaddrinfo(host.c_str(), service.c_str(), &hints, &ai) != 0 || !ai) return false;
+    for (addrinfo* a = ai; a; a = a->ai_next) {
+      ls_ = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+      if (ls_ == INVALID_SOCKET) continue;
+      BOOL yes = TRUE;
+      setsockopt(ls_, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof yes);
+      if (a->ai_family == AF_INET6) {  // (::1: no need to accept IPv4 on the same socket)
+        setsockopt(ls_, IPPROTO_IPV6, IPV6_V6ONLY, (const char*)&yes, sizeof yes);
+      }
+      if (bind(ls_, a->ai_addr, (int)a->ai_addrlen) == 0 && ::listen(ls_, 64) == 0) break;
+      closesocket(ls_);
+      ls_ = INVALID_SOCKET;
+    }
+    freeaddrinfo(ai);
+    return ls_ != INVALID_SOCKET;
   }
 
   void run() {
     while (true) {
       SOCKET c = accept(ls_, nullptr, nullptr);
       if (c == INVALID_SOCKET) continue;
-      std::thread([this, c] { serve(c); }).detach();
+      if (conns_.fetch_add(1) >= kMaxConns) {  // (each connection may hold a body of up to 256 MiB)
+        conns_.fetch_sub(1);
+        closesocket(c);
+        continue;
+      }
+      try {
+        std::thread([this, c] {
+          serve(c);
+          conns_.fetch_sub(1);
+        }).detach();
+      } catch (...) {
+        conns_.fetch_sub(1);
+        closesocket(c);
+      }
     }
   }
 
  private:
   SOCKET ls_ = INVALID_SOCKET;
+  std::atomic<int> conns_{0};
+  static constexpr int kMaxConns = 64;
   static constexpr size_t kMaxBody = 256u << 20;  // (base64 images and audio; larger requests get 413)
+  static constexpr size_t kMaxHead = 1u << 20;    // request line + headers; a body may follow
+
+  // http://127.0.0.1:PORT, http://localhost:PORT, http://[::1]:PORT (any port / pathless origin)
+  static bool local_origin(const std::string& origin) {
+    std::string o = origin;
+    std::transform(o.begin(), o.end(), o.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    if (o.compare(0, 7, "http://") != 0) return false;  // (https on a local port is not served here)
+    o.erase(0, 7);
+    const size_t e = o.find_first_of(":/");
+    const std::string h = o.substr(0, e);
+    return h == "127.0.0.1" || h == "localhost" || h == "[::1]" || h == "::1";
+  }
+  // the page the server itself served (the web UI opened from another device with --host): Origin = http://<Host>
+  static bool same_origin(const std::string& origin, const std::string& host) {
+    if (host.empty()) return false;
+    std::string o = origin, h = "http://" + host;
+    for (std::string* x : {&o, &h})
+      std::transform(x->begin(), x->end(), x->begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    return o == h;
+  }
 
   // A non-negative integer (decimal, or hex for chunk sizes, which may carry ";extensions"), else false.
   static bool parse_size(std::string v, int base, size_t& out) {
@@ -180,7 +235,7 @@ class HttpServer {
         const int n = recv(c, tmp, sizeof tmp, 0);
         if (n <= 0) { closesocket(c); return; }
         buf.append(tmp, n);
-        if (buf.size() > (64u << 20)) { closesocket(c); return; }
+        if (buf.size() > kMaxHead) { closesocket(c); return; }
       }
       HttpRequest rq;
       const std::string head = buf.substr(0, he);
@@ -252,6 +307,12 @@ class HttpServer {
         buf.erase(0, len);
       }
       HttpResponse rs(c);
+      // A browser page from another site must not drive this no-authentication server (CORS alone would still let a
+      // simple POST through). Local pages and the server's own web UI keep working; command-line clients send no Origin.
+      const std::string origin = rq.header("origin");
+      if (!origin.empty() && !local_origin(origin) && !same_origin(origin, rq.header("host")))
+        return reply_close(c, 403, "cross-origin requests are only allowed from this machine");
+      rs.cors_origin = origin;
       if (rq.method == "OPTIONS") rs.send(204, "text/plain", "");
       else {
         try {

@@ -219,7 +219,7 @@ class VisionGemma4V : public GemmaImageEncoder {
   std::vector<float> host(const std::string& name) const {
     const GgufTensor& t = f_.get(name);
     std::vector<float> v(t.nelements());
-    dequant_row(t.type, t.data, (int64_t)v.size(), v.data());
+    dequant_row(t.type, t.data, (int)v.size(), v.data());
     return v;
   }
   float scalar(const std::string& name, float dflt) const {
