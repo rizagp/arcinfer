@@ -1832,18 +1832,40 @@ __kernel void attn_prep_g(__global const float* qkv, int ldq, int nh, int nkv, i
 // not depend on the other rows of the launch): verification rows equal single tokens. One sub-group per (GQ q heads
 // of one kv head, row); keys in blocks of 16, lane = key for the scores, lane = 16 dims per 256 for P.V.
 // grid (16, nh / GQ, M), local (16, 1, 1).
+// -DFA_ROWS=R (prompt chunks): a work-group of R consecutive rows, one sub-group each as above, loads every block of
+// 16 keys and values once into local memory for all of them (each row read them all from global memory before:
+// 4K-token prompt 14.7 s of attention); a row still takes exactly its own blocks with the same arithmetic, so the
+// results are bit for bit those of R = 1. grid (16, nh / GQ, ceil(M / R) * R), local (16, 1, R).
 #ifdef FA_G
 #define FDC (HD / 256)  // 256-dim chunks of a row
+#ifndef FA_ROWS
+#define FA_ROWS 1
+#endif
+#if FA_ROWS > 1
+#define FA_KS (HD + 1)  // (a key's row stride in local memory: lane = key reads without bank conflicts)
+#ifdef KF32
+#define FA_KW uint
+#else
+#define FA_KW ushort
+#endif
+#endif
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __global const half* vc, int cap, int nh,
                         int nkv, int pos0, int M_valid, __global float* out, int win, int nc_lo, int nc_hi) {
   const int lane = get_sub_group_local_id();
   const int hg = get_global_id(1), m = get_global_id(2);
+#if FA_ROWS > 1
+  __local FA_KW sk[16 * FA_KS];
+  __local ushort sv[16 * HD];
+  const int mr = min(m, M_valid - 1);  // (rows past the launch take part in the loads; nothing is stored for them)
+#else
   if (m >= M_valid) return;
-  const int pos = pos0 + m, g = (hg * GQ) / (nh / nkv);
+  const int mr = m;
+#endif
+  const int pos = pos0 + mr, g = (hg * GQ) / (nh / nkv);
   const int lo = win > 0 ? max(0, pos - win + 1) : 0;
   const int hi = (pos >= nc_lo && pos <= nc_hi) ? nc_hi : pos;
-  __global const float* qp = qf + ((size_t)m * nh + hg * GQ) * HD;
+  __global const float* qp = qf + ((size_t)mr * nh + hg * GQ) * HD;
   __global const KC_T* kb = kc + (size_t)g * cap * HD;
   __global const half* vb = vc + (size_t)g * cap * HD;
   float16 o[GQ][FDC];
@@ -1855,13 +1877,34 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
 #pragma unroll
     for (int c = 0; c < FDC; ++c) o[r][c] = 0.0f;
   }
+#if FA_ROWS > 1
+  // the work-group's blocks: its first row's lo to its last row's hi (both grow with the position)
+  const int m0 = get_group_id(2) * FA_ROWS, m1 = min(m0 + FA_ROWS, M_valid) - 1, q0 = pos0 + m0, q1 = pos0 + m1;
+  const int blo = (win > 0 ? max(0, q0 - win + 1) : 0) / 16, bhi = ((q1 >= nc_lo && q1 <= nc_hi) ? nc_hi : q1) / 16;
+  const int tid = get_local_id(2) * 16 + lane;
+  for (int b = blo; b <= bhi; ++b) {
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int i = tid; i < 16 * HD; i += 16 * FA_ROWS) {
+      const int kk = i / HD, d = i % HD;
+      const size_t at = (size_t)((b * 16 + kk) % cap) * HD + d;
+      sk[kk * FA_KS + d] = ((__global const FA_KW*)kb)[at];
+      sv[kk * HD + d] = ((__global const ushort*)vb)[at];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (b < lo / 16 || b > hi / 16) continue;  // (uniform over the sub-group: its row's own blocks only)
+#else
   for (int b = lo / 16; b <= hi / 16; ++b) {
+#endif
     const int t0 = b * 16, p = t0 + lane;
     const bool valid = p >= lo && p <= hi;
     float s[GQ];
 #pragma unroll
     for (int r = 0; r < GQ; ++r) s[r] = 0.0f;
+#if FA_ROWS > 1
+    __local const KC_T* krow = (__local const KC_T*)sk + lane * FA_KS;
+#else
     __global const KC_T* krow = kb + (size_t)(p % cap) * HD;
+#endif
     for (int c = 0; c < HD / 16; ++c) {
 #ifdef KF32
       const float16 kv = valid ? vload16(0, krow + 16 * c) : (float16)0.0f;
@@ -1898,7 +1941,11 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
     for (int j = 0; j < 16; ++j) {
       const int pj = t0 + j;
       if (pj < lo || pj > hi) continue;  // (the same for every lane)
+#if FA_ROWS > 1
+      __local const half* vrow = (__local const half*)sv + j * HD + 16 * lane;
+#else
       __global const half* vrow = vb + (size_t)(pj % cap) * HD + 16 * lane;
+#endif
 #pragma unroll
       for (int c = 0; c < FDC; ++c) {
         const float16 vv = vload_half16(0, vrow + 256 * c);
@@ -1907,6 +1954,7 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
       }
     }
   }
+  if (m >= M_valid) return;
 #pragma unroll
   for (int r = 0; r < GQ; ++r) {
     const float L = sub_group_reduce_add(lp[r]);

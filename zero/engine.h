@@ -3418,14 +3418,21 @@ class Engine {
     };
     const std::string ao = attn_opts(hd, hpg);
     // (two-pass mode: float attention over the f16 rows for every pass; rows r0 .. r0 + n at position p0)
+    // (prompt chunks of the sliding layers (head 256): 16 rows per work-group sharing each key block in local memory;
+    //  the global layers (head 512) do better without, but with 2 q heads per sub-group instead of 4 (11.4 KB spill
+    //  -> less). 26B, 4K prompt: sliding 10.5 -> 4.5 s, global 6.2 -> 2.2 s. ARC_FA_ROWS / ARC_FA_GQ override them;
+    //  every choice is bit-identical)
+    static const int fa_rows = getenv("ARC_FA_ROWS") ? std::max(1, atoi(getenv("ARC_FA_ROWS"))) : 0;
+    static const int fa_gq = getenv("ARC_FA_GQ") ? std::max(1, atoi(getenv("ARC_FA_GQ"))) : 0;
     auto fa_g = [&](int r0, int n, int p0) {
-      const int gq = hpg <= 4 ? hpg : 4;
+      const int gq = std::min(hpg, fa_gq ? fa_gq : hd >= 512 ? 2 : 4);
+      const int R = n <= 8 ? 1 : fa_rows ? fa_rows : hd >= 512 ? 1 : 16;
       cl_kernel k = kernel("ops", std::string(q2_kf32_ ? "-DKF32 " : "") + "-cl-intel-256-GRF-per-thread -DFA_G -DHD=" + std::to_string(hd) + " -DGQ=" +
-                                      std::to_string(gq), "attn_fa_g");
+                                      std::to_string(gq) + (R > 1 ? " -DFA_ROWS=" + std::to_string(R) : std::string()), "attn_fa_g");
       int cp = L.cap, nn = nh, nk = nkv, pp = p0, MM = n, w = win, nlo = L.swa ? nc_lo_ : -1, nhi = L.swa ? nc_hi_ : -1;
       set_args(k, 0, from(qf_, (size_t)r0 * nh * hd * 4), L.kc, L.vc, cp, nn, nk, pp, MM,
                from(o_, (size_t)r0 * nh * hd * 4), w, nlo, nhi);
-      size_t gws[3] = {16, (size_t)(nh / gq), (size_t)n}, lws[3] = {16, 1, 1};
+      size_t gws[3] = {16, (size_t)(nh / gq), (size_t)(n + R - 1) / R * R}, lws[3] = {16, 1, (size_t)R};
       run(L.swa ? "attn_swa" : "attn_global", k, 3, gws, lws);
     };
     if (q2_ && q2_att_) {
