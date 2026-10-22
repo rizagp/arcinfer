@@ -412,3 +412,12 @@ byte before / after; a step that changes one bit is dropped), `tests/run_tests.p
 
 Estimate: 26.1 + 26.2 remove roughly 10-20 % of `engine.h` and the kernels (to be measured).
 
+## F27: remote access through a Cloudflare tunnel (raised 2026-10-22, later)
+
+The user may reach the web UI from outside, as Unsloth Studio does behind a Cloudflare reverse proxy.
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 27.1 | Origin check accepts `https://<Host>` | 💡 when wanted | through a tunnel the page is `https://name.domain`; today only `http://<Host>` and local pages pass (403 otherwise) |
+| 27.2 | Login | 💡 when wanted | the server has no authentication: anyone with the URL could use the GPU and read saved conversations. Recommended: Cloudflare Access in front; optional second layer `--password` / `--api-key` (Bearer for API clients, a login page in the web UI), ~1-2 h |
+
