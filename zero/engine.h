@@ -3295,7 +3295,7 @@ class Engine {
     //  work-group, each key / value row read once for all of them; default as many as fit 64 output floats per lane
     //  (E4B, 4 q heads per kv head: 4 rows, 13,921 tokens 59.8 -> 47.2 s; 26B: 2, about the same; 12B: 1)
     static const bool fa_gh = !getenv("ARC_FA_GH") || atoi(getenv("ARC_FA_GH")) != 0;
-    static const int fa_fs = getenv("ARC_FA_FS") ? std::max(1, atoi(getenv("ARC_FA_FS"))) : 8;
+    static const int fa_fs_env = getenv("ARC_FA_FS") ? std::max(1, atoi(getenv("ARC_FA_FS"))) : 0;
     static const int fa_gr_env = getenv("ARC_FA_GR") ? std::max(1, atoi(getenv("ARC_FA_GR"))) : 0;
     // (generation / verification, <= 8 rows: flash-decoding, the key range split over many sub-groups and combined;
     //  ARC_FA_SPLIT=0: one sub-group per (row, q-head pair) over every key, as the prompt kernel)
@@ -3325,7 +3325,10 @@ class Engine {
       }
       // (at most 64 output floats per lane, q heads x dims: with 4 sub-groups the 12B's 16 q heads held 128, spilled
       //  6.4 KB per thread and made its global attention slower, 3.4 -> 4.4-4.9 s for a 4K prompt; DeepSeek's audit)
-      if (fa_gh && n > 8 && hd >= 512 && hpg * (hd / fa_fs / 16) <= 64 && hd % (fa_fs * 16) == 0 &&
+      // (head 256, the sliding layers: 4 sub-groups and up to 4 rows; 26B, 4K prompt: sliding attention 4.17 -> 2.26 s
+      //  instead of attn_fa_g with 32 rows)
+      const int fa_fs = fa_fs_env ? fa_fs_env : hd >= 512 ? 8 : 4;
+      if (fa_gh && n > 8 && hd >= 256 && hpg * (hd / fa_fs / 16) <= 64 && hd % (fa_fs * 16) == 0 &&
           (hd / fa_fs / 16 == 4 || hd / fa_fs / 16 == 8 || hd / fa_fs / 16 == 16)) {
         const int fa_gr = fa_gr_env ? fa_gr_env : std::clamp(64 / (hpg * (hd / fa_fs / 16)), 1, 4);
         cl_kernel k = kernel("ops", "-cl-intel-256-GRF-per-thread -DFA_GH -DHD=" + std::to_string(hd) + " -DHPG=" +
