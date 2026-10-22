@@ -1966,6 +1966,119 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
 #undef FDC
 #endif  // FA_G
 
+// attn_fa_g for prompt chunks of the wide-head layers (-DFA_GH, two-pass mode; Gemma 4's global layers, head 512, 8
+// q heads per kv head): the same results bit for bit with each key row read once per row instead of once per pair of
+// q heads. A work-group = one row x one kv head, FS sub-groups. Per step the FS sub-groups take FS consecutive blocks
+// of 16 keys, one each, and score it for all HPG q heads (lane = key, each score the same fma chain over the dims as
+// attn_fa_g), into local memory. Then every sub-group runs the blocks' softmax updates in order for all heads (the
+// same operations, so the same values in each) and P.V for its HD / FS dims (lane = HD / FS / 16 dims). attn_fa_g
+// holds HD / 16 output floats per lane per (row, head), which limited it to 2 heads per sub-group.
+// grid (16 * FS, nkv, M), local (16 * FS, 1, 1).
+#ifdef FA_GH
+#define GD (HD / FS / 16)  // output dims per lane
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void attn_fa_gh(__global const float* qf, __global const KC_T* kc, __global const half* vc, int cap, int nh,
+                         int nkv, int pos0, int M_valid, __global float* out, int win, int nc_lo, int nc_hi) {
+  __local float sc[FS][HPG][16];
+  const int lane = get_sub_group_local_id(), sgi = get_sub_group_id();
+  const int g = get_group_id(1), m = get_group_id(2);
+  const int pos = pos0 + m;
+  const int lo = win > 0 ? max(0, pos - win + 1) : 0;
+  const int hi = (pos >= nc_lo && pos <= nc_hi) ? nc_hi : pos;
+  __global const float* qp = qf + ((size_t)m * nh + g * HPG) * HD;
+  __global const KC_T* kb = kc + (size_t)g * cap * HD;
+  __global const half* vb = vc + (size_t)g * cap * HD;
+  float mx[HPG], lp[HPG];
+#if GD == 8
+  float8 o[HPG];
+#else
+  float16 o[HPG];
+#endif
+#pragma unroll
+  for (int h = 0; h < HPG; ++h) {
+    mx[h] = -INFINITY;
+    lp[h] = 0.0f;
+    o[h] = 0.0f;
+  }
+  const int b0 = lo / 16, b1 = hi / 16;
+  for (int bs = b0; bs <= b1; bs += FS) {
+    {  // scores of block bs + sgi
+      const int b = bs + sgi, p = b * 16 + lane;
+      const bool valid = b <= b1 && p >= lo && p <= hi;
+      __global const KC_T* krow = kb + (size_t)(p % cap) * HD;
+      float s[HPG];
+#pragma unroll
+      for (int h = 0; h < HPG; ++h) s[h] = 0.0f;
+      for (int c = 0; c < HD / 16; ++c) {
+#ifdef KF32
+        const float16 kv = valid ? vload16(0, krow + 16 * c) : (float16)0.0f;
+#else
+        const float16 kv = valid ? vload_half16(0, krow + 16 * c) : (float16)0.0f;
+#endif
+#pragma unroll
+        for (int h = 0; h < HPG; ++h) {
+          const float qc = as_float(intel_sub_group_block_read((__global const uint*)(qp + h * HD + 16 * c)));
+          float a = s[h];
+          a = fma(BC16(qc, 0), kv.s0, a);  a = fma(BC16(qc, 1), kv.s1, a);
+          a = fma(BC16(qc, 2), kv.s2, a);  a = fma(BC16(qc, 3), kv.s3, a);
+          a = fma(BC16(qc, 4), kv.s4, a);  a = fma(BC16(qc, 5), kv.s5, a);
+          a = fma(BC16(qc, 6), kv.s6, a);  a = fma(BC16(qc, 7), kv.s7, a);
+          a = fma(BC16(qc, 8), kv.s8, a);  a = fma(BC16(qc, 9), kv.s9, a);
+          a = fma(BC16(qc, 10), kv.sa, a); a = fma(BC16(qc, 11), kv.sb, a);
+          a = fma(BC16(qc, 12), kv.sc, a); a = fma(BC16(qc, 13), kv.sd, a);
+          a = fma(BC16(qc, 14), kv.se, a); a = fma(BC16(qc, 15), kv.sf, a);
+          s[h] = a;
+        }
+      }
+#pragma unroll
+      for (int h = 0; h < HPG; ++h) sc[sgi][h][lane] = valid ? s[h] : -INFINITY;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int i = 0; i < FS && bs + i <= b1; ++i) {  // the blocks in order, as attn_fa_g takes them
+      const int t0 = (bs + i) * 16, p = t0 + lane;
+      const bool valid = p >= lo && p <= hi;
+      float pr[HPG];
+#pragma unroll
+      for (int h = 0; h < HPG; ++h) {
+        const float sv = sc[i][h][lane];
+        const float mn = fmax(mx[h], sub_group_reduce_max(sv));
+        const float corr = exp(mx[h] - mn);
+        pr[h] = valid ? exp(sv - mn) : 0.0f;
+        lp[h] = lp[h] * corr + pr[h];
+        o[h] *= corr;
+        mx[h] = mn;
+      }
+      for (int j = 0; j < 16; ++j) {
+        const int pj = t0 + j;
+        if (pj < lo || pj > hi) continue;  // (the same for every lane)
+        __global const half* vrow = vb + (size_t)(pj % cap) * HD + sgi * (HD / FS) + GD * lane;
+#if GD == 8
+        const float8 vv = vload_half8(0, vrow);
+#pragma unroll
+        for (int h = 0; h < HPG; ++h) o[h] = fma((float8)sub_group_broadcast(pr[h], j), vv, o[h]);
+#else
+        const float16 vv = vload_half16(0, vrow);
+#pragma unroll
+        for (int h = 0; h < HPG; ++h) o[h] = fma((float16)sub_group_broadcast(pr[h], j), vv, o[h]);
+#endif
+      }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+#pragma unroll
+  for (int h = 0; h < HPG; ++h) {
+    const float L = sub_group_reduce_add(lp[h]);
+    __global float* op = out + ((size_t)m * nh + g * HPG + h) * HD + sgi * (HD / FS) + GD * lane;
+#if GD == 8
+    vstore8(o[h] / L, 0, op);
+#else
+    vstore16(o[h] / L, 0, op);
+#endif
+  }
+}
+#undef GD
+#endif  // FA_GH
+
 // Single-token rows: x[m] = (x[m] + rmsnorm(t[m]) * w) * s (as add_rmsnorm), then the next GEMV input from the new
 // x[m]: rmsnorm(x[m]) * w2 (or x[m] itself with w2_norm = 0) quantized like rmsnorm_quant. The new values stay in
 // registers for the second step (sub-group j, lane l: elements 256 (j + 16 i) + 16 l .. +15; K <= 16384): reading

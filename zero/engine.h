@@ -3428,7 +3428,22 @@ class Engine {
     //  every choice is bit-identical)
     static const int fa_rows = getenv("ARC_FA_ROWS") ? std::max(1, atoi(getenv("ARC_FA_ROWS"))) : 0;
     static const int fa_gq = getenv("ARC_FA_GQ") ? std::max(1, atoi(getenv("ARC_FA_GQ"))) : 0;
+    // (prompt chunks of the head-512 layers: attn_fa_gh, each key row read once per row for all q heads of its kv head;
+    //  ARC_FA_GH=0: attn_fa_g; ARC_FA_FS: sub-groups per work-group, default 4)
+    static const bool fa_gh = !getenv("ARC_FA_GH") || atoi(getenv("ARC_FA_GH")) != 0;
+    static const int fa_fs = getenv("ARC_FA_FS") ? std::max(1, atoi(getenv("ARC_FA_FS"))) : 4;
     auto fa_g = [&](int r0, int n, int p0) {
+      if (fa_gh && n > 8 && hd >= 512 && hd % (fa_fs * 16) == 0 && (hd / fa_fs / 16 == 8 || hd / fa_fs / 16 == 16)) {
+        cl_kernel k = kernel("ops", std::string(q2_kf32_ ? "-DKF32 " : "") + "-cl-intel-256-GRF-per-thread -DFA_GH -DHD=" +
+                                        std::to_string(hd) + " -DHPG=" + std::to_string(hpg) + " -DFS=" + std::to_string(fa_fs),
+                             "attn_fa_gh");
+        int cp = L.cap, nn = nh, nk = nkv, pp = p0, MM = n, w = win, nlo = L.swa ? nc_lo_ : -1, nhi = L.swa ? nc_hi_ : -1;
+        set_args(k, 0, from(qf_, (size_t)r0 * nh * hd * 4), L.kc, L.vc, cp, nn, nk, pp, MM,
+                 from(o_, (size_t)r0 * nh * hd * 4), w, nlo, nhi);
+        size_t gws[3] = {(size_t)16 * fa_fs, (size_t)nkv, (size_t)n}, lws[3] = {(size_t)16 * fa_fs, 1, 1};
+        run(L.swa ? "attn_swa" : "attn_global", k, 3, gws, lws);
+        return;
+      }
       const int gq = std::min(hpg, fa_gq ? fa_gq : hd >= 512 ? 2 : 4);
       const int R = n <= 8 ? 1 : fa_rows ? fa_rows : hd >= 512 ? 1 : 16;
       cl_kernel k = kernel("ops", std::string(q2_kf32_ ? "-DKF32 " : "") + "-cl-intel-256-GRF-per-thread -DFA_G -DHD=" + std::to_string(hd) + " -DGQ=" +
