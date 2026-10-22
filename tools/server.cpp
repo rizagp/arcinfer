@@ -2255,16 +2255,17 @@ static std::string ctx_key(const std::string& model, const EngineOptions& eo) {
   std::string p = fs::absolute(model, ec).lexically_normal().make_preferred().string();  // one spelling per file
   for (auto& c : p) c = (char)tolower((unsigned char)c);
   return p + "|" + std::to_string(fs::file_size(model, ec)) + "|" + std::to_string(eo.chunk) +
-         "|z" + std::to_string((int)(eo.windows_reserve_gb * 10)) + (eo.stream_experts ? "s" : "n") +
+         "|z" + std::string(eo.stream_experts ? "s" : "n") +
          (eo.dflash.empty() ? std::string() : eo.mtp_block ? "|dflash" : "|dflash-only") + 
          (eo.slots > 1 ? "|slots" + std::to_string(eo.slots) + "/" + std::to_string(Engine::kSlotCtxFloor) : std::string()) +
          "|md" + std::to_string(eo.mtp_drafts) + "|" +  // (DFlash2 drafter: its weights and buffers; 4-bit V)
          (eo.min_chunk ? "/" + std::to_string(eo.min_chunk) : std::string()) + "|" + (eo.mtp ? "mtp" : "-") + "|" + (eo.attn_int8 ? "i8" : "f32") + "|" + std::to_string(device_global_mem()) +
-         "|m18";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
+         "|m19";  // engine memory layout version (m2: Q8_0 not stored twice, m4: MoE stacked router, m5: 3 MTP drafts
                  // for 27B, m6: MoE prompt GEMM staging, m7: MoE buffers shared, m8: MoE MTP 1 draft, Q3_K experts, m9: memory parts in the cache,
                  // m12: streamed MoE reserves 128K of context before the expert cache, m13: streamed MoE chunk 8192, m14: slot_bytes with every
                  // slot buffer, f16 K / V with --attn-f32, m15: --q2 Gemma MoE chunk 2048, m16: Gemma 4 always two-pass, m17: shared-KV Gemma
-                 // sliding rings, m18: Gemma int8 KV copies only for the drafter's layers);
+                 // sliding rings, m18: Gemma int8 KV copies only for the drafter's layers,
+                 // m19: GPU share - 1.2 GB, no Windows reserve);
                  // bump on changes
 }
 // "ctx\tresident" lines (older lines without the second field are computed again)
@@ -2351,7 +2352,7 @@ static AutoCtx auto_ctx(const std::string& model, EngineOptions eo, bool budget_
     Engine probe(model, e2);
     res = probe.w8_resident;
     const double gib = 1073741824.0,
-                 budget = probe.device_mem() - 0.95 * gib - 0.22 * gib - probe.snapshot_bytes() - (double)reserve;
+                 budget = probe.device_mem() - Engine::kDriverSlack - probe.snapshot_bytes() - (double)reserve;
     const double base = (double)probe.gpu_bytes - (double)probe.ctx_bytes(e2.ctx);
     // (--slots N: N - 1 more KV caches, states and snapshots of the same context)
     auto need = [&](int c) { return base + probe.ctx_bytes(c) + (double)(std::max(eo.slots, 1) - 1) * probe.slot_bytes(c); };
@@ -2741,7 +2742,6 @@ int main(int argc, char** argv) {
     else if (a == "--chunk") so.eo.chunk = to_int(a, next());
     else if (a == "--expert-cache-gb") so.eo.expert_cache_gb = to_double(a, next());
     else if (a == "--expert-cache-pct") so.eo.expert_cache_pct = to_double(a, next());
-    else if (a == "--windows-reserve-gb") so.eo.windows_reserve_gb = to_double(a, next());
     else if (a == "--no-stream") so.eo.stream_experts = false;
     else if (a == "--pack") {  // make an arcinferzero package of a MoE GGUF, then exit
       const std::string src = next();
@@ -2840,9 +2840,9 @@ int main(int argc, char** argv) {
             "  --budget GB           keep decoded weights resident up to GB\n"
             "MoE models (experts read from the SSD into a GPU cache; expert file in\n"
             "%%LOCALAPPDATA%%\\arcinfer\\zero, made on the first start, safe to delete):\n"
-            "  --expert-cache-gb N   expert cache size in GiB (default: automatic, see --windows-reserve-gb)\n"
+            "  --expert-cache-gb N   expert cache size in GiB (default: automatic: the GPU share Windows reports, your\n"
+            "                        setting, less 1.2 GB for the driver, less the rest of the model)\n"
             "  --expert-cache-pct P  expert cache as a percentage of all experts\n"
-            "  --windows-reserve-gb N  RAM left to Windows by the automatic cache size (default 14)\n"
             "  --pack FILE.gguf      make a package of a MoE model (its first part when split): the non-expert\n"
             "                        weights + an expert file under %%LOCALAPPDATA%%\\arcinfer\\zero\\models; afterwards\n"
             "                        the original GGUF can be moved away (e.g. to a USB disk)\n"

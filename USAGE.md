@@ -143,8 +143,9 @@ pi-arc 35b --no-stream               # without the SSD cache: every expert on th
 
 On first use, arcinferzero writes the expert file once (35B UD-IQ4_XS: 16 GB, about 2.5 minutes; Flash Next: 56 GB, about 9.5 minutes) to
 `%LOCALAPPDATA%\arcinfer\zero\`. This file can be deleted at any time; when it is missing, it is written again
-automatically. The cache size is set automatically (it can be changed: server options `--expert-cache-gb`,
-`--expert-cache-pct`, `--windows-reserve-gb`). If GPU memory suddenly runs short because of other apps (e.g.
+automatically. The cache size is set automatically: arcinfer uses the GPU memory Windows reports for the iGPU (your
+shared-memory setting) less 1.2 GB for the driver, and the cache takes what the rest of the model leaves (it can be
+changed: server options `--expert-cache-gb`, `--expert-cache-pct`). If GPU memory suddenly runs short because of other apps (e.g.
 Chrome), the cache shrinks itself by 1 GB per step instead of crashing.
 
 arcinferzero notes:

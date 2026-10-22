@@ -80,10 +80,9 @@ struct EngineOptions {
   bool dry = false;  // only add up the GPU memory a load takes (no allocations, uploads or kernels): --ctx auto
   // arcinferzero expert streaming (standard-type MoE GGUFs): routed experts read from the SSD into an LRU cache on
   // the GPU. Cache size: expert_cache_gb when > 0, else expert_cache_pct (0..100) of all experts when > 0, else
-  // automatic: what is left after the rest of the model while the process stays within RAM - windows_reserve_gb
-  // and within the GPU's memory share.
+  // automatic: what is left after the rest of the model within the GPU's memory share less kDriverSlack.
   bool stream_experts = true;
-  double expert_cache_gb = 0, expert_cache_pct = 0, windows_reserve_gb = 14;
+  double expert_cache_gb = 0, expert_cache_pct = 0;
   size_t stream_reserve = 0;  // bytes the automatic cache size leaves for GPU memory allocated later (image encoders)
   int slots = 1;  // conversations held at once (server --slots): each further one its own KV caches and states
 };
@@ -157,7 +156,7 @@ class Engine {
     //  18 Oct (docs/speed-progress.md): 35B UD-IQ4_XS at 131K keeps 81 % of the experts and answers as fast as at
     //  64K; Flash Next loses 2-6 % from 32K to 131K.)
     if (stream_ && opt.dry) {
-      const double left = (double)device_mem() - 1.17 * 1073741824.0 - (double)gpu_bytes + (double)ctx_bytes(ctx) -
+      const double left = (double)device_mem() - kDriverSlack - (double)gpu_bytes + (double)ctx_bytes(ctx) -
                           (double)snapshot_bytes() - (double)opt.stream_reserve;
       // (--slots N: 128K of context in all, each slot 128K / N; the floor of 3/4 only as far as it leaves every slot
       //  32K: with a plain floor Gemma 4 26B-A4B kept 8,192 tokens per slot, its sliding-window rings ~1.4 GB each.
@@ -547,10 +546,6 @@ class Engine {
   uint64_t device_mem() const {
     cl_ulong v = 0;
     clGetDeviceInfo(cl_.device, CL_DEVICE_GLOBAL_MEM_SIZE, sizeof(v), &v, nullptr);
-    if (stream_) {  // (streamed experts: the process also stays within RAM - the Windows reserve)
-      const uint64_t ram = ram_total(), res = (uint64_t)(opt.windows_reserve_gb * 1073741824.0);
-      v = std::min<uint64_t>(v, ram > res ? ram - res : 0);
-    }
     return v;
   }
 
@@ -609,7 +604,8 @@ class Engine {
   }
   int bound_slot() const { return slot_; }
   static constexpr int kMaxSlots = 8;
-  static constexpr int kSlotCtxFloor = 32768;  // (--ctx auto, slots of streamed MoE models: context kept per slot)
+  static constexpr int kSlotCtxFloor = 32768;
+  static constexpr double kDriverSlack = 1.2 * 1073741824.0;  // (GPU share bytes left to the driver; the user's choice)  // (--ctx auto, slots of streamed MoE models: context kept per slot)
   void add_slots(int n) {
     if (n > kMaxSlots) throw std::out_of_range("add_slots: at most " + std::to_string(kMaxSlots) + " slots");
     if (n <= 1 || !slot_ptrs_.empty() || opt.dry) return;
@@ -2146,10 +2142,6 @@ class Engine {
     if (xc_->st.built)
       fprintf(stderr, "arcinferzero: expert file written in %.1f s\n", xc_->st.build_ms / 1000);
   }
-  static uint64_t ram_total() {
-    MEMORYSTATUSEX ms{sizeof ms};
-    return GlobalMemoryStatusEx(&ms) ? ms.ullTotalPhys : 0;
-  }
   void size_expert_cache() {
     const double GiB = 1073741824.0;
     const uint64_t all = xc_->all_bytes();
@@ -2160,18 +2152,17 @@ class Engine {
     } else if (opt.expert_cache_pct > 0) {
       want = (uint64_t)(all * std::min(opt.expert_cache_pct, 100.0) / 100);
     } else {
-      // the whole process (weights, buffers, transient area, cache) within RAM - reserve and within the GPU share
-      // (minus room for the vision encoder and the driver)
-      const uint64_t ram = ram_total(), reserve = (uint64_t)(opt.windows_reserve_gb * GiB);
-      // (the GPU share less 1.4 GiB for the driver; the server's --ctx auto keeps 1.17. With 1.13 GiB left a kernel
-      // launch failed with out of device memory, 35B at 262K)
-      const uint64_t share = zrt::global_mem, slack = (uint64_t)(1.4 * GiB);
-      uint64_t limit = std::min(ram > reserve ? ram - reserve : 0, share > slack ? share - slack : 0);
+      // the whole process (weights, buffers, transient area, cache) within the GPU share Windows gives the iGPU, less
+      // kDriverSlack for the driver: the share is the user's setting, the rest of the RAM what they leave to Windows
+      // (the user's rule since 2026-10-22; before: also RAM - a 14 GB Windows reserve, which held a 20.4 GiB share to
+      // 17.7). (With 1.13 GiB left a kernel launch once failed with out of device memory, 35B at 262K.)
+      const uint64_t share = zrt::global_mem, slack = (uint64_t)kDriverSlack;
+      const uint64_t limit = share > slack ? share - slack : 0;
       // (+ kernels and host side, the server's state snapshots, and what the caller keeps for its encoders)
       const uint64_t used = gpu_bytes + xc_->stage_bytes + (uint64_t)(0.1 * GiB) + snapshot_bytes() * std::max(opt.slots, 1) + opt.stream_reserve;
       want = limit > used ? limit - used : 0;
-      fprintf(stderr, "arcinferzero: memory limit %.2f GiB (RAM %.1f - Windows %.1f, GPU share %.2f), model + buffers %.2f GiB\n",
-              limit / GiB, ram / GiB, reserve / GiB, share / GiB, used / GiB);
+      fprintf(stderr, "arcinferzero: memory limit %.2f GiB (GPU share %.2f - %.1f for the driver), model + buffers %.2f GiB\n",
+              limit / GiB, share / GiB, kDriverSlack / GiB, used / GiB);
     }
     want = std::min(want, all);
     // at least one layer's worth of slots per pool (the experts of a few verification tokens must fit)
@@ -3422,7 +3413,9 @@ class Engine {
         run(L.swa ? "attn_swa" : "attn_global", kc2, 3, g2, nullptr);
         return;
       }
-      if (fa_gh && n > 8 && hd >= 512 && hd % (fa_fs * 16) == 0 && (hd / fa_fs / 16 == 8 || hd / fa_fs / 16 == 16)) {
+      // (at most 8 q heads per kv head: the 12B's 16 hold 128 output floats per lane, spilled 6.4 KB per thread and
+      //  made its global attention slower, 3.4 -> 4.4-4.9 s for a 4K prompt; DeepSeek's audit)
+      if (fa_gh && n > 8 && hd >= 512 && hpg <= 8 && hd % (fa_fs * 16) == 0 && (hd / fa_fs / 16 == 8 || hd / fa_fs / 16 == 16)) {
         cl_kernel k = kernel("ops", "-cl-intel-256-GRF-per-thread -DFA_GH -DHD=" +
                                         std::to_string(hd) + " -DHPG=" + std::to_string(hpg) + " -DFS=" + std::to_string(fa_fs),
                              "attn_fa_gh");

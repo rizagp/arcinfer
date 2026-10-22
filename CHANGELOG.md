@@ -14,6 +14,10 @@
   (`-q2`), and the saved state carries a flag and the float K / V rows: a conversation saved, a second one held,
   the first one loaded again gives the same greedy answer as a fresh server (26B, 1,511 tokens); a plain server
   refuses the file. Saved states of the other modes are unchanged.
+- **GPU memory = the GPU share Windows reports - 1.2 GB** (the user's rule): the share is the user's own setting, so
+  the 14 GB Windows RAM reserve and `--windows-reserve-gb` are gone (with a 22 GB share: 17.7 -> 19.2 GiB for
+  arcinfer). Gemma 4 26B prompts of the head-512 layers keep `attn_fa_gh` only up to 8 q heads per kv head (the 12B's
+  16 spilled and were slower: 4K prompt global attention 4.4-4.9 -> 3.5 s; DeepSeek's audit).
 - **`--v4` removed** (the 4-bit V copy for Qwen generation at very long contexts; the user does not use it): the
   option, `-V4`, `ARC_V4`, `ARC_V4_SINK` / `ARC_V4_RECENT`, its kernel paths and buffers (-179 lines). Default
   output unchanged bit for bit (Qwen 35B / 27B with and without drafting, Gemma 26B).
