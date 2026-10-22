@@ -1652,8 +1652,9 @@ __kernel void attn_prep_g(__global const float* qkv, int ldq, int nh, int nkv, i
   for (int c = 0; c < VPL / 4; ++c) pk[c] = 0;
 #pragma unroll
   for (int i = 0; i < VPL; ++i) pk[i / 4] |= (uint)(convert_int_rte(v[i] * inv) & 0xFF) << (8 * (i % 4));
-  // (f16kv: the f32 query and f16 K / V rows for attn_fa_g as well: kc / vc [kv head][cap][HD], slot = pos % cap)
-  if (f16kv) {
+  // (f16kv bit 0: the f32 query and the float K / V rows for attn_fa_g as well: kc / vc [kv head][cap][HD], slot =
+  //  pos % cap)
+  if (f16kv & 1) {
     if (isq) {
       __global float* qd = qf + ((size_t)m * nh + hs) * HD + VPL * lane;
 #pragma unroll
@@ -1673,8 +1674,11 @@ __kernel void attn_prep_g(__global const float* qkv, int ldq, int nh, int nkv, i
   }
   const int slot = pos % cap, kk = slot % 16;
   const size_t blk = (size_t)kvh * (cap / 16) + slot / 16;
+  // (f16kv bit 1: this layer keeps no int8 K / V copy, only the drafter's layers do)
+  const bool i8 = !(f16kv & 2);
 #pragma unroll
-  for (int c = 0; c < VPL / 4; ++c) kq[(blk * (HD / 4) + (VPL / 4) * lane + c) * 16 + kk] = pk[c];
+  for (int c = 0; c < VPL / 4; ++c)
+    if (i8) kq[(blk * (HD / 4) + (VPL / 4) * lane + c) * 16 + kk] = pk[c];
   // V: the V projection, or the raw K projection, RMS-normalized without weight
   // (the raw K projection is read again from qkv, an input only: a register copy of it spilled at HD 512)
   float raw[VPL];
@@ -1696,12 +1700,13 @@ __kernel void attn_prep_g(__global const float* qkv, int ldq, int nh, int nkv, i
   for (int o = 1; o < 16 / SB; o <<= 1) vmax = fmax(vmax, intel_sub_group_shuffle_xor(vmax, o));
   inv = vmax > 0.0f ? 127.0f / vmax : 0.0f;
 #pragma unroll
-  for (int i = 0; i < VPL; ++i) vq[(blk * HD + VPL * lane + i) * 16 + kk] = (uchar)convert_int_rte(raw[i] * inv);
-  if (lane % (16 / SB) == 0) {  // scales [block][scale block][key]
+  for (int i = 0; i < VPL; ++i)
+    if (i8) vq[(blk * HD + VPL * lane + i) * 16 + kk] = (uchar)convert_int_rte(raw[i] * inv);
+  if (i8 && lane % (16 / SB) == 0) {  // scales [block][scale block][key]
     ksc[(blk * SB + lane / (16 / SB)) * 16 + kk] = amax / 127.0f;
     vsc[(blk * SB + lane / (16 / SB)) * 16 + kk] = vmax / 127.0f;
   }
-  if (f16kv) {
+  if (f16kv & 1) {
     __global half* vd = vc + ((size_t)kvh * cap + pos % cap) * HD + VPL * lane;
 #pragma unroll
     for (int i = 0; i < VPL; ++i) vstore_half(raw[i], 0, vd + i);

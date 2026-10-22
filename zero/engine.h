@@ -526,7 +526,7 @@ class Engine {
       for (const Layer& L : layers_)
         if (L.kv_src < 0) {
           const size_t cap = L.swa ? swa_cap : c;
-          n += 2 * (size_t)L.nkv * cap * L.hd + 2 * (size_t)L.nkv * cap * (L.hd / 64) * 4;
+          if (L.i8) n += 2 * (size_t)L.nkv * cap * L.hd + 2 * (size_t)L.nkv * cap * (L.hd / 64) * 4;
           if (q2_) n += 6 * (size_t)L.nkv * cap * L.hd;  // (two-pass mode: attn_fa_g's K / V rows)
         }
     } else {
@@ -1109,6 +1109,7 @@ class Engine {
     float out_scale = 1.0f;
     cl_mem post_attn = nullptr, ffn_norm = nullptr, post_ffw = nullptr, rope_ff = nullptr;
     int kv_src = -1;            // shared KV: the layer whose cache this layer reads (no K/V of its own)
+    bool i8 = true;             // Gemma 4: keeps the int8 K / V copy (only the layers the drafter reads)
     // Gemma 4 with experts: the dense FFN's output norm, the experts' input norm and output norm, the router's input
     // norm weights (its scale / sqrt(E)), the scale of each expert
     cl_mem post_ffw1 = nullptr, ffn_norm2 = nullptr, post_ffw2 = nullptr, rnorm = nullptr, escale = nullptr,
@@ -1267,7 +1268,7 @@ class Engine {
       const int nbc = k.cap / 16, b0 = br[i].first, n = br[i].second - br[i].first, s0 = b0 % nbc;
       const int first = std::min(n, nbc - s0);
       for (int g = 0; g < k.nkv; ++g)
-        for (int t = 0; t < 4; ++t) {
+        for (int t = 0; t < (k.L->i8 ? 4 : 0); ++t) {  // (Gemma layers without the int8 copy: the float rows only)
           cl_mem b = t == 0 ? k.L->kq : t == 1 ? k.L->vq : t == 2 ? k.L->ksc : k.L->vsc;
           const size_t unit = t < 2 ? (size_t)16 * k.hd : (size_t)k.sb * 16 * 4;
           const size_t base = (size_t)g * nbc;
@@ -1304,7 +1305,8 @@ class Engine {
     return v;
   }
   // (a saved state loads only into the same layout: Gemma, the 4-bit V copy, the two-pass mode's float K / V rows)
-  int state_flags() const { return (hp.gemma ? 1 : 0) | (q2_ ? 4 : 0); }  // (2: the removed --v4)
+  int state_flags() const { return (hp.gemma ? 1 : 0) | (q2_ ? 4 | 8 : 0); }  // (2: the removed --v4; 8: int8 copies
+  //  of the drafter's layers only)
   // header and device ranges of save_state()
   void save_layout(int keep_from, std::vector<int32_t>& hdr, std::vector<Seg>& segs, bool host_snapshot = true) {
     const auto kl = kv_layers();
@@ -1395,6 +1397,8 @@ class Engine {
   int nc_lo_ = -1, nc_hi_ = -1;  // positions processed non-causally in the current forward (an image span)
   cl_mem rpos_ = nullptr;          // per-row (t, h, w) rotary positions of an image chunk (Qwen M-RoPE)
   int use_rpos_ = 0;
+  // Gemma 4: the layer whose KV cache layer il uses (its own, or llama.cpp's KV reuse rule)
+  int g4_kv_layer(int il) const { return il >= hp.n_layer_kv ? hp.n_layer_kv - (hp.swa[il] ? 2 : 1) : il; }
   int swa_cap_ = 0, written_hi_ = 0;  // Gemma: sliding-window ring capacity, highest position written + 1
   // MTP block and speculative-decoding state
   Layer mtp_;
@@ -2543,14 +2547,20 @@ class Engine {
         if (S.hd != L.hd || S.nkv != L.nkv || S.swa != L.swa) throw std::runtime_error("Gemma 4: incompatible shared KV layer");
         L.kq = S.kq; L.vq = S.vq; L.ksc = S.ksc; L.vsc = S.vsc; L.cap = S.cap;
         L.kc = S.kc; L.vc = S.vc;
+        L.i8 = S.i8;
       } else {
         const size_t kvb = (size_t)L.nkv * L.cap * L.hd, scb = (size_t)L.nkv * L.cap * (L.hd / 64) * 4;
-        L.kq = buf(kvb);
-        L.vq = buf(kvb);
-        L.ksc = buf(scb);
-        L.vsc = buf(scb);
-        for (cl_mem m : {L.kq, L.vq}) fill(m, kvb);
-        for (cl_mem m : {L.ksc, L.vsc}) fill(m, scb);
+        // (the int8 copy only where the assistant drafter reads it: the sources of the last sliding and the last
+        //  global layer, and only with the drafter; the two-pass attention reads the float rows. 26B: ~20 % less
+        //  per token, the sliding rings ~0.7 GB less)
+        L.i8 = !q2_ || (opt.mtp && (il == g4_kv_layer(hp.n_layer - 2) || il == g4_kv_layer(hp.n_layer - 1)));
+        const size_t ib = L.i8 ? kvb : 64, is = L.i8 ? scb : 64;
+        L.kq = buf(ib);
+        L.vq = buf(ib);
+        L.ksc = buf(is);
+        L.vsc = buf(is);
+        for (cl_mem m : {L.kq, L.vq}) fill(m, ib);
+        for (cl_mem m : {L.ksc, L.vsc}) fill(m, is);
         if (q2_) {  // (two-pass mode: f32 K / f16 V rows for attn_fa_g; the int8 cache stays for the drafter)
           L.kc = buf(kvb * 4);
           L.vc = buf(kvb * 2);
@@ -3370,7 +3380,7 @@ class Engine {
       cl_mem rt = rope_table(L.swa ? 0 : 1, hd, base, L.rope_ff, Tq);
       set_args(k, 0, from(big_, (size_t)r0 * ldq * 4), ld, nn, nk, hv, L.q_norm, L.k_norm, TT, pp, eps, base,
                L.rope_ff ? L.rope_ff : L.q_norm, uff, qscale, qi_, qsc_, L.kq, L.ksc, L.vq, L.vsc, cap, rt);
-      int f16 = 1;  // (the f32 query and the float K / V rows for attn_fa_g too)
+      int f16 = L.i8 ? 1 : 3;  // (the f32 query and the float K / V rows for attn_fa_g; 2: no int8 copy)
       set_args(k, 22, f16, from(qf_, (size_t)r0 * nh * hd * 4), L.kc, L.vc);
       size_t gws[2] = {(size_t)(nh + (own_kv ? nkv : 0)) * 16, (size_t)Tq}, lws[2] = {16, 1};
       run("attn_prep", k, 2, gws, lws);
