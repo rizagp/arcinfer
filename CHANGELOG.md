@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-23: voice conversation in the web UI
+
+- **Talk** (web UI, Gemma 4 E4B / 12B): an always-open microphone with speech detection, each utterance sent as
+  audio to the model, the answer read aloud sentence by sentence while it streams (browser speech synthesis, voice
+  and speed settings), speaking interrupts the AI, a pause inside a sentence joins the two parts. Tested with
+  synthesized speech fed to the detector (E4B: speech starts 2.3 s after the user stops talking).
+
 ## 2026-10-22 (night): web search in the web UI
 
 - **Web search and page reading in the web UI** (the **Web** checkbox): the model gets `web_search` and

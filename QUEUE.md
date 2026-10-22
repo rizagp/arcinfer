@@ -15,7 +15,7 @@ Everything below this list is history plus the details of these items; a row not
 | 1 | Register spills left (drafter attn_prep_g / attn_split, 35B moe_gateup_q variants, attn_prep, gdn_conv) | F21.12 |
 | 2 | Flash Next to KL < 0.01 (now 0.048): measured, waits for the user's decision (accuracy vs ~half the prompt speed) | F21.13 |
 | ✅ 10-22 | Web search / fetch in the web UI (text chat; the async variant comes with voice, F24.5) | F22 |
-| 4 | Voice conversation in the web UI (24.1-24.3 with E4B first; 24.5 after F22) | F24 |
+| ✅ 10-23 | Voice conversation in the web UI (24.1-24.3 built with E4B; a real microphone test by the user pending; 24.4-24.7 open) | F24 |
 | 5 | Slim the code: audit the remaining ARC_* switches, split engine.h by model family | F26.1 / F26.3 |
 | 6 | Gemma 4 26B leftovers: vision encoder (11.8 s per image), auto context, prompt speed (two-pass prompt ~220 vs ~525 tok/s) | F21.5-21.9 |
 | 7 | Batch decode for Flash Next (E4B done) | F20.6 |
@@ -376,9 +376,9 @@ it streams, search results are summarised when they arrive, and the user can int
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 24.1 | Microphone in the web UI -> Gemma audio input | ⏳ | record in the browser, send as an audio part to Gemma E4B / 12B (their audio encoders run on the GPU; 7.2 s of speech transcribed word for word, 12 Oct); ~3-4 h with 24.2 |
-| 24.2 | Spoken answers | ⏳ | the browser's speech synthesis (Web Speech API; Windows has Indonesian voices) speaking the answer as it streams, sentence by sentence; later perhaps a local TTS model |
-| 24.3 | Conversation mode | ⏳ | listen -> answer -> speak -> listen again, end-of-speech detection, interrupting the AI by speaking |
+| 24.1 | Microphone in the web UI -> Gemma audio input | ✅ 2026-10-23 (built; tested with synthesized speech injected into the detector, **a real microphone test by the user is pending**) | **Talk** button: the microphone stays open, speech is found by loudness against the room's noise floor (start after 150 ms, 300 ms kept from before it, end after 1 s of quiet, 30 s at most), the utterance goes to the model as a 16 kHz WAV audio part; more speech within 4 s, before the AI said anything, joins the previous utterance (a pause in a sentence) |
+| 24.2 | Spoken answers | ✅ 2026-10-23 | the browser's speech synthesis speaks complete sentences while the answer streams (Markdown, links and code left out); **Voice** and **Speed** settings (Windows: Settings > Time & language > Speech adds an Indonesian voice; Edge has natural online voices); thinking is off while talking. E4B with its drafter: speech starts ~1.3 s after the end of speech is detected (2.3 s after the user stops talking) |
+| 24.3 | Conversation mode | ✅ 2026-10-23 | listen -> answer -> speak -> listen, all the time while Talk is on; speaking while the AI talks or thinks stops its voice and its answer (a louder voice is needed while it talks, against its own voice leaking into the microphone; the browser's echo cancellation is requested); Web search works in it (F22) |
 | 24.4 | Any chat model | ⏳ | speech to text with a separate ASR model (`unslothai/Qwen3-ASR-1.7B-GGUF` is in the HF cache; its architecture is not supported yet), then the text to any model (35B, 26B, ...); ~1-2 days |
 | 24.5 | Web search by voice | ⏳ | the tools exist (F22); add the F22.4 async protocol: the tool result comes back at once, the AI says it is searching, the results arrive as a notification and are spoken about |
 | 24.6 | Human-sounding replies | ⏳ | the user wants it to feel like talking to a person: a spoken-style system prompt (short replies, no Markdown, lists or code read aloud, numbers and abbreviations spoken naturally, asks back), quick acknowledgements ("hmm", "sebentar ya") while thinking or searching, a natural neural TTS voice for Indonesian (pick one that runs locally), fast turn-taking and interruption |

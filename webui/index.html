@@ -73,6 +73,8 @@ textarea { flex: 1; resize: vertical; min-height: 48px; max-height: 40vh; font: 
 .compacted summary { cursor: pointer; }
 .compacted div { white-space: pre-wrap; margin-top: 6px; }
 .msg.old { opacity: .55; }
+#vstat { max-width: 880px; margin: 0 auto 8px; font-size: 13px; color: var(--accent); }
+#tts { max-width: 220px; }
 #ctxuse { font-size: 12px; color: var(--muted); white-space: nowrap; }
 /* shown while a reply streams and the view is not at the bottom (following paused by scrolling up) */
 #latest { position: sticky; bottom: 12px; display: block; margin: 12px auto 0; background: var(--accent); color: var(--accent-text); border-color: var(--accent); border-radius: 16px; box-shadow: 0 2px 10px rgba(0,0,0,.25); }
@@ -92,15 +94,19 @@ textarea { flex: 1; resize: vertical; min-height: 48px; max-height: 40vh; font: 
 <main id="main"><div class="thread" id="thread"><div class="empty" id="empty">Ask anything, or drop source files and images here to include them in your message.</div></div><button id="latest" hidden title="Scroll to the newest output and keep following it">↓ Latest</button></main>
 <footer>
   <div class="attachments" id="atts"></div>
+  <div id="vstat" hidden></div>
   <div class="composer">
     <textarea id="input" placeholder="Message (Enter to send, Shift+Enter for a new line, paste or drop images)"></textarea>
     <button id="attach" title="Attach images (Qwen3.5 4B, Gemma 4 12B) or audio (Gemma 4 12B)">Media</button>
+    <button id="talk" title="Talk with the AI: the microphone stays on, you speak, it answers aloud; speak to interrupt it (Gemma 4 E4B / 12B, which hear audio)">Talk</button>
     <input type="file" id="file" accept="image/*,audio/*" multiple hidden>
     <button class="primary" id="send">Send</button>
     <button id="stop" disabled>Stop</button>
   </div>
   <div class="settings">
     <label><input type="checkbox" id="thinking" checked> Thinking</label>
+    <label title="The voice that reads answers aloud in Talk mode (Windows: Settings > Time & language > Speech adds voices; Edge has natural online voices)">Voice <select id="tts"></select></label>
+    <label>Speed <input type="number" id="ttsrate" step="0.1" min="0.5" max="2" value="1.1"></label>
     <label title="Let the model search the web and read pages (the server's web_search / web_fetch tools)"><input type="checkbox" id="web"> Web</label>
     <label>Effort <select id="effort"><option value="low">low</option><option value="medium">medium</option><option value="xhigh" selected>xhigh</option></select></label>
     <label>Temperature <input type="number" id="temp" step="0.1" min="0" max="2" value="0.7"></label>
@@ -119,6 +125,7 @@ function loadPrefs() {
     const p = JSON.parse(localStorage.getItem("arcinfer-prefs") || "{}");
     if (p.thinking !== undefined) $("thinking").checked = p.thinking;
     if (p.web !== undefined) $("web").checked = p.web;
+    if (p.ttsrate) $("ttsrate").value = p.ttsrate;
     if (p.effort) $("effort").value = p.effort;
     if (p.temp !== undefined) $("temp").value = p.temp;
     if (p.maxtok) $("maxtok").value = p.maxtok;
@@ -128,14 +135,16 @@ function loadPrefs() {
 function savePrefs() {
   try {
     localStorage.setItem("arcinfer-prefs", JSON.stringify({ thinking: $("thinking").checked, web: $("web").checked,
-      effort: $("effort").value, temp: $("temp").value, maxtok: $("maxtok").value, sys: $("sys").value }));
+      effort: $("effort").value, temp: $("temp").value, maxtok: $("maxtok").value, sys: $("sys").value,
+      tts: $("tts").value, ttsrate: $("ttsrate").value }));
   } catch (e) {}
 }
 loadPrefs();
-["thinking", "web", "effort", "temp", "maxtok", "sys"].forEach((id) => $(id).addEventListener("change", savePrefs));
+["thinking", "web", "effort", "temp", "maxtok", "sys", "tts", "ttsrate"].forEach((id) => $(id).addEventListener("change", savePrefs));
 
 fetch("/v1/models").then((r) => r.json()).then((j) => {
-  modelId = j.data[0].id; ctxLen = j.data[0].context_length || 0; $("model").textContent = modelId + " · ctx " + ctxLen; showUse();
+  modelId = j.data[0].id; ctxLen = j.data[0].context_length || 0;
+  fetch("/props").then((r) => r.json()).then((p) => { hasAudio = !!p.audio; }).catch(() => {}); $("model").textContent = modelId + " · ctx " + ctxLen; showUse();
 })
   .catch(() => { $("model").textContent = "server not reachable"; });
 
@@ -289,7 +298,7 @@ function compactable() {
   return history.length - 2 - lead;
 }
 function sysMessages() {
-  const s = [$("sys").value.trim(), $("web").checked ? WEB_SYSTEM() : ""].filter(Boolean).join("\n\n");
+  const s = [$("sys").value.trim(), $("web").checked ? WEB_SYSTEM() : "", voice.on ? VOICE_SYSTEM : ""].filter(Boolean).join("\n\n");
   return s ? [{ role: "system", content: s }] : [];
 }
 const textOf = (c) => typeof c === "string" ? c
@@ -429,11 +438,12 @@ async function streamTurn(el, st, onOverflow) {
   const thinkBox = el.querySelector(".think"), thinkText = thinkBox.querySelector("div"), content = el.querySelector(".content");
   const bar = el.querySelector(".progress > div"), stats = el.querySelector(".stats");
   stats.textContent = "processing prompt…";
+  const think = $("thinking").checked && !voice.on;  // (a spoken answer starts at once)
   let res;
   for (let attempt = 0; ; attempt++) {
     const body = { model: modelId, messages: [...sysMessages(), ...history], stream: true, stream_options: { include_usage: true },
       temperature: parseFloat($("temp").value), max_tokens: parseInt($("maxtok").value, 10),
-      chat_template_kwargs: { enable_thinking: $("thinking").checked }, reasoning_effort: $("thinking").checked ? $("effort").value : "none" };
+      chat_template_kwargs: { enable_thinking: think }, reasoning_effort: think ? $("effort").value : "none" };
     if ($("web").checked) body.tools = WEB_TOOLS;
     res = await fetch("/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: controller.signal });
     if (res.ok) break;
@@ -465,7 +475,7 @@ async function streamTurn(el, st, onOverflow) {
       if (!delta) continue;
       if ((delta.reasoning_content || delta.content || delta.tool_calls) && first) { first = false; el.querySelector(".progress")?.remove(); }
       if (delta.reasoning_content) { st.reasoning += delta.reasoning_content; thinkBox.hidden = false; thinkText.textContent = st.reasoning; }
-      if (delta.content) { st.answer += delta.content; content.innerHTML = markdown(st.answer); }
+      if (delta.content) { st.answer += delta.content; content.innerHTML = markdown(st.answer); if (voice.on) voice.feed(delta.content); }
       for (const tc of delta.tool_calls || []) {  // streamed in pieces: the arguments of a call are concatenated by index
         const k = tc.index ?? st.toolCalls.length;
         const c = st.toolCalls[k] ??= { id: "", type: "function", function: { name: "", arguments: "" } };
@@ -561,7 +571,172 @@ async function send() {
   $("send").disabled = false; $("stop").disabled = true;
   showUse();
   scroll();
+  if (voice.on) {
+    voice.flush();
+    if (!voice.talking && !voice.speaking) voice.status("listening…");
+  }
 }
+
+// ---- voice conversation (Talk): the microphone stays open; speech is detected by its loudness against the room's
+// noise floor, an utterance ends after VOICE_END_MS of quiet and goes to the model as audio (Gemma 4 E4B / 12B hear
+// it themselves, no separate speech recognition); the answer is spoken sentence by sentence while it streams, with
+// the browser's speech synthesis. Speaking while the AI talks or thinks interrupts it. All local: the audio goes only
+// to this server.
+const VOICE_SYSTEM = "This is a spoken conversation: the user talks to you through a microphone and hears your answer " +
+  "read aloud. Answer in the language the user speaks, briefly and naturally, the way a person talks: short sentences, " +
+  "no Markdown, no lists, tables or code unless asked, numbers and abbreviations written as they are spoken. If you did " +
+  "not catch what the user said, ask again.";
+const VOICE_END_MS = 1000, VOICE_MIN_MS = 300, VOICE_MAX_MS = 30000, VOICE_PRE_MS = 300;
+let hasAudio = false;
+const voice = {
+  on: false, stream: null, ctx: null, node: null, src: null,
+  floor: 0.003, speaking: false, heard: 0, quiet: 0, chunks: [], pre: [], rate: 48000,
+  pend: "", talking: false, spoke: false, last: null, merge: null,
+  status(t) { $("vstat").textContent = t; $("vstat").hidden = !t; },
+  async start() {
+    if (!hasAudio) { this.status("voice needs a model that hears audio (Gemma 4 E4B / 12B)"); return; }
+    try {
+      this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    } catch (e) { this.status("no microphone: " + (e.message || e)); return; }
+    this.ctx = new AudioContext();
+    this.rate = this.ctx.sampleRate;
+    this.src = this.ctx.createMediaStreamSource(this.stream);
+    this.node = this.ctx.createScriptProcessor(2048, 1, 1);
+    this.node.onaudioprocess = (e) => this.frame(new Float32Array(e.inputBuffer.getChannelData(0)));
+    this.src.connect(this.node);
+    this.node.connect(this.ctx.destination);  // (the processor runs only while connected; it outputs silence)
+    this.on = true;
+    $("talk").classList.add("primary"); $("talk").textContent = "Talking";
+    this.status("listening…");
+  },
+  stop() {
+    this.on = false;
+    this.node?.disconnect(); this.src?.disconnect(); this.ctx?.close();
+    this.stream?.getTracks().forEach((t) => t.stop());
+    this.node = this.src = this.ctx = this.stream = null;
+    this.hush();
+    this.speaking = false; this.chunks = []; this.pre = [];
+    $("talk").classList.remove("primary"); $("talk").textContent = "Talk";
+    this.status("");
+  },
+  // one frame of microphone samples: voice activity by RMS against an adaptive noise floor
+  frame(x) { this.take(x, this.rate); },
+  take(x, rate) {
+    let e = 0;
+    for (const v of x) e += v * v;
+    const rms = Math.sqrt(e / x.length), ms = 1000 * x.length / rate;
+    // (while the AI talks, its own voice may leak back in: a louder voice is needed to interrupt)
+    const thr = Math.max(0.01, this.floor * 3) * (this.talking ? 2.5 : 1);
+    const loud = rms > thr;
+    if (!this.speaking) {
+      if (!loud) this.floor = 0.95 * this.floor + 0.05 * Math.min(rms, 0.05);
+      this.pre.push(x);
+      while (this.pre.length * ms > VOICE_PRE_MS) this.pre.shift();
+      this.heard = loud ? this.heard + ms : 0;
+      if (this.heard >= 150) {  // speech started: keep the frames from just before it
+        this.speaking = true;
+        // (more of the same sentence after a pause, before the AI said anything: it goes with the previous
+        //  utterance, whose answer is dropped)
+        const prev = this.last;
+        this.merge = prev && !this.spoke && performance.now() - prev.at < 4000 ? prev : null;
+        this.chunks = this.merge ? [...prev.frames, ...this.pre] : [...this.pre];
+        this.pre = [];
+        this.quiet = 0;
+        this.interrupt();
+        this.status("hearing you…");
+      }
+      return;
+    }
+    this.chunks.push(x);
+    this.quiet = loud ? 0 : this.quiet + ms;
+    const len = this.chunks.length * ms;
+    if (this.quiet >= VOICE_END_MS || len >= VOICE_MAX_MS) {
+      this.speaking = false;
+      this.heard = 0;
+      const pcm = this.chunks;
+      this.chunks = [];
+      if (len - this.quiet >= VOICE_MIN_MS) this.utterance(pcm, rate);
+      else this.status("listening…");
+    }
+  },
+  // the user started talking: stop the AI's speech and its answer in progress
+  interrupt() {
+    this.hush();
+    if (controller) controller.abort();
+  },
+  async utterance(frames, rate) {
+    const at = performance.now();
+    const n = frames.reduce((a, f) => a + f.length, 0), pcm = new Float32Array(n);
+    let o = 0;
+    for (const f of frames) { pcm.set(f, o); o += f.length; }
+    this.status("thinking…");
+    pending.push({ kind: "audio", url: await pcmToWav16k(pcm, rate) });
+    for (let i = 0; i < 50 && controller; i++) await new Promise((r) => setTimeout(r, 20));  // (the stopped answer winding up)
+    if (this.merge) {  // the previous utterance and its answer leave the conversation
+      const i = history.indexOf(this.merge.msg);
+      if (i >= 0) history.splice(i);
+      for (let e = this.merge.el; e;) { const nx = e.nextElementSibling; e.remove(); e = nx; }
+      this.merge = null;
+    }
+    input.value = "";
+    this.spoke = false;
+    send();
+    const el = [...thread.querySelectorAll(".msg.user")].pop();
+    this.last = { frames, at, el, msg: el?._h };
+  },
+  // streamed answer text: complete sentences go to the speech queue
+  feed(t) {
+    this.pend += t;
+    const re = /[^.!?…\n]*[.!?…]+["')\]]*\s+|[^\n]*\n+/g;
+    let m, used = 0;
+    while ((m = re.exec(this.pend)) && m.index === used) { this.say(m[0]); used = re.lastIndex; }
+    this.pend = this.pend.slice(used);
+  },
+  flush() { if (this.pend.trim()) this.say(this.pend); this.pend = ""; },
+  say(text) {
+    const t = text.replace(/```[\s\S]*?```/g, " ").replace(/[*_`#>|~]+/g, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/https?:\/\/\S+/g, "").replace(/\s+/g, " ").trim();
+    if (!t || !/[\p{L}\p{N}]/u.test(t)) return;
+    const u = new SpeechSynthesisUtterance(t);
+    const v = speechSynthesis.getVoices().find((x) => x.voiceURI === $("tts").value);
+    if (v) { u.voice = v; u.lang = v.lang; }
+    u.rate = parseFloat($("ttsrate").value) || 1;
+    u.onstart = () => { this.talking = this.spoke = true; if (!this.speaking) this.status("speaking…"); };
+    u.onend = u.onerror = () => {
+      if (!speechSynthesis.pending && !speechSynthesis.speaking) {
+        this.talking = false;
+        if (this.on && !this.speaking && !controller) this.status("listening…");
+      }
+    };
+    speechSynthesis.speak(u);
+  },
+  hush() { this.pend = ""; speechSynthesis.cancel(); this.talking = false; },
+};
+// microphone samples (any rate) -> 16 kHz mono 16-bit WAV data URL
+function pcmToWav16k(pcm, rate) { return toWav16k(new Blob([encodeWav(pcm, rate)], { type: "audio/wav" })); }
+function encodeWav(pcm, rate) {
+  const out = new DataView(new ArrayBuffer(44 + pcm.length * 2));
+  const str = (o, t) => { for (let i = 0; i < t.length; i++) out.setUint8(o + i, t.charCodeAt(i)); };
+  str(0, "RIFF"); out.setUint32(4, 36 + pcm.length * 2, true); str(8, "WAVE"); str(12, "fmt ");
+  out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, 1, true); out.setUint32(24, rate, true);
+  out.setUint32(28, rate * 2, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true); str(36, "data");
+  out.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) out.setInt16(44 + 2 * i, Math.max(-1, Math.min(1, pcm[i])) * 32767, true);
+  return out.buffer;
+}
+// the speech synthesis voices, the saved one (else one for the browser's language) selected
+function fillVoices() {
+  const sel = $("tts"), vs = speechSynthesis.getVoices();
+  if (!vs.length) return;
+  let want = "";
+  try { want = JSON.parse(localStorage.getItem("arcinfer-prefs") || "{}").tts || ""; } catch (e) {}
+  const lang = (navigator.language || "en").slice(0, 2);
+  sel.replaceChildren(...vs.map((v) => { const o = document.createElement("option"); o.value = v.voiceURI; o.textContent = v.name + " (" + v.lang + ")"; return o; }));
+  sel.value = vs.some((v) => v.voiceURI === want) ? want
+    : (vs.find((v) => v.lang.toLowerCase().startsWith(lang) && /natural|online/i.test(v.name)) || vs.find((v) => v.lang.toLowerCase().startsWith(lang)) || vs[0]).voiceURI;
+}
+if (window.speechSynthesis) { fillVoices(); speechSynthesis.onvoiceschanged = fillVoices; }
+$("talk").addEventListener("click", () => voice.on ? voice.stop() : voice.start());
 
 // code blocks: Copy and Download (file name from the block's language, e.g. ```html -> code.html)
 const EXT = { html: "html", css: "css", js: "js", javascript: "js", ts: "ts", typescript: "ts", jsx: "jsx", tsx: "tsx",
