@@ -98,9 +98,9 @@ inline void put_kv(Writer& w, const std::string& key, uint32_t t, uint32_t et, c
   if (t != 9) return put_scalar(w, t, v);
   w.put<uint32_t>(et);
   size_t n = 0;
-  if (auto p = std::get_if<std::vector<int64_t>>(&v)) n = p->size();
-  else if (auto p = std::get_if<std::vector<double>>(&v)) n = p->size();
-  else if (auto p = std::get_if<std::vector<std::string>>(&v)) n = p->size();
+  if (auto pi = std::get_if<std::vector<int64_t>>(&v)) n = pi->size();
+  else if (auto pd = std::get_if<std::vector<double>>(&v)) n = pd->size();
+  else if (auto ps = std::get_if<std::vector<std::string>>(&v)) n = ps->size();
   w.put<uint64_t>(n);
   for (size_t i = 0; i < n; ++i) put_scalar(w, et, v, i);
 }

@@ -352,8 +352,8 @@ class HttpServer {
           handler(rq, rs);
         } catch (const std::exception& e) {
           std::string m;  // (the message as a JSON string)
-          for (const char* p = e.what(); *p; ++p) {
-            const unsigned char ch = (unsigned char)*p;
+          for (const char* ep = e.what(); *ep; ++ep) {
+            const unsigned char ch = (unsigned char)*ep;
             if (ch == '"' || ch == '\\') { m += '\\'; m += (char)ch; }
             else if (ch < 0x20) { char u[8]; snprintf(u, sizeof u, "\\u%04x", ch); m += u; }
             else m += (char)ch;

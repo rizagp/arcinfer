@@ -479,13 +479,13 @@ class Adapter {
       while (!text.empty() && (text.front() == '\n' || text.front() == ' ')) text.erase(0, 1);
       const std::string fmt = req_["response_format"].str("json");
       if (fmt == "text" || fmt == "srt" || fmt == "vtt") return rs_.send(200, "text/plain; charset=utf-8", text + "\n");
-      Json r = Json::object();
-      r.set("text", text);
+      Json out = Json::object();
+      out.set("text", text);
       if (fmt == "verbose_json") {
-        r.set("task", req_["task"].str("transcribe"));
-        r.set("language", req_["language"].str(""));
+        out.set("task", req_["task"].str("transcribe"));
+        out.set("language", req_["language"].str(""));
       }
-      return rs_.send(200, "application/json", r.dump());
+      return rs_.send(200, "application/json", out.dump());
     }
     rs_.send(200, "application/json", final_object(content, reasoning, calls, finish).dump());
   }

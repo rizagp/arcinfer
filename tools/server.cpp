@@ -162,15 +162,15 @@ class Server {
       jinja_ = std::make_unique<JinjaChat>(g.get_str("tokenizer.chat_template"), "<bos>", "<eos>");
       im_start_ = tok_.token("<|turn>");
       for (const char* s : {"<turn|>", "<eos>", "<|tool_response>"}) {
-        const int id = tok_.token(s);
-        if (id >= 0) stop_ids_.push_back(id);
+        const int tid = tok_.token(s);
+        if (tid >= 0) stop_ids_.push_back(tid);
       }
       think_close_ = "<channel|>";
     } else {
       im_start_ = tok_.token("<|im_start|>");
       for (const char* s : {"<|im_end|>", "<|endoftext|>"}) {
-        const int id = tok_.token(s);
-        if (id >= 0) stop_ids_.push_back(id);
+        const int tid = tok_.token(s);
+        if (tid >= 0) stop_ids_.push_back(tid);
       }
     }
     if (tok_.eos >= 0) stop_ids_.push_back(tok_.eos);

@@ -266,7 +266,7 @@ struct ExpertStore {
           uint8_t* dst = buf + (size_t)j * L.rec;
           for (int i = 0; i < 3; ++i) {
             const uint32_t ty = L.type[i];
-            const size_t bb = gguf_sb_bytes(ty), bp = raw_padded_sb_bytes(ty);
+            const size_t sbb = gguf_sb_bytes(ty), bp = raw_padded_sb_bytes(ty);
             const size_t nsb = L.part[i] / bp;  // superblocks of one expert matrix
             const int K = (int)t[i]->dims[0], rows = (int)m[i].rows;
             const size_t row1 = (size_t)(e0 + j) * m[i].per + m[i].row0;  // the expert's first row of this matrix
@@ -275,13 +275,13 @@ struct ExpertStore {
             if (K % 256) {  // rows padded to whole superblocks first
               int blk = 0, bytes = 0;
               ggml_block_info(ty, blk, bytes);
-              padded.resize(nsb * bb);
+              padded.resize(nsb * sbb);
               pad_small_block_rows(ty, t[i]->data + row1 * (K / blk) * bytes, rows, K, padded.data());
               src = padded.data();
             } else {
-              src = t[i]->data + row1 * (K / 256) * bb;
+              src = t[i]->data + row1 * (K / 256) * sbb;
             }
-            for (size_t s = 0; s < nsb; ++s) gpu_raw_sb(ty, src + s * bb, dst + s * bp);
+            for (size_t s = 0; s < nsb; ++s) gpu_raw_sb(ty, src + s * sbb, dst + s * bp);
             dst += L.part[i];
           }
         }

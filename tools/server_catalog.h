@@ -229,12 +229,12 @@ static std::vector<ModelInfo> scan_models() {
   // folders (a backup on another drive); the others get -2, -3, ...
   {
     std::error_code e2;
-    const std::string hub = lower_ascii(fs::weakly_canonical(hf_hub_dir(), e2).string());
+    const std::string hub_c = lower_ascii(fs::weakly_canonical(hf_hub_dir(), e2).string());
     std::vector<std::pair<int, ModelInfo>> ranked;  // (each path looked at once)
     for (ModelInfo& m : out) {
       std::error_code e3;
       const std::string p = lower_ascii(fs::weakly_canonical(m.path, e3).string());
-      const int r = m.name.rfind("arcinferzero/", 0) == 0 ? 0 : !hub.empty() && p.rfind(hub, 0) == 0 ? 1 : 2;
+      const int r = m.name.rfind("arcinferzero/", 0) == 0 ? 0 : !hub_c.empty() && p.rfind(hub_c, 0) == 0 ? 1 : 2;
       ranked.push_back({r, std::move(m)});
     }
     std::stable_sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.first < b.first; });

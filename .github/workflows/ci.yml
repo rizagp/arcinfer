@@ -1,0 +1,40 @@
+# Build check and the model-free unit tests on a GitHub Windows runner. No GPU there: OpenCL.dll and
+# ze_loader.dll are loaded at run time, so everything builds, and only the tests that need neither a GPU nor a
+# model run (the GPU and model checks stay in tests\run_tests.ps1 on a real Intel Arc machine).
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        shell: powershell
+        run: |
+          .\build.ps1 tools\clinfo.cpp zero\serverz.cpp zero\runz.cpp tools\ref_forward.cpp `
+            tests\test_http.cpp tests\test_api_compat.cpp tests\test_web_tools.cpp tests\test_xcache_pools.cpp `
+            tests\test_json.cpp tests\test_sampler.cpp tests\test_gguf_pack.cpp tests\test_quant_rows.cpp
+      - name: Unit tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tests = [ordered]@{
+            'test_http'         = 'test_http: all passed'
+            'test_api_compat'   = 'all passed'
+            'test_web_tools'    = 'test_web_tools: all passed'
+            'test_xcache_pools' = 'ALL OK'
+            'test_json'         = 'test_json: all passed'
+            'test_sampler'      = 'ALL OK'
+          }
+          $failed = 0
+          foreach ($t in $tests.Keys) {
+            $o = & ".\bin\$t.exe" 2>&1 | Out-String
+            if ($LASTEXITCODE -eq 0 -and $o.Contains($tests[$t])) { Write-Host "PASS $t" }
+            else { Write-Host "FAIL $t (exit $LASTEXITCODE)"; Write-Host $o; $failed++ }
+          }
+          if ($failed) { throw "$failed unit test(s) failed" }
