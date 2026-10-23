@@ -50,6 +50,10 @@
     static const bool fa_gh = !getenv("ARC_FA_GH") || atoi(getenv("ARC_FA_GH")) != 0;
     static const int fa_fs_env = getenv("ARC_FA_FS") ? std::max(1, atoi(getenv("ARC_FA_FS"))) : 0;
     static const int fa_gr_env = getenv("ARC_FA_GR") ? std::max(1, atoi(getenv("ARC_FA_GR"))) : 0;
+    // (ARC_FA_KB: blocks of 16 keys a sub-group scores per step, each q load used for all of them; default 2 for the
+    //  head-256 layers with at most 8 q rows per work-group: sliding attention, 11K-token prompt, 26B 8.7 -> 7.1 s,
+    //  12B 20.8 / 19.0 -> 15.7 s; E4B (16 rows) and the head-512 layers slower with 2 (26B global 15.3 -> 23.6 s))
+    static const int fa_kb_env = getenv("ARC_FA_KB") ? std::max(1, atoi(getenv("ARC_FA_KB"))) : 0;
     // (generation / verification, <= 8 rows: flash-decoding, the key range split over many sub-groups and combined;
     //  ARC_FA_SPLIT=0: one sub-group per (row, q-head pair) over every key, as the prompt kernel)
     static const bool fa_split = !getenv("ARC_FA_SPLIT") || atoi(getenv("ARC_FA_SPLIT")) != 0;
@@ -97,8 +101,10 @@
       if (fa_gh && n > 8 && hd >= 256 && hpg * (hd / fa_fs / 16) <= 64 && hd % (fa_fs * 16) == 0 &&
           (hd / fa_fs / 16 == 4 || hd / fa_fs / 16 == 8 || hd / fa_fs / 16 == 16)) {
         const int fa_gr = fa_gr_env ? fa_gr_env : std::clamp(64 / (hpg * (hd / fa_fs / 16)), 1, 4);
+        const int fa_kb = fa_kb_env ? fa_kb_env : hd < 512 && hpg * fa_gr <= 8 ? 2 : 1;
         cl_kernel k = kernel("ops", "-cl-intel-256-GRF-per-thread -DFA_GH -DHD=" + std::to_string(hd) + " -DHPG=" +
-                                        std::to_string(hpg) + " -DFS=" + std::to_string(fa_fs) + " -DGR=" + std::to_string(fa_gr),
+                                        std::to_string(hpg) + " -DFS=" + std::to_string(fa_fs) + " -DGR=" + std::to_string(fa_gr) +
+                                        " -DKB=" + std::to_string(fa_kb),
                              "attn_fa_gh");
         int cp = L.cap, nn = nh, nk = nkv, pp = p0, MM = n, w = win, nlo = L.swa ? nc_lo_ : -1, nhi = L.swa ? nc_hi_ : -1;
         set_args(k, 0, from(qf_, (size_t)r0 * nh * hd * 4), L.kc, L.vc, cp, nn, nk, pp, MM,

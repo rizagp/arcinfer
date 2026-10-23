@@ -1808,10 +1808,13 @@ __kernel void attn_fa_gc(__global const float* part, int nh, int pos0, int M_val
 #define GR 1  // query rows per work-group: each key / value row read once for GR rows x HPG heads
 #endif
 #define GRH (GR * HPG)
+#ifndef KB
+#define KB 1  // blocks of 16 keys per sub-group and step: each q load serves KB key rows
+#endif
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void attn_fa_gh(__global const float* qf, __global const KC_T* kc, __global const half* vc, int cap, int nh,
                          int nkv, int pos0, int M_valid, __global float* out, int win, int nc_lo, int nc_hi) {
-  __local float sc[FS][GRH][16];
+  __local float sc[FS * KB][GRH][16];
   const int lane = get_sub_group_local_id(), sgi = get_sub_group_id();
   const int g = get_group_id(1), m0 = get_group_id(2) * GR;
   // each row's key range [lo, hi]; the work-group walks the blocks of their union
@@ -1844,46 +1847,60 @@ __kernel void attn_fa_gh(__global const float* qf, __global const KC_T* kc, __gl
     o[h] = 0.0f;
   }
   const int b0 = lo / 16, b1 = hi / 16;
-  for (int bs = b0; bs <= b1; bs += FS) {
-    {  // scores of block bs + sgi
-      const int b = bs + sgi, p = b * 16 + lane;
-      const bool any = b <= b1 && p >= lo && p <= hi;
-      // (head 512: one modulo per block, cap a multiple of 16; 26B, 13,921 tokens: global attention 16.4 -> 15.3 s.
-      //  Head 256 keeps one per key: per block it was 5 % slower there; the same slots either way)
-#if HD >= 512
-      __global const KC_T* krow = kb + (size_t)((b * 16) % cap + lane) * HD;
-#else
-      __global const KC_T* krow = kb + (size_t)(p % cap) * HD;
-#endif
-      float s[GRH];
+  for (int bs = b0; bs <= b1; bs += FS * KB) {
+    {  // scores of blocks bs + KB sgi + kk
+      __global const KC_T* krow[KB];
+      bool any[KB];
+      float s[KB][GRH];
 #pragma unroll
-      for (int h = 0; h < GRH; ++h) s[h] = 0.0f;
+      for (int kk = 0; kk < KB; ++kk) {
+        const int b = bs + KB * sgi + kk, p = b * 16 + lane;
+        any[kk] = b <= b1 && p >= lo && p <= hi;
+        // (head 512: one modulo per block, cap a multiple of 16; 26B, 13,921 tokens: global attention 16.4 -> 15.3 s.
+        //  Head 256 keeps one per key: per block it was 5 % slower there; the same slots either way)
+#if HD >= 512
+        krow[kk] = kb + (size_t)((b * 16) % cap + lane) * HD;
+#else
+        krow[kk] = kb + (size_t)(p % cap) * HD;
+#endif
+#pragma unroll
+        for (int h = 0; h < GRH; ++h) s[kk][h] = 0.0f;
+      }
       for (int c = 0; c < HD / 16; ++c) {
-        const float16 kv = any ? vload16(0, krow + 16 * c) : (float16)0.0f;
+        float16 kv[KB];
+#pragma unroll
+        for (int kk = 0; kk < KB; ++kk) kv[kk] = any[kk] ? vload16(0, krow[kk] + 16 * c) : (float16)0.0f;
 #pragma unroll
         for (int h = 0; h < GRH; ++h) {
           const int r = h / HPG, m = min(m0 + r, M_valid - 1);
           const float qc = as_float(intel_sub_group_block_read((__global const uint*)(qf + ((size_t)m * nh + g * HPG + h % HPG) * HD + 16 * c)));
-          float a = s[h];
-          a = fma(BC16(qc, 0), kv.s0, a);  a = fma(BC16(qc, 1), kv.s1, a);
-          a = fma(BC16(qc, 2), kv.s2, a);  a = fma(BC16(qc, 3), kv.s3, a);
-          a = fma(BC16(qc, 4), kv.s4, a);  a = fma(BC16(qc, 5), kv.s5, a);
-          a = fma(BC16(qc, 6), kv.s6, a);  a = fma(BC16(qc, 7), kv.s7, a);
-          a = fma(BC16(qc, 8), kv.s8, a);  a = fma(BC16(qc, 9), kv.s9, a);
-          a = fma(BC16(qc, 10), kv.sa, a); a = fma(BC16(qc, 11), kv.sb, a);
-          a = fma(BC16(qc, 12), kv.sc, a); a = fma(BC16(qc, 13), kv.sd, a);
-          a = fma(BC16(qc, 14), kv.se, a); a = fma(BC16(qc, 15), kv.sf, a);
-          s[h] = a;
+#pragma unroll
+          for (int kk = 0; kk < KB; ++kk) {
+            float a = s[kk][h];
+            a = fma(BC16(qc, 0), kv[kk].s0, a);  a = fma(BC16(qc, 1), kv[kk].s1, a);
+            a = fma(BC16(qc, 2), kv[kk].s2, a);  a = fma(BC16(qc, 3), kv[kk].s3, a);
+            a = fma(BC16(qc, 4), kv[kk].s4, a);  a = fma(BC16(qc, 5), kv[kk].s5, a);
+            a = fma(BC16(qc, 6), kv[kk].s6, a);  a = fma(BC16(qc, 7), kv[kk].s7, a);
+            a = fma(BC16(qc, 8), kv[kk].s8, a);  a = fma(BC16(qc, 9), kv[kk].s9, a);
+            a = fma(BC16(qc, 10), kv[kk].sa, a); a = fma(BC16(qc, 11), kv[kk].sb, a);
+            a = fma(BC16(qc, 12), kv[kk].sc, a); a = fma(BC16(qc, 13), kv[kk].sd, a);
+            a = fma(BC16(qc, 14), kv[kk].se, a); a = fma(BC16(qc, 15), kv[kk].sf, a);
+            s[kk][h] = a;
+          }
         }
       }
 #pragma unroll
-      for (int h = 0; h < GRH; ++h) {
-        const int r = h / HPG;
-        sc[sgi][h][lane] = b <= b1 && p >= lor[r] && p <= hir[r] ? s[h] : -INFINITY;
+      for (int kk = 0; kk < KB; ++kk) {
+        const int b = bs + KB * sgi + kk, p = b * 16 + lane;
+#pragma unroll
+        for (int h = 0; h < GRH; ++h) {
+          const int r = h / HPG;
+          sc[KB * sgi + kk][h][lane] = b <= b1 && p >= lor[r] && p <= hir[r] ? s[kk][h] : -INFINITY;
+        }
       }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
-    for (int i = 0; i < FS && bs + i <= b1; ++i) {  // the blocks in order, as attn_fa_g takes them
+    for (int i = 0; i < FS * KB && bs + i <= b1; ++i) {  // the blocks in order, as attn_fa_g takes them
       const int t0 = (bs + i) * 16, p = t0 + lane, t0s = t0 % cap;  // (t0s + j: key t0 + j's slot)
       float pr[GRH];
 #pragma unroll
@@ -1942,6 +1959,7 @@ __kernel void attn_fa_gh(__global const float* qf, __global const KC_T* kc, __gl
 }
 #undef GD
 #undef GRH
+#undef KB
 #endif  // FA_GH
 
 // Single-token rows: x[m] = (x[m] + rmsnorm(t[m]) * w) * s (as add_rmsnorm), then the next GEMV input from the new
