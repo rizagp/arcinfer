@@ -207,8 +207,9 @@ class GgufFile {
     }
   }
 
+  // (bounds as `n > size_ - pos_`: pos_ never passes size_, so no sum can wrap around on a hostile file)
   template <typename T> T rd() {
-    if (pos_ + sizeof(T) > size_) throw std::runtime_error("gguf: truncated");
+    if (sizeof(T) > size_ - pos_) throw std::runtime_error("gguf: truncated");
     T v;
     memcpy(&v, base_ + pos_, sizeof(T));
     pos_ += sizeof(T);
@@ -216,7 +217,7 @@ class GgufFile {
   }
   std::string rd_str() {
     uint64_t n = rd<uint64_t>();
-    if (pos_ + n > size_) throw std::runtime_error("gguf: truncated string");
+    if (n > size_ - pos_) throw std::runtime_error("gguf: truncated string");
     std::string s((const char*)base_ + pos_, n);
     pos_ += n;
     return s;
@@ -239,6 +240,7 @@ class GgufFile {
       case 9: {
         uint32_t et = rd<uint32_t>();
         uint64_t n = rd<uint64_t>();
+        if (n > size_ - pos_) throw std::runtime_error("gguf: truncated array");  // (every element takes a byte or more)
         if (et == 8) { std::vector<std::string> v(n); for (auto& s : v) s = rd_str(); return v; }
         if (et == 6 || et == 12) { std::vector<double> v(n); for (auto& x : v) x = et == 6 ? rd<float>() : rd<double>(); return v; }
         std::vector<int64_t> v(n);
@@ -253,11 +255,17 @@ class GgufFile {
     uint32_t ver = rd<uint32_t>();
     if (ver < 2) throw std::runtime_error("unsupported GGUF version");
     uint64_t nt = rd<uint64_t>(), nkv = rd<uint64_t>();
+    // (a key-value pair takes 12 bytes or more, a tensor entry 24: counts the file cannot hold are refused before
+    //  anything is allocated for them)
+    if (nkv > (size_ - pos_) / 12 || nt > (size_ - pos_) / 24) throw std::runtime_error("gguf: bad tensor / key count");
     for (uint64_t i = 0; i < nkv; ++i) {
       std::string key = rd_str();
       uint32_t t = rd<uint32_t>();
       uint32_t et = 0;
-      if (t == 9) memcpy(&et, base_ + pos_, 4);  // (an array: its element type comes next)
+      if (t == 9) {  // (an array: its element type comes next)
+        if (size_ - pos_ < 4) throw std::runtime_error("gguf: truncated");
+        memcpy(&et, base_ + pos_, 4);
+      }
       kv[key] = rd_value(t);
       kv_types[key] = {t, et};
       kv_order.push_back(key);
@@ -268,21 +276,33 @@ class GgufFile {
       auto& t = tensors[i];
       t.name = rd_str();
       uint32_t nd = rd<uint32_t>();
+      if (nd > 8) throw std::runtime_error("gguf: bad dimension count for " + t.name);
       t.dims.resize(nd);
       for (auto& d : t.dims) d = rd<uint64_t>();
       t.type = rd<uint32_t>();
       offs[i] = rd<uint64_t>();
       tensor_index[t.name] = i;
     }
-    uint64_t align = (uint64_t)get_int("general.alignment", 32);
-    uint64_t data_start = (pos_ + align - 1) / align * align;
+    const int64_t a64 = get_int("general.alignment", 32);
+    if (a64 <= 0 || a64 > (1 << 20) || (a64 & (a64 - 1))) throw std::runtime_error("gguf: bad alignment");
+    const uint64_t align = (uint64_t)a64;
+    const uint64_t data_start = (pos_ + align - 1) / align * align;
+    if (data_start > size_) throw std::runtime_error("gguf: truncated");
     for (uint64_t i = 0; i < nt; ++i) {
       auto& t = tensors[i];
-      int blk, bytes;
+      int blk = 0, bytes = 0;
       ggml_block_info(t.type, blk, bytes);
-      t.nbytes = t.nelements() / blk * bytes;
+      uint64_t ne = 1;
+      for (uint64_t d : t.dims) {
+        if (d && ne > UINT64_MAX / d) throw std::runtime_error("gguf: bad shape for " + t.name);
+        ne *= d;
+      }
+      if (blk <= 0 || bytes <= 0 || ne / (uint64_t)blk > UINT64_MAX / (uint64_t)bytes)
+        throw std::runtime_error("gguf: bad tensor type for " + t.name);
+      t.nbytes = ne / blk * bytes;
+      if (offs[i] > size_ - data_start || t.nbytes > size_ - data_start - offs[i])
+        throw std::runtime_error("gguf: tensor out of range " + t.name);
       t.data = base_ + data_start + offs[i];
-      if (data_start + offs[i] + t.nbytes > size_) throw std::runtime_error("gguf: tensor out of range " + t.name);
     }
   }
 };

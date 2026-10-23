@@ -134,7 +134,9 @@ inline Page get(std::string url, size_t max_bytes = 4u << 20, int timeout_ms = 1
   Page p;
   const auto t0 = std::chrono::steady_clock::now();
   HINTERNET ses = WinHttpOpen(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36",
-                              WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+                              // (direct connections only: through a proxy the address checked below would be the
+                              //  proxy's, and the proxy could fetch a local address)
+                              WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
   if (!ses) { p.error = "WinHttpOpen failed"; return p; }
   DWORD dec = WINHTTP_DECOMPRESSION_FLAG_ALL;
   WinHttpSetOption(ses, WINHTTP_OPTION_DECOMPRESSION, &dec, sizeof dec);

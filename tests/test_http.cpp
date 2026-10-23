@@ -49,9 +49,14 @@ int main(int argc, char** argv) {
       {"request line without spaces", "GARBAGE\r\n\r\n", "400"},
       {"handler throws a non-exception", "GET /throw HTTP/1.1\r\n\r\n", ""},
       {"Origin of a local page", "GET /x HTTP/1.1\r\nOrigin: http://localhost:3000\r\n\r\n", "200 OK"},
-      {"Origin = Host (own web UI)", "GET /x HTTP/1.1\r\nHost: 192.168.1.5:8090\r\nOrigin: http://192.168.1.5:8090\r\n\r\n", "200 OK"},
+      {"Host 127.0.0.1 with its own Origin", "GET /x HTTP/1.1\r\nHost: 127.0.0.1:8093\r\nOrigin: http://127.0.0.1:8093\r\n\r\n", "200 OK"},
+      {"Host localhost", "GET /x HTTP/1.1\r\nHost: localhost:8093\r\n\r\n", "200 OK"},
+      {"Host [::1]", "GET /x HTTP/1.1\r\nHost: [::1]:8093\r\n\r\n", "200 OK"},
+      // (DNS rebinding: another site's name resolving to 127.0.0.1, sent as Host and Origin, on a loopback server)
+      {"rebinding: Origin = Host of another name", "GET /x HTTP/1.1\r\nHost: evil.example:8093\r\nOrigin: http://evil.example:8093\r\n\r\n", "403"},
+      {"Host of another machine on a loopback server", "GET /x HTTP/1.1\r\nHost: 192.168.1.5:8090\r\nOrigin: http://192.168.1.5:8090\r\n\r\n", "403"},
       {"Origin of another site", "GET /x HTTP/1.1\r\nOrigin: https://evil.example\r\n\r\n", "403"},
-      {"Origin != Host", "GET /x HTTP/1.1\r\nHost: 192.168.1.5:8090\r\nOrigin: http://192.168.1.6:8090\r\n\r\n", "403"},
+      {"Origin != Host", "GET /x HTTP/1.1\r\nHost: 127.0.0.1:8093\r\nOrigin: http://127.0.0.2:8093\r\n\r\n", "403"},
       {"still alive", "GET /x HTTP/1.1\r\n\r\n", "200 OK"},
   };
   int fails = 0;

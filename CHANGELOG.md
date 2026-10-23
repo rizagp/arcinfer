@@ -2,6 +2,17 @@
 
 ## 2026-10-23: Xe2 / Xe3 GPUs (no 8-lane sub-groups); Unsloth Studio statistics and context
 
+- **Fixes from DeepSeek's second audit** (static reading, confirmed in the code):
+  - a model switch whose model and then the previous model both fail to load no longer leaves the server to crash on
+    the next request: it answers 503 until a request names a model that loads;
+  - a stop string is cut where it matched at the end of the text, not at an earlier copy of it;
+  - a server bound to this machine (the default) answers only requests whose Host names it (localhost, 127.x,
+    [::1]): a web page under a name that resolves to 127.0.0.1 can no longer drive it (DNS rebinding);
+  - web fetch connects directly, never through a system proxy (through one the checked address was the proxy's);
+  - GGUF files: every bound checked without overflow, counts and alignment validated, tensor ranges checked before
+    use; invalid head counts / layer counts refused before they divide anything;
+  - images larger than 16384 pixels a side or 64 megapixels refused before decoding; `/tokenize` answers 400 to
+    invalid JSON; `--ctx`, `--chunk` and the cache sizes clamped (no nan / inf).
 - **Flash Next prompt**: the per-tile expert gate / up kernel reads the activation scales token by token (a small
   transpose first): gate / up 8.1 -> 7.0 s per 4K prompt, bit-identical.
 - **XMX safer** (from DeepSeek's audit): a GPU module or kernel that cannot be created during the start-up check no

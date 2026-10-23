@@ -87,6 +87,9 @@ inline ImageRGB decode(const std::vector<uint8_t>& bytes) {
   if (SUCCEEDED(hr)) hr = cv->Initialize(fr, GUID_WICPixelFormat24bppRGB, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
   UINT w = 0, h = 0;
   if (SUCCEEDED(hr)) hr = cv->GetSize(&w, &h);
+  // (a small file can declare a huge picture: more than 16384 pixels a side or 64 megapixels is refused before the
+  //  pixels are allocated; the encoders take ~1-4 megapixels anyway)
+  if (SUCCEEDED(hr) && (w > 16384 || h > 16384 || (uint64_t)w * h > (64ull << 20))) hr = E_FAIL;
   if (SUCCEEDED(hr)) {
     im.w = (int)w;
     im.h = (int)h;

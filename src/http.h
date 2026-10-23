@@ -121,6 +121,7 @@ class HttpServer {
   // host may be an IPv4 / IPv6 literal or a name (localhost). An unknown host is an error: it must never silently
   // become INADDR_ANY (that exposed the server on every interface when --host was mistyped).
   bool listen(const std::string& host, int port) {
+    loopback_ = local_host(host);
     WSADATA w;
     if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return false;
     addrinfo hints{};
@@ -170,6 +171,7 @@ class HttpServer {
  private:
   SOCKET ls_ = INVALID_SOCKET;
   std::atomic<int> conns_{0};
+  bool loopback_ = false;  // (bound to this machine only: requests must name it in Host, see serve)
   static constexpr int kMaxConns = 64;
   static constexpr size_t kMaxBody = 256u << 20;  // (base64 images and audio; larger requests get 413)
   static constexpr size_t kMaxHead = 1u << 20;    // request line + headers; a body may follow
@@ -183,6 +185,14 @@ class HttpServer {
     const size_t e = o.find_first_of(":/");
     const std::string h = o.substr(0, e);
     return h == "127.0.0.1" || h == "localhost" || h == "[::1]" || h == "::1";
+  }
+  // a Host header (or a bind address) naming this machine: localhost, 127.x.x.x or [::1], with or without a port
+  static bool local_host(const std::string& host) {
+    std::string h = host;
+    std::transform(h.begin(), h.end(), h.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    if (!h.empty() && h[0] == '[') h = h.substr(0, h.find(']') + 1);
+    else if (std::count(h.begin(), h.end(), ':') == 1) h = h.substr(0, h.find(':'));
+    return h == "localhost" || h.rfind("127.", 0) == 0 || h == "[::1]" || h == "::1";
   }
   // the page the server itself served (the web UI opened from another device with --host): Origin = http://<Host>
   static bool same_origin(const std::string& origin, const std::string& host) {
@@ -254,7 +264,7 @@ class HttpServer {
         const size_t colon = hl.find(':');
         if (colon != std::string::npos) {
           std::string k = hl.substr(0, colon), v = hl.substr(colon + 1);
-          std::transform(k.begin(), k.end(), k.begin(), ::tolower);
+          std::transform(k.begin(), k.end(), k.begin(), [](unsigned char ch) { return (char)std::tolower(ch); });
           v.erase(0, v.find_first_not_of(' '));
           rq.headers[k] = v;
         }
@@ -310,6 +320,10 @@ class HttpServer {
       // A browser page from another site must not drive this no-authentication server (CORS alone would still let a
       // simple POST through). Local pages and the server's own web UI keep working; command-line clients send no Origin.
       const std::string origin = rq.header("origin");
+      // (DNS rebinding: a page of another site whose name resolves to 127.0.0.1 sends its own name as Host and as
+      //  Origin; a server bound to this machine only answers requests that name this machine)
+      if (loopback_ && !rq.header("host").empty() && !local_host(rq.header("host")))
+        return reply_close(c, 403, "this server answers requests for localhost / 127.0.0.1 only");
       if (!origin.empty() && !local_origin(origin) && !same_origin(origin, rq.header("host")))
         return reply_close(c, 403, "cross-origin requests are only allowed from this machine");
       rs.cors_origin = origin;

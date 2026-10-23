@@ -19,6 +19,7 @@ Everything below this list is history plus the details of these items; a row not
 | 8 | Gemma 4 26B vision encoder (11.8 s per image; needs an image-accuracy reference) | F21.7 |
 | 9 | Batch decode for Flash Next (E4B done) | F20.6 |
 | 10 | Copy 4B / E4B / 12B from D: to C: (the user decides) | F20.8 |
+| 12 | DeepSeek audit 2 (static, 2026-10-23 evening): done the switch crash, stop strings, DNS rebinding (Host check), web fetch without proxy, GGUF / hparams bounds, image size cap, /tokenize 400, CLI clamps. Left: GPU errors end the process (CL_CHECK / ZE_CHECK exit), HTTP limits (64 connections x 256 MB, a thread each, no total deadline), audio length cap and a byte cap for the media cache, JSON number parsing (from_chars, duplicate keys), wide-character paths, /W4 /permissive- in build.ps1 (the audit built it with minor warnings), test_quant_rows not run and test_gguf_pack not built by setup, no CI | |
 | 11 | DeepSeek audit 2026-10-23 (docs/deepseek-audit-2026-10-23.md, local): done XMX check (F29.5) and web fetch (rebinding, ranges, body limit); its "sliding attention regression" not reproduced (13,921 tokens: attn_fa_gh 11.05 s against 15.85 s for attn_fa_g, TTFT 71.1 vs 84.7 s; its 22.2 s was a slow run). Left: 12B prompt speed measured again (73.7 tok/s at 4K in one run), ring modulo per 16-key block, docs/f21-q2-speed.md marked historical, server.cpp split | |
 | later | Remote access through Cloudflare (Origin https, login) | F27 |
 | low | Jump-forward in tool calls | F25.2 |

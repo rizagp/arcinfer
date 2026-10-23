@@ -1595,6 +1595,10 @@ class Engine {
       for (int i = 0; i < 4 && i < (int)rs->size(); ++i) hp.rope_sect[i] = (int)(*rs)[i];
     if (hp.rope_sect[0] + hp.rope_sect[1] + hp.rope_sect[2] + hp.rope_sect[3] == 0) hp.rope_sect[0] = hp.n_rot / 2;
     tok_embd_ = &f_.get("token_embd.weight");
+    // (a broken or hostile file: divisors and shapes checked before anything uses them)
+    if (tok_embd_->dims.size() < 2 || tok_embd_->dims[1] <= 0 || hp.n_head <= 0 || hp.n_head_kv <= 0 ||
+        hp.full_attn_interval <= 0 || hp.n_layer <= 0)
+      throw std::runtime_error("invalid model dimensions in the GGUF");
     hp.n_vocab = (int)tok_embd_->dims[1];
     if (hp.head_dim != 256 || hp.ssm_d_state != 128 || hp.conv_k != 4 || hp.n_rot > 64 || hp.n_embd % 256 ||
         hp.n_ff % 256 || hp.ssm_d_inner % 256 || hp.n_head % hp.n_head_kv)
@@ -1629,6 +1633,7 @@ class Engine {
     hp.n_layer_kv = hp.n_layer - (int)f_.get_int(a + ".attention.shared_kv_layers", 0);
     if (hp.n_ple != 0 && hp.n_ple != 256) throw std::runtime_error("unsupported Gemma 4 per-layer embedding size");
     if (hp.n_layer_kv < 2) throw std::runtime_error("unsupported Gemma 4 KV sharing");
+    if (hp.n_layer <= 0) throw std::runtime_error("invalid Gemma 4 shape in the GGUF");
     hp.swa.assign(hp.n_layer, 0);
     hp.kv_heads.assign(hp.n_layer, 0);
     const auto* pat = f_.get_ints(a + ".attention.sliding_window_pattern");
@@ -1641,10 +1646,11 @@ class Engine {
     if (hp.n_embd <= 0 || hp.n_head <= 0 || hp.n_head_kv <= 0 || hp.n_layer_kv > hp.n_layer)
       throw std::runtime_error("invalid Gemma 4 shape in the GGUF");
     tok_embd_ = &f_.get("token_embd.weight");
+    if (tok_embd_->dims.size() < 2 || tok_embd_->dims[1] <= 0) throw std::runtime_error("invalid Gemma 4 shape in the GGUF");
     hp.n_vocab = (int)tok_embd_->dims[1];
     for (int il = 0; il < hp.n_layer; ++il) {
       const int hd = hp.swa[il] ? hp.hd_swa : hp.hd_full;
-      if ((hd != 256 && hd != 512) || hp.n_head % hp.kv_heads[il])
+      if ((hd != 256 && hd != 512) || hp.kv_heads[il] <= 0 || hp.n_head <= 0 || hp.n_head % hp.kv_heads[il])
         throw std::runtime_error("unsupported Gemma 4 attention shape");
     }
     // (26B-A4B: the dense FFN is 2112 wide; its gate / up get zero rows and its down rows zero columns up to whole

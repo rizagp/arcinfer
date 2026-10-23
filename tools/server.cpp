@@ -252,7 +252,8 @@ class Server {
       return rs.send(200, "application/json", r.dump());
     }
     if (rq.path == "/tokenize" && rq.method == "POST") {
-      const Json b = Json::parse(rq.body);
+      Json b;
+      if (!Json::try_parse(rq.body, b)) return rs.send(400, "application/json", "{\"error\":{\"message\":\"invalid JSON body\"}}");
       Json ids = Json::array();
       for (int id : tok_.encode(b["content"].str(), true)) ids.push(id);
       Json r = Json::object();
@@ -1694,11 +1695,16 @@ class Server {
           call_from = std::string::npos;
       }
       bool hit_stop = false;
-      for (const auto& s : stops)
-        if (!s.empty() && text.size() >= s.size() && text.find(s, text.size() > s.size() + 16 ? text.size() - s.size() - 16 : 0) != std::string::npos) {
-          text = text.substr(0, text.find(s));
+      for (const auto& s : stops) {
+        // (cut at the match in the recent tail, not at an earlier copy of the stop string in the text)
+        const size_t at = s.empty() || text.size() < s.size()
+                              ? std::string::npos
+                              : text.find(s, text.size() > s.size() + 16 ? text.size() - s.size() - 16 : 0);
+        if (at != std::string::npos) {
+          text = text.substr(0, at);
           hit_stop = true;
         }
+      }
       if (stream) {
         parser.update(text, false, dr, dc);
         if (!send_delta(dr, dc) || !send_tool_deltas(before_stops(text), false)) gone = true;
@@ -2743,7 +2749,7 @@ int main(int argc, char** argv) {
     try {
       size_t used = 0;
       const double v = std::stod(s, &used);
-      if (used == s.size()) return v;
+      if (used == s.size() && std::isfinite(v)) return v;  // (nan / inf refused: they become sizes and limits)
     } catch (...) {}
     throw std::runtime_error(opt + ": expected a number (got \"" + s + "\")");
   };
@@ -2757,9 +2763,9 @@ int main(int argc, char** argv) {
     else if (a == "--ctx" || a == "-c") {
       const std::string v = next();
       if (v == "auto") so.ctx_auto = true;
-      else so.eo.ctx = to_int(a, v);
+      else so.eo.ctx = std::clamp(to_int(a, v), 0, 1 << 22);  // (4M tokens: past it the sizes overflow int)
     }
-    else if (a == "--chunk") so.eo.chunk = to_int(a, next());
+    else if (a == "--chunk") so.eo.chunk = std::clamp(to_int(a, next()), 0, 65536);
     else if (a == "--expert-cache-gb") so.eo.expert_cache_gb = to_double(a, next());
     else if (a == "--expert-cache-pct") so.eo.expert_cache_pct = to_double(a, next());
     else if (a == "--no-stream") so.eo.stream_experts = false;
@@ -2801,13 +2807,13 @@ int main(int argc, char** argv) {
     else if (a == "--think-budget") so.think_budget = to_int(a, next());
     else if (a == "--preserve-thinking") so.preserve_thinking = true;
     else if (a == "--kernels") so.eo.kernel_dir = next();
-    else if (a == "--session-cache-gb") so.sess_gb = to_double(a, next());
+    else if (a == "--session-cache-gb") so.sess_gb = std::clamp(to_double(a, next()), 0.0, 4096.0);
     else if (a == "--session-dir") so.sess_dir = next();
     else if (a == "--slots") so.eo.slots = std::clamp(to_int(a, next()), 1, 8);
     else if (a == "--no-swap") swap = false;
     else if (a == "--no-web-tools") web_tools = false;
     else if (a == "--no-prefix-cache") so.prefix_cache = false;
-    else if (a == "--prefix-cache-gb") so.prefix_gb = to_double(a, next());
+    else if (a == "--prefix-cache-gb") so.prefix_gb = std::clamp(to_double(a, next()), 0.0, 4096.0);
     else if (a == "--help" || a == "-h") help = true;
     else throw std::runtime_error("unknown option " + a + " (--help lists them; --q2 and --v4 were removed 2026-10-22)");
   }
@@ -2922,6 +2928,14 @@ int main(int argc, char** argv) {
 
   HttpServer http;
   std::function<void(const HttpRequest&, HttpResponse&)> dispatch;
+  // (no model loaded: a model switch failed and loading the previous model again did too; caller holds swap_mu)
+  auto no_model = [&](HttpResponse& rs) {
+    Json err = Json::object(), r = Json::object();
+    err.set("message", "no model is loaded (the last model switch failed); ask for a model or restart the server");
+    err.set("type", "server_error");
+    r.set("error", err);
+    return rs.send(503, "application/json", r.dump());
+  };
   http.handler = [&](const HttpRequest& rq, HttpResponse& rs) {
     // the web UI's tools (tools/web_tools.h): no model involved, so they answer while a model loads or generates
     if (rq.method == "POST" && (rq.path == "/v1/tools/web_search" || rq.path == "/v1/tools/web_fetch")) {
@@ -2998,6 +3012,7 @@ int main(int argc, char** argv) {
       }
       if (chat_body["model"].str().empty()) {
         std::shared_lock<std::shared_mutex> lk(swap_mu);
+        if (!cur) return no_model(rs);
         chat_body.set("model", cur->alias);
       }
       HttpRequest rq2 = rq;
@@ -3013,6 +3028,7 @@ int main(int argc, char** argv) {
       if (!Json::try_parse(rq.body, in) || !apic::to_chat("anthropic", in, chat_body, e))
         return rs.send(400, "application/json", "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad request\"}}");
       std::shared_lock<std::shared_mutex> lk(swap_mu);
+      if (!cur) return no_model(rs);
       Json r = Json::object();
       r.set("input_tokens", cur->srv->count_tokens(chat_body));
       return rs.send(200, "application/json", r.dump());
@@ -3051,6 +3067,7 @@ int main(int argc, char** argv) {
       chat_body.set("model", req["model"].str());
       if (chat_body["model"].str().empty()) {
         std::shared_lock<std::shared_mutex> lk(swap_mu);
+        if (!cur) return no_model(rs);
         chat_body.set("model", cur->alias);
       }
       chat_body.set("messages", msgs);
@@ -3106,7 +3123,8 @@ int main(int argc, char** argv) {
     if (rq.path == "/api/version") return rs.send(200, "application/json", "{\"version\":\"0.9.0\"}");
     if (rq.path == "/api/tags" || rq.path == "/api/ps" || (rq.path == "/api/show" && rq.method == "POST")) {
       std::shared_lock<std::shared_mutex> lk(swap_mu);
-      auto entry = [&](const ModelInfo* m, const std::string& alias, bool vision, bool mtp) {
+      if (!cur) return no_model(rs);
+      auto entry =[&](const ModelInfo* m, const std::string& alias, bool vision, bool mtp) {
         Json d = Json::object();
         d.set("format", "gguf");
         d.set("family", m ? m->arch : std::string());
@@ -3167,6 +3185,17 @@ int main(int argc, char** argv) {
     dispatch(rq, rs);
   };
   dispatch = [&](const HttpRequest& rq, HttpResponse& rs) {
+    const bool chat_post = rq.method == "POST" && rq.path == "/v1/chat/completions";
+    {  // (no model: a switch failed and so did loading the previous model again; a chat request naming one loads it)
+      std::shared_lock<std::shared_mutex> lk(swap_mu);
+      if (!cur && !(swap && chat_post)) {
+        Json err = Json::object(), r = Json::object();
+        err.set("message", "no model is loaded (the last model switch failed); ask for a model or restart the server");
+        err.set("type", "server_error");
+        r.set("error", err);
+        return rs.send(503, "application/json", r.dump());
+      }
+    }
     if (swap && (rq.path == "/v1/models" || rq.path == "/models")) {  // every model a request can switch to
       std::shared_lock<std::shared_mutex> lk(swap_mu);
       Json d = Json::array();
@@ -3224,16 +3253,16 @@ int main(int argc, char** argv) {
       bool other = false;
       {
         std::shared_lock<std::shared_mutex> lk(swap_mu);
-        other = !want.empty() && want != cur->alias;
+        other = !want.empty() && (!cur || want != cur->alias);
       }
       if (other) {
         std::unique_lock<std::shared_mutex> lk(swap_mu);
-        const ModelInfo* m = want != cur->alias ? find_model(want) : nullptr;
-        if (m && m->alias != cur->alias) {
-          const std::string prev_path = cur->path, prev_alias = cur->alias;
+        const ModelInfo* m = !cur || want != cur->alias ? find_model(want) : nullptr;
+        if (m && (!cur || m->alias != cur->alias)) {
+          const std::string prev_path = cur ? cur->path : std::string(), prev_alias = cur ? cur->alias : std::string();
           const auto t0 = clk::now();
           fprintf(stderr, "switching model: %s -> %s\n", prev_alias.c_str(), m->alias.c_str());
-          if (cur->srv) cur->srv->save_held();  // (switching back later loads the conversation instead of redoing it)
+          if (cur && cur->srv) cur->srv->save_held();  // (switching back later loads the conversation instead of redoing it)
           cur.reset();  // frees the GPU memory first
           ServeOpts s2 = so;
           s2.ctx_auto = true;  // the --ctx given at start was for the first model
@@ -3263,9 +3292,16 @@ int main(int argc, char** argv) {
                 s3.mmproj = pm.vision ? "" : "-";
               }
             if (!s3.eo.mtp || !same_file(prev_path, model)) s3.eo.dflash.clear();
-            cur = load_model(prev_path, prev_alias, s3);
+            std::string also;
+            try {  // (that failing too leaves no model: requests get 503 until one names a model that loads)
+              if (!prev_path.empty()) cur = load_model(prev_path, prev_alias, s3);
+            } catch (const std::exception& e2) {
+              cur.reset();
+              also = std::string("; loading ") + prev_alias + " again failed too: " + e2.what();
+              fprintf(stderr, "could not load %s again: %s; no model loaded\n", prev_alias.c_str(), e2.what());
+            }
             Json err = Json::object(), r = Json::object();
-            err.set("message", std::string("could not load model ") + want + ": " + e.what());
+            err.set("message", std::string("could not load model ") + want + ": " + e.what() + also);
             err.set("type", "server_error");
             r.set("error", err);
             return rs.send(500, "application/json", r.dump());
@@ -3274,6 +3310,13 @@ int main(int argc, char** argv) {
       }
     }
     std::shared_lock<std::shared_mutex> lk(swap_mu);
+    if (!cur) {  // (a chat request naming no model, or an unknown one, while none is loaded)
+      Json err = Json::object(), r = Json::object();
+      err.set("message", "no model is loaded (the last model switch failed); ask for a model or restart the server");
+      err.set("type", "server_error");
+      r.set("error", err);
+      return rs.send(503, "application/json", r.dump());
+    }
     cur->srv->handle(rq, rs);
   };
   if (!http.listen(host, port)) {
