@@ -50,8 +50,9 @@ one command. Built and tuned on a Core Ultra 5 125H with 32 GB of RAM: no discre
 Gemma rows measured on 2026-10-23 with the laptop on a cooling pad (two runs each within 1-2 %; a hot laptop
 measured up to 25 % slower on long prompts).
 KL is the divergence of the next-token distributions from the f32 reference (0 = identical); run-to-run int8
-rounding noise is ~0.0003. The limit kept for every model and change is KL < 0.015 (Flash Next is still above it:
-QUEUE.md F21.13). How each number was measured, every change with its before and after, and the
+rounding noise is ~0.0003. The limit kept for every model and change is KL < 0.015; Flash Next, whose IQ3_S / IQ2_S weights
+already cost far more than that against the original model, has a relative limit instead: the engine's error at most
+about a third of the quantization's (QUEUE.md F21.13). How each number was measured, every change with its before and after, and the
 consistency checks (56 of 56 regression runs bit-identical): **[docs/before-after.md](docs/before-after.md)**.
 
 ### The engine
