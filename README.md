@@ -35,9 +35,9 @@ one command. Built and tuned on a Core Ultra 5 125H with 32 GB of RAM: no discre
 | Qwen3.8 27B IQ3_S (dense) | ~135 tok/s | 4.9 tok/s; code 18.1 with DFlash2 + MTP | 0.0003-0.0004 |
 | Qwen3.8 Flash Next IQ3_S (512 experts on the SSD) | 160-190 tok/s (4K), 163 (32K), 123 (125K) | 6-7 tok/s | 0.020 (3.5K prompt); 0.048 on README text (was 0.065) |
 | Qwen3.5 4B | 911 tok/s (2K) | 17.6 tok/s | 0.0021 |
-| Gemma 4 E4B (Google QAT) | 463 tok/s (14K) | 32 tok/s with its drafter | 0.00075 |
-| Gemma 4 12B (Google QAT) | 102 tok/s (14K) | 19.0 tok/s with its drafter | 0.0002 (two-pass int8 activations) |
-| Gemma 4 26B-A4B (Google QAT, MoE, experts on the SSD) | 254 tok/s (4K), 189 (14K) | ~25 tok/s with its drafter; 13 after a 14K prompt without | 0.0042 (two-pass int8 activations) |
+| Gemma 4 E4B (Google QAT) | 570 tok/s (4K), 430-456 (14K) | 32 tok/s with its drafter | 0.00075 |
+| Gemma 4 12B (Google QAT) | 137 tok/s (4K), 102 (14K) | 19.0 tok/s with its drafter | 0.0002 (two-pass int8 activations) |
+| Gemma 4 26B-A4B (Google QAT, MoE, experts on the SSD) | 252 tok/s (4K), 210 (14K) | ~25 tok/s with its drafter; 14 after a 14K prompt without | 0.0042 (two-pass int8 activations) |
 
 | vs llama.cpp (same file, same laptop) | arcinfer | llama.cpp Vulkan | llama.cpp SYCL |
 |---|---|---|---|
@@ -47,6 +47,8 @@ one command. Built and tuned on a Core Ultra 5 125H with 32 GB of RAM: no discre
 | Qwen3.8 27B, generation after that prompt | **3.7 tok/s** | 2.1 | 1.1 |
 | Perplexity, Qwen3.5 4B / 9B / 27B (lower is better) | **6.056 / 5.417 / 4.274** | 6.141 / 5.499 / 4.311 | 6.138 / 5.497 / 4.310 |
 
+Gemma rows measured on 2026-10-23 with the laptop on a cooling pad (two runs each within 1-2 %; a hot laptop
+measured up to 25 % slower on long prompts).
 KL is the divergence of the next-token distributions from the f32 reference (0 = identical); run-to-run int8
 rounding noise is ~0.0003. The limit kept for every model and change is KL < 0.015 (Flash Next is still above it:
 QUEUE.md F21.13). How each number was measured, every change with its before and after, and the
