@@ -17,7 +17,6 @@ Everything below this list is history plus the details of these items; a row not
 | 4 | Xe2 / Xe3: XMX prompt GEMMs built and self-checked, waiting for gee456's report (issue #1); then moe_rg / attention on XMX, setup's Visual Studio paths | F29 |
 | 5 | Voice: a real microphone test by the user; ASR for any model, human-sounding replies, omni models | F24.4-24.7 |
 | 6 | Flint (unsloth/flint-GGUF on D:): a newer llama.cpp for reference tokens (a download: ask), tokenizer, reference, engine | F28 |
-| 7 | Slim the code: split engine.h by model family | F26.3 |
 | 8 | Gemma 4 26B vision encoder (11.8 s per image; needs an image-accuracy reference) | F21.7 |
 | 9 | Batch decode for Flash Next (E4B done) | F20.6 |
 | 10 | Copy 4B / E4B / 12B from D: to C: (the user decides) | F20.8 |
@@ -425,7 +424,7 @@ byte before / after; a step that changes one bit is dropped), `tests/run_tests.p
 |---|---|---|---|
 | 26.1 | Audit the 102 `ARC_*` switches | ✅ 2026-10-22: 98 -> 74 (lost experiments / A/B paths removed, -810 lines: *_OLD, KV4, XGUESS, SPLITK, DRAFT_VOCAB, GDN1, NO_QZ / NO_RGU / NO_MOE_SHARE / HC_INT8 / CHUNK_MAJOR, W8_MINS / W8_SB / NO_W8_VB / NO_W8_SL, then VIT_ATT8 with its int8 vision attention kernels and the unused vit_attn8 (-337 kernel lines), NO_GEMV_V / NO_MOE_RG / NO_MOE_GEMM; every step bit-identical on Qwen 35B / 27B, Gemma 26B, Flash Next). Kept: tuning knobs, diagnostics, ARC_HC_F32 (F21.13) | per switch: a default kept (fold it in), a diagnostic worth keeping (profiles, KL, `ARC_ZE_KPROPS`, fault injection), or a lost experiment (e.g. `ARC_GEMMA_VROWS`, `ARC_XSTAGE`, old `ARC_HC_F32` modes) to delete with its code path; the list goes into docs |
 | 26.2 | Drop the inaccurate Gemma path | ✅ 2026-10-22 (-227 lines: Gemma int8 attention, gemv_glu + aqB_ buffers, GELU epilogues, ARC_Q2_FUSE / _ATT / _KF32) | once the two-pass mode is the only Gemma mode: remove the single-pass Gemma code except what the drafter still runs (its int8 KV, `q2_off_`) |
-| 26.3 | Split `zero/engine.h` by model family | ⏳ | Qwen dense / DeltaNet, Gemma 4, Flash Next, MoE streaming, drafters (MTP, DFlash2, Gemma assistant) in their own headers; no change in behaviour, easier to read and audit |
+| 26.3 | Split `zero/engine.h` by model family | ✅ 2026-10-23 | moved unchanged into parts included inside class Engine where they were cut: engine_gemma.h (198 lines), engine_flashnext.h (171), engine_qwen.h (273), engine_moe.h (368), engine_drafters.h (710); engine.h 5,258 -> 3,543 lines (setup, memory, slots, sessions, dispatch). The 5,180 non-blank lines are the same text; logits bit-identical |
 | 26.5 | Gemma two-pass memory: V from the int8 cache instead of f16 rows | ⚠️ dropped 2026-10-22 | measured: KL 26B 0.0044 -> 0.084 (prompt), 0.080 (decode), top-1 435 / 480: Gemma 4's V has a few very large dims that swamp a 64-dim scale block. K f16 was 0.018 earlier. Next for memory: the int8 K / V copy only for the layers the drafter reads (no accuracy change) |
 | 26.4 | Leftovers of F18.14 worth doing | 💡 | kernel lane guards + a non-multiple-dims test; Ctrl+C session save (RAII writers) |
 

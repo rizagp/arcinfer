@@ -605,7 +605,9 @@ src/        shared code: quants.h (GGUF decoding/repacking), tokenizer.h, chat.h
             chat_jinja.h (Gemma 4, minja templates), image.h + vision_gemma4.h (image input), audio.h +
             audio_gemma4.h (audio input), json.h, http.h, gguf.h, clrt.h / cl_min.h (OpenCL loader for clinfo, the
             benchmarks and tests)
-zero/       the engine: engine.h (forward passes on Level Zero), clrt.h (OpenCL-style calls on Level Zero), xcache.h +
+zero/       the engine: engine.h (setup, memory, slots, sessions, dispatch) with its parts engine_gemma.h,
+            engine_qwen.h, engine_flashnext.h, engine_moe.h, engine_drafters.h (forward passes by model family,
+            included inside class Engine), clrt.h (OpenCL-style calls on Level Zero), xcache.h +
             expert_store.h (MoE experts on the SSD, GPU cache), serverz.cpp / runz.cpp, vision_gemma4v.h /
             vision_qwen3vl.h / audio_gemma4a.h (encoders), kernels/ (gemm.cl DP4a GEMM, decode.cl JIT decode + GEMV,
             ops.cl norms / DeltaNet / attention / quantization, moe.cl expert routing and GEMMs), grf_probe.cpp
