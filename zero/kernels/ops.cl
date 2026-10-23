@@ -1645,6 +1645,8 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
                         int nkv, int pos0, int M_valid, __global float* out, int win, int nc_lo, int nc_hi
 #ifdef FA_SPLIT
                         , int sgrid, __global float* part
+#elif defined(SINKS)
+                        , __global const float* sinks
 #endif
                         ) {
   const int lane = get_sub_group_local_id();
@@ -1759,7 +1761,15 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
   if (m >= M_valid) return;
 #pragma unroll
   for (int r = 0; r < GQ; ++r) {
+#if defined(SINKS) && !defined(FA_SPLIT)  // (Flint: one learned logit per q head in the softmax's sum, no value;
+    //  the output and sum rescaled to max(mx, sink). The splits' sinks are added in attn_fa_gc)
+    const float sk = sinks[hg * GQ + r], mn = fmax(mx[r], sk), cs = exp(mx[r] - mn);
+    const float L = sub_group_reduce_add(lp[r]) * cs + exp(sk - mn);
+#pragma unroll
+    for (int c = 0; c < FDC; ++c) o[r][c] *= cs;
+#else
     const float L = sub_group_reduce_add(lp[r]);
+#endif
 #ifdef FA_SPLIT  // (this split's unnormalized output, then its sum and max)
     __global float* pp = part + (((size_t)m * nh + hg * GQ + r) * FA_SMAX + sp) * (HD + 2);
 #pragma unroll
@@ -1778,21 +1788,33 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
 // The FA_SPLIT partials of each (row, head) combined: out = sum_s o_s e^(mx_s - mx) / sum_s L_s e^(mx_s - mx), the
 // splits in order. grid (HD, nh, M).
 __kernel void attn_fa_gc(__global const float* part, int nh, int pos0, int M_valid, __global float* out, int win,
-                         int nc_lo, int nc_hi) {
+                         int nc_lo, int nc_hi
+#ifdef SINKS
+                         , __global const float* sinks
+#endif
+                         ) {
   const int d = get_global_id(0), h = get_global_id(1), m = get_global_id(2);
   if (m >= M_valid) return;
   const int pos = pos0 + m;
   const int lo = win > 0 ? max(0, pos - win + 1) : 0;
   const int hi = (pos >= nc_lo && pos <= nc_hi) ? nc_hi : pos;
   __global const float* pp = part + ((size_t)m * nh + h) * FA_SMAX * (HD + 2);
+#ifdef SINKS  // (the head's sink logit: in the max and in the sum, first)
+  float mx = sinks[h];
+#else
   float mx = -INFINITY;
+#endif
   for (int sp = 0; sp < FA_SMAX; ++sp) {
     int b0, b1;
     fa_split_range(lo, hi, sp, &b0, &b1);
     if (b0 >= b1) break;
     mx = fmax(mx, pp[(size_t)sp * (HD + 2) + HD + 1]);
   }
+#ifdef SINKS
+  float num = 0.0f, den = exp(sinks[h] - mx);
+#else
   float num = 0.0f, den = 0.0f;
+#endif
   for (int sp = 0; sp < FA_SMAX; ++sp) {
     int b0, b1;
     fa_split_range(lo, hi, sp, &b0, &b1);
@@ -1830,7 +1852,11 @@ __kernel void attn_fa_gc(__global const float* part, int nh, int pos0, int M_val
 #endif
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void attn_fa_gh(__global const float* qf, __global const KC_T* kc, __global const half* vc, int cap, int nh,
-                         int nkv, int pos0, int M_valid, __global float* out, int win, int nc_lo, int nc_hi) {
+                         int nkv, int pos0, int M_valid, __global float* out, int win, int nc_lo, int nc_hi
+#ifdef SINKS
+                         , __global const float* sinks
+#endif
+                         ) {
   __local float sc[FS * KB][GRH][16];
   const int lane = get_sub_group_local_id(), sgi = get_sub_group_id();
   const int g = get_group_id(1), m0 = get_group_id(2) * GR;
@@ -1961,7 +1987,13 @@ __kernel void attn_fa_gh(__global const float* qf, __global const KC_T* kc, __gl
 #pragma unroll
   for (int h = 0; h < GRH; ++h) {
     const int m = m0 + h / HPG;
+#ifdef SINKS  // (as attn_fa_g)
+    const float sk = sinks[g * HPG + h % HPG], mn = fmax(mx[h], sk), cs = exp(mx[h] - mn);
+    const float L = sub_group_reduce_add(lp[h]) * cs + exp(sk - mn);
+    o[h] *= cs;
+#else
     const float L = sub_group_reduce_add(lp[h]);
+#endif
     if (m < M_valid) {
       __global float* op = out + ((size_t)m * nh + g * HPG + h % HPG) * HD + sgi * (HD / FS) + GD * lane;
 #if GD == 4

@@ -1,7 +1,7 @@
 // Checks the float attention kernels of zero/kernels/ops.cl (Gemma 4, and head 128 for Flint) against a CPU
 // computation in double on random data: attn_fa_g (one row per sub-group, -DFA_ROWS, -DFA_SPLIT + attn_fa_gc) and
 // attn_fa_gh (KB 1 and 2), heads of 128 and 256, global (causal) and sliding with a ring cache smaller than the
-// positions. The forms that are meant to be bit-identical (attn_fa_g, FA_ROWS, attn_fa_gh) are compared byte for
+// positions, with and without attention sinks (-DSINKS, Flint). The forms that are meant to be bit-identical (attn_fa_g, FA_ROWS, attn_fa_gh) are compared byte for
 // byte too. usage: test_fa [kernel_file]
 #include "../src/clrt.h"
 #include "../src/quants.h"
@@ -29,13 +29,16 @@ int main(int argc, char** argv) {
   int fails = 0;
   const int nh = 8, nkv = 2, hpg = nh / nkv, M = 16;
   for (int HD : {128, 256}) {
-    for (int win : {0, 100}) {
+    for (int win : {0, 100})
+    for (int sink : {0, 1}) {
       // keys of positions 0 .. pos0 + M - 1 written at slot p % cap; the rows are pos0 .. pos0 + M - 1
       const int pos0 = 290, cap = win ? 128 : 320, P = pos0 + M;
       std::vector<float> q((size_t)M * nh * HD), kf((size_t)P * nkv * HD), vf((size_t)P * nkv * HD);
       for (auto& x : q) x = nd(rng) * 0.25f;
       for (auto& x : kf) x = nd(rng) * 0.25f;
       for (auto& x : vf) x = nd(rng);
+      std::vector<float> sinks(nh);
+      for (auto& x : sinks) x = nd(rng) * 2.0f;
       std::vector<float> kc((size_t)nkv * cap * HD, 0.0f);
       std::vector<uint16_t> vc((size_t)nkv * cap * HD, 0);
       for (int p = 0; p < P; ++p)
@@ -60,7 +63,8 @@ int main(int argc, char** argv) {
             s[p - lo] = a;
             mx = std::max(mx, a);
           }
-          double z = 0;
+          if (sink) mx = std::max(mx, (double)sinks[h]);
+          double z = sink ? std::exp(sinks[h] - mx) : 0.0;
           for (double& x : s) z += x = std::exp(x - mx);
           for (int p = lo; p <= pos; ++p)
             for (int d = 0; d < HD; ++d)
@@ -71,6 +75,7 @@ int main(int argc, char** argv) {
       cl_mem bk = cl.buffer(CL_MEM_READ_ONLY, kc.size() * 4, kc.data());
       cl_mem bv = cl.buffer(CL_MEM_READ_ONLY, vc.size() * 2, vc.data());
       cl_mem bo = cl.buffer(CL_MEM_READ_WRITE, (size_t)M * nh * HD * 4);
+      cl_mem bs = cl.buffer(CL_MEM_READ_ONLY, sinks.size() * 4, sinks.data());
       int cp = cap, nn = nh, nk = nkv, pp = pos0, w = win, nlo = -1, nhi = -1;
       auto result = [&](int rows) {
         std::vector<float> o((size_t)rows * nh * HD);
@@ -82,11 +87,11 @@ int main(int argc, char** argv) {
         const double er = rel_err(o, r);
         const bool bit = !same || (same->size() >= o.size() && !memcmp(same->data(), o.data(), o.size() * 4));
         const bool ok = er < 2e-6 && bit;
-        printf("HD %3d %-8s %-22s rel err %.2e%s %s\n", HD, win ? "sliding" : "global", name, er,
+        printf("HD %3d %-8s%s %-22s rel err %.2e%s %s\n", HD, win ? "sliding" : "global", sink ? " sinks" : "      ", name, er,
                same ? (bit ? ", bit-identical" : ", NOT bit-identical") : "", ok ? "OK" : "FAIL");
         fails += !ok;
       };
-      const std::string base = "-cl-std=CL3.0 -cl-mad-enable -DHD=" + std::to_string(HD);
+      const std::string base = "-cl-std=CL3.0 -cl-mad-enable -DHD=" + std::to_string(HD) + (sink ? " -DSINKS" : "");
       // attn_fa_g, one row per sub-group
       const int gq = 2;
       std::vector<float> o_g;
@@ -94,6 +99,7 @@ int main(int argc, char** argv) {
         cl_kernel k = cl.kernel(cl.build(src, base + " -DFA_G -DGQ=" + std::to_string(gq)), "attn_fa_g");
         int MM = M;
         set_args(k, 0, bq, bk, bv, cp, nn, nk, pp, MM, bo, w, nlo, nhi);
+        if (sink) set_args(k, 12, bs);
         size_t gws[3] = {16, (size_t)(nh / gq), (size_t)M}, lws[3] = {16, 1, 1};
         CL_CHECK(clEnqueueNDRangeKernel(cl.queue, k, 3, nullptr, gws, lws, 0, nullptr, nullptr));
         o_g = result(M);
@@ -103,6 +109,7 @@ int main(int argc, char** argv) {
         cl_kernel k = cl.kernel(cl.build(src, base + " -DFA_G -DGQ=" + std::to_string(gq) + " -DFA_ROWS=4"), "attn_fa_g");
         int MM = M;
         set_args(k, 0, bq, bk, bv, cp, nn, nk, pp, MM, bo, w, nlo, nhi);
+        if (sink) set_args(k, 12, bs);
         size_t gws[3] = {16, (size_t)(nh / gq), (size_t)M}, lws[3] = {16, 1, 4};
         CL_CHECK(clEnqueueNDRangeKernel(cl.queue, k, 3, nullptr, gws, lws, 0, nullptr, nullptr));
         check("attn_fa_g FA_ROWS 4", result(M), &o_g);
@@ -119,6 +126,7 @@ int main(int argc, char** argv) {
         CL_CHECK(clEnqueueNDRangeKernel(cl.queue, k, 3, nullptr, gws, lws, 0, nullptr, nullptr));
         cl_kernel kc2 = cl.kernel(pr, "attn_fa_gc");
         set_args(kc2, 0, part, nn, pp, MM, bo, w, nlo, nhi);
+        if (sink) set_args(kc2, 8, bs);
         size_t g2[3] = {(size_t)HD, (size_t)nh, (size_t)n};
         CL_CHECK(clEnqueueNDRangeKernel(cl.queue, kc2, 3, nullptr, g2, nullptr, 0, nullptr, nullptr));
         check("attn_fa_g FA_SPLIT", result(n), nullptr);
@@ -131,6 +139,7 @@ int main(int argc, char** argv) {
                                 "attn_fa_gh");
         int MM = M;
         set_args(k, 0, bq, bk, bv, cp, nn, nk, pp, MM, bo, w, nlo, nhi);
+        if (sink) set_args(k, 12, bs);
         size_t gws[3] = {(size_t)16 * fs, (size_t)nkv, (size_t)(M + gr - 1) / gr}, lws[3] = {(size_t)16 * fs, 1, 1};
         CL_CHECK(clEnqueueNDRangeKernel(cl.queue, k, 3, nullptr, gws, lws, 0, nullptr, nullptr));
         check(kb == 1 ? "attn_fa_gh KB 1" : "attn_fa_gh KB 2", result(M), &o_g);
