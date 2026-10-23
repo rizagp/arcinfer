@@ -1,7 +1,8 @@
 // Web search and page fetch for the web UI's tools (server endpoints /v1/tools/web_search and /v1/tools/web_fetch):
 // WinHTTP requests, result parsing for Brave Search (Bing when Brave gives nothing) and HTML to plain text. Only
 // public http(s) addresses are fetched: every host, redirects included, is resolved first and loopback, private,
-// link-local and multicast addresses are refused, so a model cannot reach the machine or the local network.
+// link-local, multicast and reserved addresses are refused, and the address the connection went to is checked again
+// before anything is read, so a model cannot reach the machine or the local network.
 #pragma once
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -9,6 +10,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <winhttp.h>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -61,32 +63,35 @@ inline std::string url_encode(const std::string& s) {
 }
 
 // A public address: not loopback, private (RFC 1918, carrier-grade NAT, IPv6 unique local), link-local, multicast,
-// unspecified or reserved
+// unspecified, reserved or for documentation / benchmarks; an IPv6 address that carries an IPv4 one (mapped,
+// compatible, NAT64, 6to4) is judged by that IPv4 address, Teredo is refused
+inline bool public_v4(const uint8_t* b) {
+  if (b[0] == 0 || b[0] == 10 || b[0] == 127 || b[0] >= 224) return false;  // (224+: multicast and 240/4 reserved)
+  if (b[0] == 169 && b[1] == 254) return false;
+  if (b[0] == 172 && (b[1] & 0xf0) == 16) return false;
+  if (b[0] == 192 && b[1] == 168) return false;
+  if (b[0] == 100 && (b[1] & 0xc0) == 64) return false;
+  if (b[0] == 192 && b[1] == 0 && (b[2] == 0 || b[2] == 2)) return false;  // 192.0.0.0/24, 192.0.2.0/24
+  if (b[0] == 198 && (b[1] & 0xfe) == 18) return false;                      // 198.18.0.0/15
+  if (b[0] == 198 && b[1] == 51 && b[2] == 100) return false;                // 198.51.100.0/24
+  if (b[0] == 203 && b[1] == 0 && b[2] == 113) return false;                 // 203.0.113.0/24
+  return true;
+}
 inline bool public_addr(const sockaddr* sa) {
-  if (sa->sa_family == AF_INET) {
-    const uint8_t* b = (const uint8_t*)&((const sockaddr_in*)sa)->sin_addr;
-    if (b[0] == 0 || b[0] == 10 || b[0] == 127 || b[0] >= 224) return false;
-    if (b[0] == 169 && b[1] == 254) return false;
-    if (b[0] == 172 && (b[1] & 0xf0) == 16) return false;
-    if (b[0] == 192 && b[1] == 168) return false;
-    if (b[0] == 100 && (b[1] & 0xc0) == 64) return false;
-    return true;
-  }
+  if (sa->sa_family == AF_INET) return public_v4((const uint8_t*)&((const sockaddr_in*)sa)->sin_addr);
   if (sa->sa_family == AF_INET6) {
     const uint8_t* b = ((const sockaddr_in6*)sa)->sin6_addr.s6_addr;
     static const uint8_t v4map[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
-    if (!memcmp(b, v4map, 12)) {
-      sockaddr_in a{};
-      a.sin_family = AF_INET;
-      memcpy(&a.sin_addr, b + 12, 4);
-      return public_addr((const sockaddr*)&a);
-    }
-    bool zero = true;
-    for (int i = 0; i < 15; ++i) zero = zero && !b[i];
-    if (zero) return false;                            // :: and ::1
-    if ((b[0] & 0xfe) == 0xfc) return false;           // fc00::/7
-    if (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) return false;  // fe80::/10
-    if (b[0] == 0xff) return false;                    // multicast
+    static const uint8_t v4compat[12] = {};
+    static const uint8_t nat64[12] = {0, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0};
+    if (!memcmp(b, v4map, 12) || !memcmp(b, v4compat, 12) || !memcmp(b, nat64, 12)) return public_v4(b + 12);  // (:: and ::1 too)
+    if (b[0] == 0x20 && b[1] == 0x02) return public_v4(b + 2);                 // 6to4 2002::/16
+    if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0 && b[3] == 0) return false;  // Teredo 2001::/32
+    if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8) return false;  // documentation 2001:db8::/32
+    if (b[0] == 0x01 && b[1] == 0 && !b[2] && !b[3] && !b[4] && !b[5] && !b[6] && !b[7]) return false;  // discard 100::/64
+    if ((b[0] & 0xfe) == 0xfc) return false;                   // fc00::/7
+    if (b[0] == 0xfe && (b[1] & 0x80) == 0x80) return false;  // fe80::/10 link-local, fec0::/10 site-local
+    if (b[0] == 0xff) return false;                            // multicast
     return true;
   }
   return false;
@@ -167,6 +172,15 @@ inline Page get(std::string url, size_t max_bytes = 4u << 20, int timeout_ms = 1
     const std::wstring hdr = widen("Accept: text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8\r\nAccept-Language: " + accept_lang + "\r\n");
     bool ok = WinHttpSendRequest(rq, hdr.c_str(), (DWORD)hdr.size(), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(rq, nullptr);
     if (ok) {
+      // the address WinHTTP actually connected to (it resolves the host again: a name that answered with a public
+      // address for check_host and a local one now, DNS rebinding, gets nothing back)
+      WINHTTP_CONNECTION_INFO ci{};
+      DWORD cn = sizeof ci;
+      if (!WinHttpQueryOption(rq, WINHTTP_OPTION_CONNECTION_INFO, &ci, &cn) || !public_addr((const sockaddr*)&ci.RemoteAddress)) {
+        p.error = "local or private address refused (" + h8 + ", at connection)";
+        WinHttpCloseHandle(rq), WinHttpCloseHandle(con);
+        break;
+      }
       DWORD st = 0, sz = sizeof st;
       WinHttpQueryHeaders(rq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &st, &sz, WINHTTP_NO_HEADER_INDEX);
       p.status = (int)st;
@@ -186,6 +200,7 @@ inline Page get(std::string url, size_t max_bytes = 4u << 20, int timeout_ms = 1
         DWORD avail = 0;
         if (!WinHttpQueryDataAvailable(rq, &avail) || !avail) break;
         const size_t old = p.body.size();
+        avail = (DWORD)std::min<size_t>(avail, max_bytes - old);  // (old < max_bytes: the loop stops at max_bytes)
         p.body.resize(old + avail);
         DWORD got = 0;
         if (!WinHttpReadData(rq, p.body.data() + old, avail, &got)) { p.body.resize(old); break; }

@@ -544,7 +544,9 @@ into groups of 8 layers.
   slab stays in L3. The fused SwiGLU (silu(gate)·up) is applied in the epilogue of the up-projection GEMM. On GPUs
   with XMX and 16-lane DPAS (Xe2 / Xe3) the same GEMM takes its int8 dot products from DPAS instructions (8 tokens
   x 16 columns x 32 values each); integer sums are exact, so the results are the DP4a kernel's bit for bit, and the
-  engine checks that on random data of every weight layout at start before it uses them (`ARC_NO_XMX=1`: off).
+  engine checks that at start before it uses them: every weight layout on random data, launched as the engine
+  launches them (split-K, accumulate, fused SwiGLU, the mixture-of-experts tiles); a kernel that fails to build or
+  differs keeps DP4a (`ARC_NO_XMX=1`: off).
 - **Just-in-time weight decoding.** Every GGUF quant type is decoded into W8 on the GPU: IQ/K types without
   block minimums losslessly; types with minimums (Q2_K/Q4_K/Q5_K) are requantized to signed int8 with a per-16/32
   scale (adds ~1/10 of their own quantization noise; +0.05% perplexity on Qwen3.5-4B), which lets them use the

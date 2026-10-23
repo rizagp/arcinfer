@@ -1756,69 +1756,121 @@ class Engine {
     static const int tm = getenv("ARC_GEMM_TM") ? std::max(1, atoi(getenv("ARC_GEMM_TM"))) : 16;
     return tm;
   }
+  static const char* xmx_defs() {
+    static const int t = getenv("ARC_XMX_TRY") ? atoi(getenv("ARC_XMX_TRY")) : 0;
+    return t == 2 ? " -DTP=8" : t == 3 ? " -DTP=8 -DDBG_NOBCAST" : " -DXMX -DTP=8";
+  }
   cl_kernel gemm_kernel(int qtype, bool act32, int xmx = -1) {
     return kernel("gemm", "-cl-intel-256-GRF-per-thread -DQTYPE=" + std::to_string(qtype) + (act32 ? " -DACT32" : "") +
                               (gemm_tm() != 16 ? " -DTM=" + std::to_string(gemm_tm()) : std::string()) + gemm_extra() +
-                              ((xmx < 0 ? xmx_ : xmx != 0) ? " -DXMX -DTP=8" : ""),
+                              ((xmx < 0 ? xmx_ : xmx != 0) ? xmx_defs() : ""),
+                  "gemm");
+  }
+  // the mixture-of-experts prompt GEMM over slot tiles (gemm.cl MOE_TILES; W8 layouts 100..103, per-32 scales)
+  cl_kernel moe_gemm_kernel(int qtype, int xmx = -1) {
+    return kernel("gemm", "-cl-intel-256-GRF-per-thread -DACT32 -DMOE_TILES -DQTYPE=" + std::to_string(qtype) +
+                              ((xmx < 0 ? xmx_ : xmx != 0) ? xmx_defs() : ""),
                   "gemm");
   }
   // XMX for the prompt GEMMs (gemm.cl -DXMX): taken only when the GPU offers 16-lane DPAS (ClRt::xmx) and the XMX
-  // kernel gives the DP4a kernel's results bit for bit on random data of every weight layout (with and without
-  // per-32 activation scales); a GPU or driver that differs keeps DP4a. Written without an XMX GPU at hand (this
-  // laptop's Xe-LPG has none): the check is what guards it on the GPUs that have one.
+  // kernels give the DP4a kernels' results bit for bit on random data: every weight layout with and without per-32
+  // activation scales, as the engine launches them (store; split-K pieces accumulating; the fused SwiGLU; several
+  // work-group shapes and row groups) and the mixture-of-experts tile kernel (two experts, partial tiles, a row map
+  // and routing weights). A GPU or driver that differs, or a kernel that does not build, keeps DP4a. Written without
+  // an XMX GPU at hand (this laptop's Xe-LPG has none): the check is what guards it on the GPUs that have one.
+  // (ARC_XMX_TRY=1: the check on any GPU; =2: a DP4a variant in the XMX slot, which must pass; =3: a wrong one, which
+  //  must fail)
   bool xmx_ = false;
   bool xmx_check() {
     if (gemm_tm() % 8) return false;
-    const int M = 32, N = 32, K = 512, nsb = K / 256, ng = N / 16;
+    const int M = 64, N = 32, K = 1024, nsb = K / 256, ng = 2 * N / 16;  // (weights for 2 * N rows: two experts)
     uint32_t seed = 12345;
     auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed; };
+    auto rndf = [&](float lo, float span) { return lo + (float)(rnd() % 10000) * (span / 10000.0f); };
     std::vector<uint32_t> wq((size_t)ng * nsb * 4 * 16 * 16), wh((size_t)ng * nsb * 10 * 16);
     for (auto& v : wq) v = rnd();
     for (auto& v : wh) {  // (floats in [0.001, 0.011): headers and scales of every layout read sensible values)
-      const float f = 0.001f + (float)(rnd() % 10000) * 1e-6f;
+      const float f = rndf(0.001f, 0.01f);
       memcpy(&v, &f, 4);
     }
     std::vector<int8_t> aq((size_t)M * K);
     for (auto& v : aq) v = (int8_t)(rnd() >> 24);
-    std::vector<float> asc((size_t)(K / 32) * M);
-    for (auto& v : asc) v = 0.01f + (float)(rnd() % 1000) * 1e-5f;
+    std::vector<float> asc((size_t)(K / 32) * M), c0((size_t)M * N);
+    for (auto& v : asc) v = rndf(0.01f, 0.01f);
+    for (auto& v : c0) v = rndf(-2.0f, 4.0f);  // (C before an accumulating launch: the gate of the SwiGLU)
     std::vector<uint16_t> ab((size_t)(K / 16) * M);
     for (auto& v : ab) v = (uint16_t)(int16_t)((int)(rnd() % 4001) - 2000);
+    // MoE tiles: tiles[0] = count, then (expert, first slot, rows); expert 0: slots 0-15, 16-20; expert 1: 21-36, 37-39
+    const std::vector<int> tiles{4, 0, 0, 16, 0, 16, 5, 1, 21, 16, 1, 37, 3}, tstart{0, 2, 4};
+    std::vector<int> rowmap(M);
+    std::vector<float> rowscale(M);
+    for (auto& v : rowmap) v = (int)(rnd() % M);
+    for (auto& v : rowscale) v = rndf(0.05f, 0.9f);
     cl_mem bq = buf(wq.size() * 4, wq.data()), bh = buf(wh.size() * 4, wh.data()), ba = buf(aq.size(), aq.data()),
-           bs = buf(asc.size() * 4, asc.data()), bb = buf(ab.size() * 2, ab.data()), bc = buf((size_t)M * N * 4);
-    bool same = true;
+           bs = buf(asc.size() * 4, asc.data()), bb = buf(ab.size() * 2, ab.data()), bc = buf((size_t)M * N * 4),
+           bt = buf(tiles.size() * 4, tiles.data()), bts = buf(tstart.size() * 4, tstart.data()),
+           bm = buf(rowmap.size() * 4, rowmap.data()), bw = buf(rowscale.size() * 4, rowscale.data());
     std::string bad;
+    // one case: C from c0, then launch(kernel) with the DP4a and the XMX kernel; their C must be equal bit for bit
+    // (and the DP4a result finite and not all zero, or the comparison proves nothing)
+    auto check = [&](const std::string& name, const std::function<cl_kernel(int)>& make,
+                     const std::function<void(cl_kernel)>& launch) {
+      std::vector<float> out[2];
+      for (int x = 0; x < 2; ++x) {
+        cl_kernel k = make(x);
+        CL_CHECK(clEnqueueWriteBuffer(cl_.queue, bc, CL_TRUE, 0, c0.size() * 4, c0.data(), 0, nullptr, nullptr));
+        launch(k);
+        out[x].resize(c0.size());
+        CL_CHECK(clEnqueueReadBuffer(cl_.queue, bc, CL_TRUE, 0, out[x].size() * 4, out[x].data(), 0, nullptr, nullptr));
+      }
+      bool sane = false;
+      for (size_t i = 0; i < out[0].size(); ++i) {
+        if (!std::isfinite(out[0][i])) { sane = false; break; }
+        sane = sane || out[0][i] != c0[i];
+      }
+      if (!sane || memcmp(out[0].data(), out[1].data(), out[0].size() * 4)) bad += " " + name;
+    };
     struct Soft { bool& f; ~Soft() { f = false; } } soft{cl_.soft_fail};
     cl_.soft_fail = true;
     try {
       for (int q : {101, 100, 103, 102, 8, 12, 13, 14})
         for (int a32 = 1; a32 >= 0; --a32) {
-          std::vector<float> out[2];
-          for (int x = 0; x < 2; ++x) {
-            cl_kernel k = gemm_kernel(q, a32 != 0, x);
-            int MM = M, NN = N, KK = K, ldc = N, coff = 0, acc = 0, rg = 4, s0 = 0, s1 = nsb;
-            set_args(k, 0, bq, bh, ba, bs, bb, bc, MM, NN, KK, ldc, coff, acc, rg, s0, s1);
-            size_t gws[2] = {(size_t)N * (M / gemm_tm() / 2), 2}, lws[2] = {16, 2};
+          const std::string nm = std::to_string(q) + (a32 ? "/act32" : "");
+          auto make = [&](int x) { return gemm_kernel(q, a32 != 0, x); };
+          // (wgy rows of tm tokens per work-group, rg row groups; split: superblocks per piece, 0 = one piece)
+          auto dense = [&](int acc, int wgy, int rg, int split) {
+            return [&, acc, wgy, rg, split](cl_kernel k) {
+              int MM = M, NN = N, KK = K, ldc = N, coff = 0, rgg = rg;
+              const int pieces = split ? (nsb + split - 1) / split : 1;
+              size_t gws[2] = {(size_t)N * (M / gemm_tm() / wgy), (size_t)wgy}, lws[2] = {16, (size_t)wgy};
+              for (int sp = 0; sp < pieces; ++sp) {
+                int s0 = nsb * sp / pieces, s1 = nsb * (sp + 1) / pieces, ac = sp == 0 ? acc : 1;
+                set_args(k, 0, bq, bh, ba, bs, bb, bc, MM, NN, KK, ldc, coff, ac, rgg, s0, s1);
+                run("xmx_check", k, 2, gws, lws);
+              }
+            };
+          };
+          check(nm + "/store", make, dense(0, 2, 4, 0));
+          check(nm + "/split", make, dense(0, 4, 1, 1));
+          check(nm + "/add", make, dense(1, 1, 2, 2));
+          check(nm + "/swiglu", make, dense(2, 2, 4, 0));
+        }
+      for (int q : {100, 101})  // (the tile kernel has no layouts with mins)
+        for (int acc : {0, 2}) {
+          auto make = [&](int x) { return moe_gemm_kernel(q, x); };
+          check(std::to_string(q) + "/moe" + (acc ? "/swiglu" : ""), make, [&](cl_kernel k) {
+            int MM = M, NN = N, KK = K, ldc = N, ac = acc, e0 = 0, e1 = 2, um = acc ? 1 : 0, us = acc ? 0 : 1;
+            set_args(k, 0, bq, bh, ba, bs, bb, bc, MM, NN, KK, ldc, ac, bt, bts, e0, e1, bm, um, bw, us);
+            size_t gws[2] = {(size_t)N, 3}, lws[2] = {16, 1};  // (3 tile groups for 4 tiles: one loops)
             run("xmx_check", k, 2, gws, lws);
-            out[x].resize((size_t)M * N);
-            CL_CHECK(clEnqueueReadBuffer(cl_.queue, bc, CL_TRUE, 0, out[x].size() * 4, out[x].data(), 0, nullptr, nullptr));
-          }
-          bool sane = false;  // (the reference itself: finite and not all zero, or the comparison proves nothing)
-          for (float v : out[0]) {
-            if (!std::isfinite(v)) { sane = false; break; }
-            sane = sane || v != 0.0f;
-          }
-          if (!sane || memcmp(out[0].data(), out[1].data(), out[0].size() * 4)) {
-            same = false;
-            bad += " " + std::to_string(q) + (a32 ? "/act32" : "");
-          }
+          });
         }
     } catch (const std::exception& e) {
       fprintf(stderr, "arcinferzero: XMX kernels do not build here (%s): DP4a\n", e.what());
       return false;
     }
-    if (!same) fprintf(stderr, "arcinferzero: XMX results differ from DP4a (layouts%s): DP4a (please report)\n", bad.c_str());
-    return same;
+    if (!bad.empty()) fprintf(stderr, "arcinferzero: XMX results differ from DP4a (%s ): DP4a (please report)\n", bad.c_str());
+    return bad.empty();
   }
 
   void build_kernels() {

@@ -352,8 +352,7 @@
           mems_.push_back(L.ex_sub[i].back());
         }
       }
-      cl_kernel k = kernel("gemm", "-cl-intel-256-GRF-per-thread -DACT32 -DMOE_TILES -DQTYPE=" +
-                                       std::to_string(100 + w8_variant(L.ex_type[i])), "gemm");
+      cl_kernel k = moe_gemm_kernel(100 + w8_variant(L.ex_type[i]));
       // tile work-groups per launch: about the average tile count of a group (more loop over the tiles)
       const size_t ny = std::max<size_t>(64, (size_t)cur_T_ * hp.n_expert_used / 16 / (NE / G) + G);
       for (int e0 = 0; e0 < NE; e0 += G) {

@@ -65,9 +65,14 @@ int main(int argc, char** argv) {
   check("public 8.8.8.8", addr_public("8.8.8.8"));
   check("public 2606:4700::1111", addr_public("2606:4700::1111"));
   for (const char* ip : {"127.0.0.1", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.1", "169.254.1.1", "100.64.0.1",
-                         "0.0.0.0", "224.0.0.1", "::1", "::", "fe80::1", "fd00::1", "::ffff:192.168.1.1", "ff02::1"})
+                         "0.0.0.0", "224.0.0.1", "::1", "::", "fe80::1", "fd00::1", "::ffff:192.168.1.1", "ff02::1",
+                         "240.0.0.1", "192.0.0.8", "192.0.2.1", "198.18.0.1", "198.19.255.1", "198.51.100.7", "203.0.113.9",
+                         "::127.0.0.1", "::10.0.0.1", "64:ff9b::7f00:1", "64:ff9b::c0a8:101", "2002:7f00:1::", "2002:a00:1::1",
+                         "2001::1", "2001:db8::1", "100::1", "fec0::1", "feff::1"})
     check((std::string("private ") + ip).c_str(), !addr_public(ip));
   check("public 172.32.0.1", addr_public("172.32.0.1"));
+  for (const char* ip : {"198.20.0.1", "192.0.3.1", "64:ff9b::808:808", "2002:808:808::1", "2001:4860:4860::8888", "::8.8.8.8"})
+    check((std::string("public ") + ip).c_str(), addr_public(ip));
   check("localhost refused", !check_host("localhost").empty());
   check("127.0.0.1 refused", !check_host("127.0.0.1").empty());
   check("resolve absolute", resolve_url("https://a.com/x/y", "http://b.com/z") == "http://b.com/z");

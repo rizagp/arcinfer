@@ -470,7 +470,7 @@ inline cl_int clReleaseContext(cl_context) { return CL_SUCCESS; }
 struct ClRt {
   std::string device_id, cache_dir;
   bool sg8 = true;  // (sub-groups of 8 lanes: Xe-LPG yes; Xe2 / Xe3 (Lunar Lake, Battlemage, Panther Lake) only 16 / 32)
-  bool soft_fail = false;  // (build: a failed compile throws instead of ending the process; the XMX check)
+  bool soft_fail = false;  // (a failed compile, module or kernel creation throws instead of ending the process: XMX check)
   bool xmx = false;  // (XMX matrix engines with 16-lane DPAS: Xe2 / Xe3; the engine still checks them, Engine::xmx_check)
   static uint64_t fnv1a(const std::string& s) {
     uint64_t h = 1469598103934665603ull;
@@ -586,6 +586,8 @@ struct ClRt {
       zeModuleBuildLogGetString(log, &ln, nullptr);
       std::string s(ln, 0);
       zeModuleBuildLogGetString(log, &ln, s.data());
+      delete p;
+      if (soft_fail) throw std::runtime_error("zeModuleCreate failed: " + s.substr(0, 200));
       fprintf(stderr, "zeModuleCreate failed 0x%x: %s\n", r, s.c_str());
       exit(1);
     }
@@ -597,7 +599,12 @@ struct ClRt {
     k->name = name;
     ze_kernel_desc_t kd{ZE_STYPE_KERNEL_DESC, nullptr, 0, name};
     const ze_result_t r = zeKernelCreate(prog->m, &kd, &k->k);
-    if (r != ZE_RESULT_SUCCESS) { fprintf(stderr, "zeKernelCreate(%s) failed 0x%x\n", name, r); exit(1); }
+    if (r != ZE_RESULT_SUCCESS) {
+      delete k;
+      if (soft_fail) throw std::runtime_error(std::string("zeKernelCreate failed: ") + name);
+      fprintf(stderr, "zeKernelCreate(%s) failed 0x%x\n", name, r);
+      exit(1);
+    }
     // The expert kernels (-DXCACHE) reach memory that is not one of their arguments (each expert's address comes from
     // a table): with indirect access the driver keeps every allocation resident for them; without it an expert in a
     // piece of the cache that Windows had paged out was a page fault ("device lost" now and then, in the server).

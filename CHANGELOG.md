@@ -2,6 +2,17 @@
 
 ## 2026-10-23: Xe2 / Xe3 GPUs (no 8-lane sub-groups); Unsloth Studio statistics and context
 
+- **XMX safer** (from DeepSeek's audit): a GPU module or kernel that cannot be created during the start-up check no
+  longer ends the process (it keeps DP4a), and the check now launches the kernels as the engine does (split-K pieces,
+  accumulation, the fused SwiGLU, several work-group shapes) and covers the mixture-of-experts tile kernel, which now
+  takes XMX too when the check passes (it had been left on DP4a). The check itself is tested here with a right and a
+  wrong DP4a variant in the XMX slot (`ARC_XMX_TRY=2` / `=3`); the XMX tile kernels compile for Lunar Lake,
+  Battlemage and Panther Lake.
+- **Web fetch hardened** (same audit): the address WinHTTP actually connected to is checked before anything is read
+  (a host that resolves to a public address first and a local one at connection, DNS rebinding, gets nothing back);
+  more reserved ranges refused (192.0.0.0/24, documentation and benchmark ranges, 240/4, IPv4 inside IPv6 judged
+  as IPv4: compatible, NAT64, 6to4; Teredo, site-local, 2001:db8::/32, 100::/64); a read never grows the body past its
+  limit.
 - **Qwen3.8 Flash Next with the DFlash2 drafter** (`--dflash DIR`, incoai/Qwen3.8-Flash-Next-DFlash2): the drafter's
   features are the means of the 4 residual streams, a verification pass of up to 8 rows computes every row as a single
   token is (the HC mixers' single-token kernels for several rows), and rejected drafts roll back the PLE history and
@@ -43,7 +54,8 @@
   fallback; HTML to plain text with headings and lists) at `POST /v1/tools/web_search` / `web_fetch`, also while a
   model loads or generates. Each call shows as a card; the answer continues with the results (8 tool turns at
   most); Stop keeps the conversation valid. Only public http(s) addresses are fetched (every host and redirect is
-  resolved first; loopback, private, link-local and multicast addresses are refused). `--no-web-tools` turns the
+  resolved first; loopback, private, link-local, multicast and reserved addresses are refused, and the connection's
+  address is checked again). `--no-web-tools` turns the
   endpoints off. An independent implementation (no code from the AGPL `pi-unsloth-webtools`).
 
 ## 2026-10-22: Gemma 4 runs only in its accurate mode; faster sampled tool calls
