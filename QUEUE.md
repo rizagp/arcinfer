@@ -14,7 +14,7 @@ Everything below this list is history plus the details of these items; a row not
 | 1 | Flash Next prompt: the per-tile gate / up kernel (7.0 s of 22 s GPU at 4K after the scale transpose): its IQ2_S / IQ3_XXS decode (~4 s) and activation reads; generation is SSD-bound (DFlash2 works, no gain) | F21.15 / F21.16 |
 | 4 | Xe2 / Xe3: XMX prompt GEMMs built and self-checked, waiting for gee456's report (issue #1); then moe_rg / attention on XMX, setup's Visual Studio paths | F29 |
 | 5 | Voice: a real microphone test by the user; ASR for any model, human-sounding replies, omni models | F24.4-24.7 |
-| 6 | Flint (unsloth/flint-GGUF on D:): tokenizer done (2026-10-24, identical to llama.cpp b11835 on README / code / mixed scripts); left: f32 reference, engine, server | F28 |
+| 6 | Flint (unsloth/flint-GGUF on D:): tokenizer done (2026-10-24, identical to llama.cpp b11835 on README / code / mixed scripts); f32 reference done (tools/ref_forward flint_layers: its top token = llama.cpp CPU greedy at 24 / 24 positions of a code prompt, 21 / 24 of an Indonesian one, the three near-ties of 0.28-0.53 nats); left: engine (sinks, NoPE global layers, window 513, sigmoid router, ungated shared FFN), server | F28 |
 | 8 | Gemma 4 26B vision encoder (11.8 s per image; needs an image-accuracy reference) | F21.7 |
 | 9 | Batch decode for Flash Next (E4B done) | F20.6 |
 | 10 | Copy 4B / E4B / 12B from D: to C: (the user decides) | F20.8 |

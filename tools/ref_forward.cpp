@@ -890,6 +890,118 @@ static void qwen4exp_layers(const std::vector<int>& toks, std::vector<float>& x)
   x = mixed;
 }
 
+// Flint (llama.cpp flint): attention with q / k RMS norms per head and per-head sinks (one more logit in the softmax,
+// with no value), scale 1/sqrt(head size); the sliding-window layers (a key is masked when q_pos - k_pos >= window)
+// take NEOX RoPE over the whole head, the global layers no positions at all. FFN: SwiGLU, dense on the leading
+// layers, then the experts chosen by sigmoid scores (top k of the scores; the chosen scores normalized to sum 1,
+// times the scale) plus the shared SwiGLU FFN, added without a gate. Leaves the residual stream in x.
+static void flint_layers(const std::vector<int>& toks, std::vector<float>& x) {
+  const int T = (int)toks.size(), nl = hp("block_count"), E = hp("embedding_length"), nh = hp("attention.head_count"),
+            nkv = hp("attention.head_count_kv"), hd = hp("attention.key_length"), nd = hp("leading_dense_block_count", 0),
+            NE = hp("expert_count"), NU = hp("expert_used_count"), Fe = hp("expert_feed_forward_length"),
+            win = hp("attention.sliding_window", 0);
+  const float eps = (float)F->get_float(A + ".attention.layer_norm_rms_epsilon", 1e-6);
+  const double base = F->get_float(A + ".rope.freq_base", 10000.0), wscale = F->get_float(A + ".expert_weights_scale", 1.0);
+  const bool wnorm = F->get_int(A + ".expert_weights_norm", 0) != 0;
+  const auto* swa_pat = F->get_ints(A + ".attention.sliding_window_pattern");
+  const auto* rope_pat = F->get_ints(A + ".attention.rope_pattern");
+  if (F->get_int(A + ".expert_gating_func", 2) != 2) throw std::runtime_error("flint: only sigmoid expert gating");
+  for (int il = 0; il < nl; ++il) {
+    const std::string p = "blk." + std::to_string(il) + ".";
+    const bool swa = swa_pat && il < (int)swa_pat->size() && (*swa_pat)[il] != 0;
+    const bool roped = rope_pat ? il < (int)rope_pat->size() && (*rope_pat)[il] != 0 : swa;
+    auto an = vecf(p + "attn_norm.weight");
+    std::vector<float> h = x, q, k, v, o((size_t)T * nh * hd), out;
+    for (int t = 0; t < T; ++t) rmsnorm(&h[(size_t)t * E], E, an.data(), eps);
+    matmul(p + "attn_q.weight", h, T, q);
+    matmul(p + "attn_k.weight", h, T, k);
+    matmul(p + "attn_v.weight", h, T, v);
+    auto qn = vecf(p + "attn_q_norm.weight"), kn = vecf(p + "attn_k_norm.weight"), sinks = vecf(p + "attn_sinks.weight");
+    auto rope = [&](float* r, int pos) {
+      const int half = hd / 2;
+      for (int i = 0; i < half; ++i) {
+        const double th = pos * std::pow(base, -2.0 * i / hd), cs = std::cos(th), sn = std::sin(th), a = r[i], b = r[i + half];
+        r[i] = (float)(a * cs - b * sn);
+        r[i + half] = (float)(a * sn + b * cs);
+      }
+    };
+    for (int t = 0; t < T; ++t) {
+      for (int hh = 0; hh < nh; ++hh) {
+        float* r = &q[((size_t)t * nh + hh) * hd];
+        rmsnorm(r, hd, qn.data(), eps);
+        if (roped) rope(r, t);
+      }
+      for (int g = 0; g < nkv; ++g) {
+        float* r = &k[((size_t)t * nkv + g) * hd];
+        rmsnorm(r, hd, kn.data(), eps);
+        if (roped) rope(r, t);
+      }
+    }
+    const double scale = 1.0 / std::sqrt((double)hd);
+#pragma omp parallel for collapse(2)
+    for (int t = 0; t < T; ++t)
+      for (int hh = 0; hh < nh; ++hh) {
+        const int g = hh / (nh / nkv), u0 = swa && win > 0 ? std::max(0, t - win + 1) : 0;
+        const float* qv = &q[((size_t)t * nh + hh) * hd];
+        std::vector<double> sc(t + 1);
+        double mx = sinks[hh];
+        for (int u = u0; u <= t; ++u) {
+          double s2 = 0;
+          for (int i = 0; i < hd; ++i) s2 += (double)qv[i] * k[((size_t)u * nkv + g) * hd + i];
+          sc[u] = s2 * scale;
+          mx = std::max(mx, sc[u]);
+        }
+        double z = std::exp(sinks[hh] - mx);
+        for (int u = u0; u <= t; ++u) { sc[u] = std::exp(sc[u] - mx); z += sc[u]; }
+        for (int i = 0; i < hd; ++i) {
+          double acc = 0;
+          for (int u = u0; u <= t; ++u) acc += sc[u] * v[((size_t)u * nkv + g) * hd + i];
+          o[((size_t)t * nh + hh) * hd + i] = (float)(acc / z);
+        }
+      }
+    matmul(p + "attn_output.weight", o, T, out);
+    for (size_t i = 0; i < x.size(); ++i) x[i] += out[i];
+    // FFN
+    auto fn = vecf(p + "ffn_norm.weight");
+    h = x;
+    for (int t = 0; t < T; ++t) rmsnorm(&h[(size_t)t * E], E, fn.data(), eps);
+    std::vector<float> gt, up, d;
+    const std::string sfx = il < nd ? ".weight" : "_shexp.weight";  // (MoE layers: the shared FFN first)
+    matmul(p + "ffn_gate" + sfx, h, T, gt);
+    matmul(p + "ffn_up" + sfx, h, T, up);
+    for (size_t i = 0; i < gt.size(); ++i) gt[i] = silu(gt[i]) * up[i];
+    matmul(p + "ffn_down" + sfx, gt, T, d);
+    if (il >= nd) {
+      std::vector<float> rl;
+      matmul(p + "ffn_gate_inp.weight", h, T, rl);
+#pragma omp parallel for
+      for (int t = 0; t < T; ++t) {
+        const float* ht = &h[(size_t)t * E];
+        std::vector<double> pr(NE);
+        for (int e = 0; e < NE; ++e) pr[e] = 1.0 / (1.0 + std::exp(-(double)rl[(size_t)t * NE + e]));
+        std::vector<int> id(NE);
+        for (int e = 0; e < NE; ++e) id[e] = e;
+        std::stable_sort(id.begin(), id.end(), [&](int a, int b) { return pr[a] > pr[b]; });
+        double z = 0;
+        for (int kk = 0; kk < NU; ++kk) z += pr[id[kk]];
+        std::vector<float> ge(Fe), ue(Fe), de(E);
+        float* dt = &d[(size_t)t * E];
+        for (int kk = 0; kk < NU; ++kk) {
+          const int e = id[kk];
+          const float w = (float)((wnorm ? pr[e] / z : pr[e]) * wscale);
+          expert_mv(p + "ffn_gate_exps", e, Fe, E, ht, ge.data());
+          expert_mv(p + "ffn_up_exps", e, Fe, E, ht, ue.data());
+          for (int i = 0; i < Fe; ++i) ge[i] = silu(ge[i]) * ue[i];
+          expert_mv(p + "ffn_down_exps", e, E, Fe, ge.data(), de.data());
+          for (int i = 0; i < E; ++i) dt[i] += w * de[i];
+        }
+      }
+    }
+    for (size_t i = 0; i < x.size(); ++i) x[i] += d[i];
+    fprintf(stderr, "\rlayer %d/%d", il + 1, nl);
+  }
+}
+
 // Gemma's final logit soft-capping (cap * tanh(l / cap)); no-op for other models.
 static void softcap(std::vector<float>& l) {
   const float c = (float)F->get_float(A + ".final_logit_softcapping", 0.0);
@@ -921,7 +1033,8 @@ int main(int argc, char** argv) {
 
   if (A == "gemma4") gemma4_layers(toks, x);
   if (A == "qwen4exp") qwen4exp_layers(toks, x);
-  for (int il = 0; il < nl && A != "gemma4" && A != "qwen4exp"; ++il) {
+  if (A == "flint") flint_layers(toks, x);
+  for (int il = 0; il < nl && A != "gemma4" && A != "qwen4exp" && A != "flint"; ++il) {
     const std::string p = "blk." + std::to_string(il) + ".";
     auto an = vecf(p + "attn_norm.weight");
     h = x;
