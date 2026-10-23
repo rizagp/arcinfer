@@ -27,7 +27,7 @@ foreach ($m in $Models) {
   foreach ($be in @("vulkan", "sycl") | Where-Object { $Engines -contains $_ }) {
     $ub["$m/$be"] = 512
     if ($SkipTuning) { continue }
-    $exe = "$env:USERPROFILE\llama-builds\b11527-$be\llama-bench.exe"
+    $exe = "$env:USERPROFILE\llama-builds\b11835-$be\llama-bench.exe"
     $fa = if ($m -eq "4b") { "0,1" } else { "1" }
     Start-Sleep -Seconds 30
     $o = & $exe -m $paths[$m] -ngl 99 -fa $fa -ub "512,1024,2048" -b 2048 -p 2048 -n 0 -r 1 -o json 2>$null | Out-String
