@@ -1444,6 +1444,7 @@ class Engine {
   int spec_prev_[2] = {-1, -1}, spec_tok_ = -1;
   const GgufTensor* tok_embd_ = nullptr;
   // activations
+  cl_mem asct_ = nullptr;  // (MoE prompt tiles: the FFN input's scales token by token, see moe gateup_q)
   cl_mem x_ = nullptr, aq_ = nullptr, asc_ = nullptr, absum_ = nullptr, big_ = nullptr, z_ = nullptr,
          conv_out_ = nullptr, gb_ = nullptr, o_ = nullptr, qrope_ = nullptr, logits_ = nullptr, qi_ = nullptr,
          qsc_ = nullptr, apart_ = nullptr;
@@ -2832,6 +2833,7 @@ class Engine {
       }
     }
     asc_ = buf(M * (maxK / 32) * 4 * (q2mm_ ? 2 : 1));
+    if (hp.moe) asct_ = buf(M * (hp.n_embd / 32) * 4);
     absum_ = buf(M * (maxK / 16) * 2 * (q2mm_ ? 2 : 1));
     big_ = buf(M * big_w * 4);
     // MoE: the expert activations / outputs (mh_ [slots][F], my_ [slots][E] f32) share memory with buffers that are

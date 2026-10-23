@@ -2,6 +2,8 @@
 
 ## 2026-10-23: Xe2 / Xe3 GPUs (no 8-lane sub-groups); Unsloth Studio statistics and context
 
+- **Flash Next prompt**: the per-tile expert gate / up kernel reads the activation scales token by token (a small
+  transpose first): gate / up 8.1 -> 7.0 s per 4K prompt, bit-identical.
 - **XMX safer** (from DeepSeek's audit): a GPU module or kernel that cannot be created during the start-up check no
   longer ends the process (it keeps DP4a), and the check now launches the kernels as the engine does (split-K pieces,
   accumulation, the fused SwiGLU, several work-group shapes) and covers the mixture-of-experts tile kernel, which now

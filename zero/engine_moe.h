@@ -145,15 +145,29 @@
     // standard expert types, per tile (zero/kernels/decode.cl moe_gateup_q / moe_down_q): the tiles in `tiles`
     auto gateup_q = [&](cl_mem tiles) {
       const int grows = gr_gu;
+      // (prompt tiles: the activation scales transposed first, a token's 80 scales then one coalesced read instead of
+      //  16 lanes in 16 rows; Flash Next 4K prompt: gate / up 8.6 -> 7.0 s with the scales left out entirely)
+      static const bool asct_on = !getenv("ARC_MOE_ASCT") || atoi(getenv("ARC_MOE_ASCT")) != 0;
+      const bool asct = asct_on && tm > 1 && !q2f;
       cl_kernel k = kernel("decode", (q2f && tm > 1 ? std::string("-cl-intel-256-GRF-per-thread ") : grf_env("ARC_MOE_GRF")) +
                                          "-DMOE_Q -DQT=" + std::to_string(L.ex_type[0]) + " -DGROWS=" +
-                                         std::to_string(grows) + " -DTM=" + std::to_string(tm) + xdef + hld + q2fd, "moe_gateup_q");
+                                         std::to_string(grows) + " -DTM=" + std::to_string(tm) + xdef + hld + q2fd +
+                                         (asct ? " -DASCT" : ""), "moe_gateup_q");
       int M = Mp, K = E, FF = F;
+      cl_mem sc = asc_;
+      if (asct) {
+        cl_kernel t = kernel("ops", "", "asc_transpose");
+        int MM = Mp, KB = E / 32;
+        set_args(t, 0, asc_, MM, KB, asct_);
+        size_t g2[2] = {((size_t)KB + 15) / 16 * 16, (size_t)Mp};
+        run("moe_gateup", t, 2, g2, nullptr);
+        sc = asct_;
+      }
       if (xc_) {
-        set_args(k, 0, xc_->xtab[L.il], xc_->xtab[L.il], FF, K, tabs_, aq_, asc_, M, tiles, stok_, mh_, xc_->xtab[L.il],
+        set_args(k, 0, xc_->xtab[L.il], xc_->xtab[L.il], FF, K, tabs_, aq_, sc, M, tiles, stok_, mh_, xc_->xtab[L.il],
                  xoff(L, 0), xoff(L, 1));
       } else {
-        set_args(k, 0, L.ex_q[0], L.ex_q[1], FF, K, tabs_, aq_, asc_, M, tiles, stok_, mh_);
+        set_args(k, 0, L.ex_q[0], L.ex_q[1], FF, K, tabs_, aq_, sc, M, tiles, stok_, mh_);
       }
       size_t gws[2] = {((size_t)(F + grows - 1) / grows * 16 + 255) / 256 * 256, max_tiles}, lws[2] = {256, 1};
       run("moe_gateup", k, 2, gws, lws);

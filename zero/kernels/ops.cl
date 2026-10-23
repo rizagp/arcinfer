@@ -2749,6 +2749,13 @@ __kernel void hc_combine(__global float* res, __global const float* out, __globa
   res[(size_t)m * HC * E + j] += w * out[(size_t)m * E + i];
 }
 
+// per-32 activation scales [K/32][M] -> [M][K/32] (the per-tile expert gate / up kernel, -DASCT, reads a token's
+// scales side by side). grid (K/32 rounded up to 16, M).
+__kernel void asc_transpose(__global const float* asc, int M, int KB, __global float* asct) {
+  const int b = get_global_id(0), m = get_global_id(1);
+  if (b < KB) asct[(size_t)m * KB + b] = asc[(size_t)b * M + m];
+}
+
 // the mean of the HC streams per row (Flash Next's DFlash2 features). grid (E, M_valid).
 __kernel void hc_mean(__global const float* res, int E, int HC, __global float* out) {
   const int i = get_global_id(0), m = get_global_id(1);

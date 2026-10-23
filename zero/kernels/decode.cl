@@ -1597,7 +1597,11 @@ __kernel void moe_gateup_q(__global const uchar* rg, __global const uchar* ru, i
         if (m < nr) {
           const int tok = stok[r0 + m];
           const uint8 a8 = has ? vload8(0, (__global const uint*)(aq + (size_t)tok * K + 32 * b)) : (uint8)0;
+#ifdef ASCT  // (the scales token by token, [M][K/32]: the lanes' blocks side by side)
+          const float sa = has ? asc[(size_t)tok * (K / 32) + b] : 0.0f;
+#else
           const float sa = has ? asc[(size_t)b * M + tok] : 0.0f;
+#endif
           ag[r][m] += sa * moe_term(a8, wg, dg, gdmin, gs0, gs1, gm0, gm1);
 #ifdef Q2F
           const uint8 r8 = has ? vload8(0, (__global const uint*)(aq + Q2_AQ + (size_t)tok * K + 32 * b)) : (uint8)0;
