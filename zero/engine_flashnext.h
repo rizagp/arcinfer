@@ -9,21 +9,23 @@
   void hc_mix(cl_mem normw, const GpuWeight& down, const GpuWeight& up, int T, int Mp, int act32, int r0) {
     const int E = hp.n_embd, HC = hp.hc_n, W = hp.hce(), LD = down.N, LR = hp.hc_lr, KP = hc_lr_pad();
     float eps = hp.eps;
-    // single tokens: two fused kernels with f32 activations (norm + down + inject, then silu + up + gated mean) and
-    // the block input's quantization; prompt chunks below: int8 GEMMs
-    if (T == 1 && W <= 10240 && KP <= 1024) {
+    // single tokens and up to 8 rows (a verification pass: each row computed exactly as a single token, -DHC_RT): two
+    // fused kernels with f32 activations (norm + down + inject, then silu + up + gated mean) and the block input's
+    // quantization; prompt chunks below: int8 GEMMs
+    if (T <= 8 && W <= 10240 && KP <= 1024) {
       if (!hc_rinv_) hc_rinv_ = buf(64 * 4);
       int rr = r0, e = E, hc = HC, n = down.N, lr = LR, kp = KP;
-      cl_kernel k1 = kernel("ops", "", "hc_down1");
+      const std::string rt = T > 1 ? "-DHC_RT=" + std::to_string(T) : std::string();
+      cl_kernel k1 = kernel("ops", rt, "hc_down1");
       set_args(k1, 0, x_, rr, normw, e, hc, eps, down.raw, n, hc_xn_, hc_rinv_);
       size_t g1[2] = {(size_t)256 * ((n + 15) / 16), 8}, l1[2] = {256, 1};  // (8 K slices: HC_KS)
       run("hc_down1", k1, 2, g1, l1);
-      cl_kernel k2 = kernel("ops", "", "hc_up1");
+      cl_kernel k2 = kernel("ops", rt, "hc_up1");
       set_args(k2, 0, x_, rr, normw, hc_rinv_, hc_xn_, n, hc_lo_, lr, kp, e, hc, up.raw, hco_);
       size_t g2 = (size_t)256 * ((E + 15) / 16), l2 = 256;
       run("hc_up1", k2, 1, &g2, &l2);
       rd_bytes += raw_bytes(down) + raw_bytes(up);
-      quant_rows(hco_, E, Mp, 1, act32);
+      quant_rows(hco_, E, Mp, T, act32);
       return;
     }
     {

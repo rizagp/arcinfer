@@ -3130,32 +3130,47 @@ inline float q8sb_dot_v(__global const uchar* p, __local const float* x, int nv)
 #ifndef HC_KS
 #define HC_KS 8
 #endif
+#ifndef HC_RT
+#define HC_RT 1  // rows (single tokens: 1; the 2-8 rows of a verification pass, each computed as a single token is)
+#endif
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void hc_down1(__global const float* res, int r0, __global const float* w, int E, int HC, float eps,
                        __global const uchar* wd, int N, __global float* part, __global float* rinv) {
-  __local float xs[HCK / HC_KS];
-  __local float rs[1];
+  __local float xs[HC_RT][HCK / HC_KS];
+  __local float rs[HC_RT];
   const int li = get_local_id(0), ls = get_local_size(0), ks = get_group_id(1), SL = HC * E / HC_KS;
   const int k0 = ks * SL, c = k0 / E;  // (a slice lies in one stream: E is a multiple of SL)
-  __global const float* xr = res + (size_t)r0 * HC * E;
-  float ss = 0.0f;
-  for (int i = li; i < E; i += ls) {
-    const float v = xr[c * E + i];
-    ss += v * v;
+  for (int r = 0; r < HC_RT; ++r) {
+    __global const float* xr = res + (size_t)(r0 + r) * HC * E;
+    float ss = 0.0f;
+    for (int i = li; i < E; i += ls) {
+      const float v = xr[c * E + i];
+      ss += v * v;
+    }
+    ss = work_group_reduce_add(ss);
+    if (li == 0) rs[r] = rsqrt(ss / E + eps);
   }
-  ss = work_group_reduce_add(ss);
-  if (li == 0) rs[0] = rsqrt(ss / E + eps);
   barrier(CLK_LOCAL_MEM_FENCE);
-  const float r = rs[0];
-  for (int i = li; i < SL; i += ls) xs[HC_XT(i)] = xr[k0 + i] * r * w[k0 + i];
+  for (int r = 0; r < HC_RT; ++r) {
+    __global const float* xr = res + (size_t)(r0 + r) * HC * E;
+    const float rr = rs[r];
+    for (int i = li; i < SL; i += ls) xs[r][HC_XT(i)] = xr[k0 + i] * rr * w[k0 + i];
+    if (get_group_id(0) == 0 && li == 0 && (k0 % E) == 0) rinv[r * HC + c] = rr;
+  }
   barrier(CLK_LOCAL_MEM_FENCE);
-  if (get_group_id(0) == 0 && li == 0 && (k0 % E) == 0) rinv[c] = r;
   const int n = get_group_id(0) * 16 + get_sub_group_id(), nsb = HC * E / 256, s0 = k0 / 256;
   if (n >= N) return;
-  float acc = 0.0f;
-  for (int sb = 0; sb < SL / 256; ++sb) acc += q8sb_dot(wd + ((size_t)n * nsb + s0 + sb) * 272, xs + sb * 256);
-  acc = sub_group_reduce_add(acc);
-  if (get_sub_group_local_id() == 0) part[(size_t)ks * N + n] = acc;
+  float acc[HC_RT];
+#pragma unroll
+  for (int r = 0; r < HC_RT; ++r) acc[r] = 0.0f;
+  for (int sb = 0; sb < SL / 256; ++sb)
+#pragma unroll
+    for (int r = 0; r < HC_RT; ++r) acc[r] += q8sb_dot(wd + ((size_t)n * nsb + s0 + sb) * 272, xs[r] + sb * 256);
+#pragma unroll
+  for (int r = 0; r < HC_RT; ++r) {
+    const float a = sub_group_reduce_add(acc[r]);
+    if (get_sub_group_local_id() == 0) part[((size_t)r * HC_KS + ks) * N + n] = a;
+  }
 }
 // mixed[i] = mean over the streams c of xn_c[i] * sigmoid(W_up[c E + i] . silu(lo / HC)), lo = the sum of the partial
 // sums (LR values, the rest of the KP-wide input zero). grid (256 * ceil(E / 16)), local (256): a sub-group per i.
@@ -3163,27 +3178,39 @@ __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void hc_up1(__global const float* res, int r0, __global const float* w, __global const float* rinv,
                      __global const float* part, int N, __global float* lo, int LR, int KP, int E, int HC,
                      __global const uchar* wu, __global float* mixed) {
-  __local float xs[1024];
+  __local float xs[HC_RT][1024];
   const int li = get_local_id(0);
-  for (int k = li; k < KP; k += get_local_size(0)) {
-    float v = 0.0f;
-    if (k < N)
-      for (int q = 0; q < HC_KS; ++q) v += part[(size_t)q * N + k];
-    if (get_group_id(0) == 0 && k < N) lo[k] = v;  // (the inject logits for hc_combine)
-    v = k < LR ? v / (float)HC : 0.0f;
-    xs[HC_XT(k)] = v / (1.0f + exp(-v));
-  }
+  for (int r = 0; r < HC_RT; ++r)
+    for (int k = li; k < KP; k += get_local_size(0)) {
+      float v = 0.0f;
+      if (k < N)
+        for (int q = 0; q < HC_KS; ++q) v += part[((size_t)r * HC_KS + q) * N + k];
+      if (get_group_id(0) == 0 && k < N) lo[(size_t)r * N + k] = v;  // (the inject logits for hc_combine)
+      v = k < LR ? v / (float)HC : 0.0f;
+      xs[r][HC_XT(k)] = v / (1.0f + exp(-v));
+    }
   barrier(CLK_LOCAL_MEM_FENCE);
   const int i = get_group_id(0) * 16 + get_sub_group_id(), nsb = KP / 256;
   if (i >= E) return;
-  __global const float* xr = res + (size_t)r0 * HC * E;
-  float m = 0.0f;
+  float m[HC_RT];
+#pragma unroll
+  for (int r = 0; r < HC_RT; ++r) m[r] = 0.0f;
   for (int c = 0; c < HC; ++c) {
     const int n = c * E + i;
-    float acc = 0.0f;
-    for (int sb = 0; sb < nsb; ++sb) acc += q8sb_dot_v(wu + ((size_t)n * nsb + sb) * 272, xs + sb * 256, LR - sb * 256);
-    const float g = sub_group_reduce_add(acc);
-    m += xr[n] * rinv[c] * w[n] / (1.0f + exp(-g));
+    float acc[HC_RT];
+#pragma unroll
+    for (int r = 0; r < HC_RT; ++r) acc[r] = 0.0f;
+    for (int sb = 0; sb < nsb; ++sb)
+#pragma unroll
+      for (int r = 0; r < HC_RT; ++r) acc[r] += q8sb_dot_v(wu + ((size_t)n * nsb + sb) * 272, xs[r] + sb * 256, LR - sb * 256);
+#pragma unroll
+    for (int r = 0; r < HC_RT; ++r) {
+      const float g = sub_group_reduce_add(acc[r]);
+      __global const float* xr = res + (size_t)(r0 + r) * HC * E;
+      m[r] += xr[n] * rinv[r * HC + c] * w[n] / (1.0f + exp(-g));
+    }
   }
-  if (get_sub_group_local_id() == 0) mixed[i] = m / (float)HC;
+  if (get_sub_group_local_id() == 0)
+#pragma unroll
+    for (int r = 0; r < HC_RT; ++r) mixed[(size_t)r * E + i] = m[r] / (float)HC;
 }
