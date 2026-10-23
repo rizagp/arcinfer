@@ -33,7 +33,7 @@ def get(model, engine, test, prompt=None):
     return best.get((model, engine, test, prompt))
 
 
-ENGINES = [("arcinfer", "arcinfer"), ("vulkan", "llama.cpp Vulkan"), ("sycl", "llama.cpp SYCL")]
+ENGINES = [("arcinferzero", "arcinferzero"), ("vulkan", "llama.cpp Vulkan"), ("sycl", "llama.cpp SYCL")]
 MODELS = [("4b", "Qwen3.5 4B"), ("9b", "Qwen3.5 9B"), ("27b", "Qwen3.8 27B"), ("g12", "Gemma 4 12B"),
           ("35b", "Qwen3.6 35B-A3B (GSQ 2-bit)")]
 PROMPTS = [("code-11k", "code 11K"), ("code-34k", "code 34K")]
@@ -51,7 +51,7 @@ def cell(r, field, d):
 out = []
 date = max(r.get("time", "")[:10] for r in best.values())
 out.append(f"Measured {date} with the OpenCL engine; best of the repeated runs per engine. llama.cpp cannot load the "
-           "GSQ 2-bit Qwen3.6 35B-A3B, so its row has arcinfer only.")
+           "GSQ 2-bit Qwen3.6 35B-A3B, so its row has arcinferzero only.")
 out.append("")
 
 out.append("Time to first token (seconds) on the code prompts, and generation speed right after the prompt (tok/s):")
@@ -92,7 +92,7 @@ for m, mn in MODELS:
     out.append(f"| {mn} | " + " | ".join(cell(get(m, e, "ppl"), "ppl", 4) for e, _ in ENGINES) + " |")
 
 # speculative decoding runs of the benchmark script, when there are any
-spec = [(m, mn, get(m, "arcinfer", "mtp", "code-11k")) for m, mn in MODELS + [("e4b", "Gemma 4 E4B")]]
+spec = [(m, mn, get(m, "arcinferzero", "mtp", "code-11k")) for m, mn in MODELS + [("e4b", "Gemma 4 E4B")]]
 spec = [s for s in spec if s[2]]
 if spec:
     out.append("")
@@ -127,7 +127,7 @@ if os.path.exists(os.path.join(land_dir, "summary.jsonl")):
             html = open(src, encoding="utf-8").read()
             label = (f'<div style="position:fixed;left:8px;bottom:8px;z-index:2147483647;font:12px/1.4 system-ui,sans-serif;'
                      f'background:#111;color:#fff;padding:6px 10px;border-radius:6px;opacity:.85">'
-                     f'Output of {names[m]} on arcinfer (benchmark prompt, fictional shop)</div>')
+                     f'Output of {names[m]} on arcinferzero (benchmark prompt, fictional shop)</div>')
             html = (re.sub(r"(<body[^>]*>)", lambda mm: mm.group(1) + label, html, count=1, flags=re.I)
                     if re.search(r"<body", html, re.I) else label + html)
             open(os.path.join(pub_dir, f"{m}.html"), "w", encoding="utf-8", newline="\n").write(html)

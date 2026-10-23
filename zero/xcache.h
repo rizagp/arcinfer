@@ -332,7 +332,7 @@ struct XCache {
       const int per = (int)std::max<uint64_t>(1, (1ull << 30) / P.rec);
       for (int s0 = 0; s0 < P.n; s0 += per) {
         const int k = std::min(per, P.n - s0);
-        // (+64 KB: the expert kernels' block reads run a little past the end of an expert's last row, as arcinfer's
+        // (+64 KB: the expert kernels' block reads run a little past the end of an expert's last row, as arcinferzero's
         // upload_padded allows with 256 bytes; a record that is an exact multiple of 4 KB (35B: 1409024 bytes) has no
         // padding, so the last slot of a piece read past the allocation: "device lost" now and then)
         char* b = (char*)zrt::device_alloc((size_t)k * P.rec + 65536);
@@ -346,7 +346,7 @@ struct XCache {
     }
     // every table entry points at a slot of the largest record size until ensure() sets it: an expert id the
     // kernels read without the host having seen it (out of range after NaN logits) reads valid memory, as the
-    // OpenCL buffers of arcinfer do, instead of faulting
+    // OpenCL buffers of the former OpenCL engine did, instead of faulting
     const Pool* big = &pools[0];
     for (auto& P : pools) if (P.rec > big->rec) big = &P;
     for (size_t i = 0; i < (size_t)(NL + 1) * NE; ++i) xaddr[i] = (uint64_t)big->addr[0];

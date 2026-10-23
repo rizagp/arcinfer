@@ -1,6 +1,6 @@
-# arcinfer speed progress
+# arcinferzero speed progress
 
-One file that tracks the speed of arcinfer over time on the same laptop (Core Ultra 5 125H, Arc Xe-LPG 112 EU, no
+One file that tracks the speed of arcinferzero over time on the same laptop (Core Ultra 5 125H, Arc Xe-LPG 112 EU, no
 XMX, DP4a, ~75 GB/s, 32 GB LPDDR5x-6400, Windows 11). The newest measurements come first; each dated section keeps
 what was measured then; where a later change overturned a statement, a **Later:** note says so. Add a new dated
 section at the top when the speed changes, and update "Where it stands" in [before-after.md](before-after.md).
@@ -272,7 +272,7 @@ Details of each change: [arcinferzero-log.md](archive/arcinferzero-log.md) (16-1
 
 ## 2026-10-16: arcinferzero (Level Zero) becomes the default engine
 
-arcinfer, overnight results, 15 → 16 October 2026.
+arcinferzero, overnight results, 15 → 16 October 2026.
 
 Tests ran from 17:00 to 06:05. Since this morning zero is the default engine; the old OpenCL engine is still available with `--opencl`. Every number here comes from real runs on this laptop.
 
@@ -392,11 +392,11 @@ The last 4K chunk at 64K depth, ms per layer. The current kernel (256 registers)
 
 ## 2026-10-10 to 2026-10-14: the OpenCL engine, from the first version
 
-Performance test report for arcinfer, 10–14 October 2026: prompt processing (prefill) and token generation for models from 4B to 35B on the Intel Arc iGPU, from the first version to the current state.
+Performance test report for arcinferzero, 10–14 October 2026: prompt processing (prefill) and token generation for models from 4B to 35B on the Intel Arc iGPU, from the first version to the current state.
 
-**Running a 35B model on a laptop without a discrete graphics card.** This report summarizes the performance tests of arcinfer, an inference engine built specifically for the Intel Arc iGPU, from its first version to its current state. The tests cover prefill (prompt processing) speed and token generation speed on six models, from Qwen3.5 4B to Qwen3.6 35B-A3B.
+**Running a 35B model on a laptop without a discrete graphics card.** This report summarizes the performance tests of arcinferzero, an inference engine built specifically for the Intel Arc iGPU, from its first version to its current state. The tests cover prefill (prompt processing) speed and token generation speed on six models, from Qwen3.5 4B to Qwen3.6 35B-A3B.
 
-Every measurement was taken on the same machine. Data sources: the arcinfer CHANGELOG, QUEUE, review_notes ([archive/review_notes.md](archive/review_notes.md)) and bench/results.
+Every measurement was taken on the same machine. Data sources: the arcinferzero CHANGELOG, QUEUE, review_notes ([archive/review_notes.md](archive/review_notes.md)) and bench/results.
 
 
 ### Test platform
@@ -469,7 +469,7 @@ Qwen3.8 27B with MTP reaches 9.5 tok/s on code (3 drafts); on general text the n
 
 ### Prefill: getting the most out of int8 compute
 
-Prefill behaves differently from generation. Thousands of tokens are processed together, so the weights are reused many times and the limit moves from memory bandwidth to compute. This iGPU has no matrix units (XMX) and relies only on the `DP4a` instruction, four int8 multiplies in one step, with a peak of about 13 TOPS. arcinfer converts all weights to int8 (W8), quantizes the activations per 32 values, and runs them through its own DP4a GEMM kernels, which reach 6–9 TOPS.
+Prefill behaves differently from generation. Thousands of tokens are processed together, so the weights are reused many times and the limit moves from memory bandwidth to compute. This iGPU has no matrix units (XMX) and relies only on the `DP4a` instruction, four int8 multiplies in one step, with a peak of about 13 TOPS. arcinferzero converts all weights to int8 (W8), quantizes the activations per 32 values, and runs them through its own DP4a GEMM kernels, which reach 6–9 TOPS.
 
 For comparison, here are results against llama.cpp (build b11527, Vulkan and SYCL backends, flash attention on, best ubatch) with the same prompts:
 
@@ -482,7 +482,7 @@ For comparison, here are results against llama.cpp (build b11527, Vulkan and SYC
 
 #### Prefill speed pp2048 (tokens/s)
 
-| Model | arcinfer | llama.cpp Vulkan | llama.cpp SYCL |
+| Model | arcinferzero | llama.cpp Vulkan | llama.cpp SYCL |
 |---|---|---|---|
 | Qwen3.5 4B | 911 | 242 | 337 |
 | Qwen3.5 9B | 402 | 151 | 189 |
@@ -490,7 +490,7 @@ For comparison, here are results against llama.cpp (build b11527, Vulkan and SYC
 | Qwen3.8 27B | 113 | 23 | 25 |
 | Qwen3.6 35B | 642 | – | – |
 
-Source: bench/results/results.jsonl, 10 October (first test). Gemma 4 12B used a community Q4_K_M quantization file; SYCL was not tested. Qwen3.6 35B: llama.cpp cannot load the GSQ file, so only the arcinfer number for the Unsloth Q3_K_M file is shown (13 October).
+Source: bench/results/results.jsonl, 10 October (first test). Gemma 4 12B used a community Q4_K_M quantization file; SYCL was not tested. Qwen3.6 35B: llama.cpp cannot load the GSQ file, so only the arcinferzero number for the Unsloth Q3_K_M file is shown (13 October).
 
 The lead also shows in generation after a long prompt. At 34K tokens of context Qwen3.8 27B still generates 3.70 tok/s, against 2.06 tok/s for Vulkan and 1.09 tok/s for SYCL. The difference comes from int8 attention: keys and values are stored as int8 with a per-row scale, and both the `Q·K` scores and `P·V` also use DP4a.
 

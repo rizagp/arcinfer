@@ -1,6 +1,6 @@
-# arcinfer review: how the speed developed
+# arcinferzero review: how the speed developed
 
-arcinfer is a from-scratch LLM inference engine for Intel's integrated Arc graphics, built on one laptop to shorten
+arcinferzero is a from-scratch LLM inference engine for Intel's integrated Arc graphics, built on one laptop to shorten
 the wait before a model starts answering a long prompt. It runs Qwen3.5, Qwen3.6 and Qwen3.8 (dense and mixture of
 experts) and Gemma 4 with image and audio input, serves an OpenAI-, Anthropic- and Ollama-compatible API, and plugs
 into the Pi coding agent. This page tells the story of the build from the first working forward pass to
@@ -282,16 +282,16 @@ needs `GGML_SYCL_ENABLE_VMM=0` on this driver). The prompts are scans of two loc
 for the Qwen tokenizer (13,921 and 35,957 for Gemma's), sent with the same token ids. llama.cpp SYCL on Gemma 4 12B,
 Gemma's Vulkan perplexity and a llama.cpp reference for the 35B (Unsloth's UD-IQ2_M) were not run: llama.cpp's long
 prompts on this iGPU would have taken hours more (the 27B's 34K prompt alone took 40 minutes on Vulkan). llama.cpp
-was not measured again after that day, while arcinfer kept getting faster (the tables above).
+was not measured again after that day, while arcinferzero kept getting faster (the tables above).
 
 The tables are written by `bench/review_data.py` from `bench/results/results.jsonl`.
 
 <!-- DATA-BEGIN -->
-Measured 2026-10-10 with the OpenCL engine; best of the repeated runs per engine. llama.cpp cannot load the GSQ 2-bit Qwen3.6 35B-A3B, so its row has arcinfer only.
+Measured 2026-10-10 with the OpenCL engine; best of the repeated runs per engine. llama.cpp cannot load the GSQ 2-bit Qwen3.6 35B-A3B, so its row has arcinferzero only.
 
 Time to first token (seconds) on the code prompts, and generation speed right after the prompt (tok/s):
 
-| Model | Prompt | Tokens | arcinfer TTFT | llama.cpp Vulkan TTFT | llama.cpp SYCL TTFT | arcinfer gen | llama.cpp Vulkan gen | llama.cpp SYCL gen |
+| Model | Prompt | Tokens | arcinferzero TTFT | llama.cpp Vulkan TTFT | llama.cpp SYCL TTFT | arcinferzero gen | llama.cpp Vulkan gen | llama.cpp SYCL gen |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
 | Qwen3.5 4B | code 11K | 11,240 | 14.3 | 69.0 | 41.7 | 16.13 | 13.62 | 12.77 |
 | Qwen3.5 4B | code 34K | 33,937 | 57.5 | 376.1 | 162.9 | 15.71 | 10.64 | 8.15 |
@@ -306,7 +306,7 @@ Time to first token (seconds) on the code prompts, and generation speed right af
 
 Synthetic throughput (llama-bench style; tok/s): prompt processing over 512 and 2,048 tokens, generation of 64 tokens after a short prompt:
 
-| Model | arcinfer pp512 | llama.cpp Vulkan pp512 | llama.cpp SYCL pp512 | arcinfer pp2048 | llama.cpp Vulkan pp2048 | llama.cpp SYCL pp2048 | arcinfer tg64 | llama.cpp Vulkan tg64 | llama.cpp SYCL tg64 |
+| Model | arcinferzero pp512 | llama.cpp Vulkan pp512 | llama.cpp SYCL pp512 | arcinferzero pp2048 | llama.cpp Vulkan pp2048 | llama.cpp SYCL pp2048 | arcinferzero tg64 | llama.cpp Vulkan tg64 | llama.cpp SYCL tg64 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | Qwen3.5 4B | 919.2 | 263.9 | 295.3 | 911.3 | 241.6 | 337.4 | 17.6 | 16.2 | 17.9 |
 | Qwen3.5 9B | 317.0 | 158.4 | 161.5 | 401.6 | 150.8 | 189.0 | 10.3 | 9.5 | 11.1 |
@@ -316,7 +316,7 @@ Synthetic throughput (llama-bench style; tok/s): prompt processing over 512 and 
 
 Perplexity (40 chunks of 512 tokens of llama.cpp documentation, second half of each chunk scored; lower is better). Gemma 4's raw-text perplexity is not a usable accuracy metric on this corpus (see Accuracy); the 35B row is the GSQ file, which llama.cpp cannot load:
 
-| Model | arcinfer | llama.cpp Vulkan | llama.cpp SYCL |
+| Model | arcinferzero | llama.cpp Vulkan | llama.cpp SYCL |
 |---|---:|---:|---:|
 | Qwen3.5 4B | 6.0562 | 6.1410 | 6.1380 |
 | Qwen3.5 9B | 5.4172 | 5.4987 | 5.4969 |
@@ -333,7 +333,7 @@ generated 3.7 tok/s at 34K tokens against 2.06 (Vulkan) and 1.09 (SYCL).
 
 ## Speculative decoding
 
-All drafting in arcinfer keeps the output: the drafts are verified in one main-model pass and the next token is still
+All drafting in arcinferzero keeps the output: the drafts are verified in one main-model pass and the next token is still
 taken from the main model's distribution. Every change was accepted only with greedy answers identical to plain
 decoding.
 
@@ -422,7 +422,7 @@ kernel): 4B 0.00064 / 0.00067 vs 0.00062 / 0.00064, 9B 0.00069 vs 0.00060, 35B 0
 0.000355 → 0.000414, so these differences are within noise.
 
 The audit that mattered most: on Gemma 4 the drift from the reference grew with the context, up to complete flips of
-the predicted token. Re-running the f32 reference with each piece of arcinfer's int8 rounding simulated in turn
+the predicted token. Re-running the f32 reference with each piece of arcinferzero's int8 rounding simulated in turn
 pointed at the V cache: Gemma's V rows hold a few large values, and one scale per row left the rest with too few
 levels. One scale per 64 dims removed the flips and halved the drift, at 1.5–1.8x the attention time for Gemma only.
 Gemma 4 is about 7x more sensitive to int8 activations than Qwen3.5 (activations rounded to int8 alone, in the f32
@@ -430,9 +430,9 @@ reference: KL 0.009 vs 0.001). Flash Next is more sensitive still: every matrix 
 decided the vision encoders: the Qwen3-VL encoder drifted 10–23 % with int8 activations, so it runs in floating point.
 
 Perplexity in the 10 October benchmark (see the comparison tables) was 6.06 / 5.42 / 4.27 for the 4B / 9B / 27B on
-arcinfer against 6.14 / 5.50 / 4.31 on llama.cpp Vulkan. On the 4B, int8 attention and requantized Q4_K together
+arcinferzero against 6.14 / 5.50 / 4.31 on llama.cpp Vulkan. On the 4B, int8 attention and requantized Q4_K together
 changed perplexity by less than 0.06 % (5.4749 f32 attention, 5.4779 the default). Gemma's raw-text perplexity is not
-usable on this corpus: on 4 chunks the f32 CPU build of llama.cpp gives 130, Vulkan 120, SYCL 113, arcinfer 111.
+usable on this corpus: on 4 chunks the f32 CPU build of llama.cpp gives 130, Vulkan 120, SYCL 113, arcinferzero 111.
 
 ## What did not work
 

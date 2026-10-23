@@ -134,7 +134,7 @@ inline Json parse_or_string(const std::string& s) {
   if (Json::try_parse(s, j)) return j;
   return Json(s);
 }
-// Ollama model names carry a tag ("qwen3.6-35b-a3b:latest"); arcinfer's ids do not
+// Ollama model names carry a tag ("qwen3.6-35b-a3b:latest"); arcinferzero's ids do not
 inline std::string strip_tag(const std::string& m) {
   const size_t c = m.rfind(':');
   return c == std::string::npos ? m : m.substr(0, c);

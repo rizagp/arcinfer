@@ -1,5 +1,5 @@
 // arcinferzero: the engine on the Level Zero runtime (zero/clrt.h); it began as a copy of the OpenCL engine's src/engine.h (removed 2026-10-20).
-// arcinfer engine: Qwen3.5 / Qwen3.6 / Qwen3.8 dense (hybrid Gated DeltaNet + gated attention, GGUF arch
+// arcinferzero engine: Qwen3.5 / Qwen3.6 / Qwen3.8 dense (hybrid Gated DeltaNet + gated attention, GGUF arch
 // "qwen35"), their mixture-of-experts variant ("qwen35moe", GSQ 2-bit experts from tools/convert_gsq.py) and
 // Gemma 4 on Intel Xe-LPG integrated GPUs via OpenCL.
 //
@@ -1388,7 +1388,7 @@ class Engine {
   std::string gemm_src_, ops_src_, dec_src_;
   std::map<std::string, cl_kernel> kcache_;
   std::vector<cl_program> progs_;  // released with the engine
-  std::unique_ptr<XCache> xc_;     // arcinferzero: streamed experts (null: experts on the GPU as in arcinfer)
+  std::unique_ptr<XCache> xc_;     // streamed experts (null: experts on the GPU, as in the former OpenCL engine)
   bool stream_ = false;            // experts streamed (also set in dry runs, where xc_ stays null)
   uint64_t stream_bytes_ = 0;      // all routed experts in the GPU form
   std::vector<cl_mem> mems_;       // every buffer and sub-buffer, released with the engine
@@ -1531,7 +1531,8 @@ class Engine {
       hp.n_ff_exp = I("expert_feed_forward_length");
       hp.n_ff_shexp = I("expert_shared_feed_forward_length");
       // experts: GSQ 2-bit (tools/convert_gsq.py, zero/kernels/moe.cl) or standard GGUF types (decode.cl moe_*_q)
-      hp.moe_std = f_.get_str("arcinfer.expert_format", "") != "gsq2-v1";
+      // (the key is arcinferzero.expert_format; files converted before the rename, 2026-10-24, have arcinfer.)
+      hp.moe_std = f_.get_str("arcinferzero.expert_format", f_.get_str("arcinfer.expert_format", "")) != "gsq2-v1";
       hp.n_ff_exp_pad = padded_k(hp.n_ff_exp);
       // (Flash Next: FFN widths of 640, its down projections padded to 768 and its shared expert to 768 rows)
       if (hp.hc) hp.n_ff_shexp = padded_k(hp.n_ff_shexp);

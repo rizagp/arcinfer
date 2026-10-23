@@ -1,4 +1,4 @@
-"""Exercises arcinfer-server's OpenAI API: streaming + reasoning + tool calls + multi-turn prefix reuse."""
+"""Exercises arcinferzero-server's OpenAI API: streaming + reasoning + tool calls + multi-turn prefix reuse."""
 import json
 import sys
 import time

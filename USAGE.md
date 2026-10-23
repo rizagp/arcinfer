@@ -1,13 +1,13 @@
-# Using arcinfer
+# Using arcinferzero
 
-arcinfer is an LLM inference engine built specifically for this laptop (Intel Core Ultra 5 125H, integrated Intel
+arcinferzero is an LLM inference engine built specifically for this laptop (Intel Core Ultra 5 125H, integrated Intel
 Arc GPU). Its focus is processing long prompts quickly, for example when an agent such as Pi reads many code files.
 It runs GGUF models directly from the Hugging Face cache and serves an OpenAI-compatible API, so it can be used by
 Pi, by other apps, or through its built-in web UI.
 
 ## 1. Setup (once)
 
-Open PowerShell or Terminal in the arcinfer folder, then run:
+Open PowerShell or Terminal in the arcinferzero folder, then run:
 
 ```powershell
 .\setup.cmd
@@ -22,7 +22,7 @@ The setup is safe to run again (steps that are already done are skipped). It:
 - asks which models to download into the Hugging Face cache (`.\setup.cmd -Models 27b,4b` without asking; Gemma
   comes with its drafter and image projector; the 35B is downloaded and then converted). `huggingface_hub` /
   `numpy` are installed with pip when needed (it asks first);
-- adds the `arcinfer` provider to `~/.pi/agent/models.json` with every model it finds and each one's context
+- adds the `arcinferzero` provider to `~/.pi/agent/models.json` with every model it finds and each one's context
   (other providers are left unchanged, the previous file is kept as `models.json.bak`), and installs the `pi-arc`
   and `arc-server` commands into `~/.pi/agent/bin` (already on the PATH), so they can be called from any folder.
 
@@ -70,7 +70,7 @@ The server keeps running after Pi is closed. The next session is ready right awa
 and a repeated prompt (for example Pi's system prompt) comes from the cache. If `pi-arc` is called with another
 model, the server switches models automatically.
 
-Pi's system prompt is also saved to disk (`%LOCALAPPDATA%\arcinfer\zero\prefix`), so after the server restarts or
+Pi's system prompt is also saved to disk (`%LOCALAPPDATA%\arcinferzero\zero\prefix`), so after the server restarts or
 switches models, a new Pi session still starts within a few seconds (27B: ~5 s instead of ~40 s). Pi's system
 prompt contains the project folder and its `AGENTS.md`, so the saved prompts are grouped per project folder: each
 folder keeps its 2 latest versions and is not pushed out by other folders (27B: ~290 MB per file). All models
@@ -127,7 +127,7 @@ arc-server start -Model 35b -MtpDrafts 2 -ThinkBudget 4096 -NoSwap   # other opt
 arc-server help                # every option
 ```
 
-The server log is `%LOCALAPPDATA%\arcinfer\server.log`. The server uses port 8090.
+The server log is `%LOCALAPPDATA%\arcinferzero\server.log`. The server uses port 8090.
 
 **arcinferzero (the engine):** the server runs through Level Zero (Intel's GPU driver). For
 MoE models (Qwen3.6 35B) the experts are kept on the SSD and only the frequently used experts are in GPU memory (a
@@ -142,8 +142,8 @@ pi-arc 35b --no-stream               # without the SSD cache: every expert on th
 ```
 
 On first use, arcinferzero writes the expert file once (35B UD-IQ4_XS: 16 GB, about 2.5 minutes; Flash Next: 56 GB, about 9.5 minutes) to
-`%LOCALAPPDATA%\arcinfer\zero\`. This file can be deleted at any time; when it is missing, it is written again
-automatically. The cache size is set automatically: arcinfer uses the GPU memory Windows reports for the iGPU (your
+`%LOCALAPPDATA%\arcinferzero\zero\`. This file can be deleted at any time; when it is missing, it is written again
+automatically. The cache size is set automatically: arcinferzero uses the GPU memory Windows reports for the iGPU (your
 shared-memory setting) less 1.2 GB for the driver, and the cache takes what the rest of the model leaves (it can be
 changed: server options `--expert-cache-gb`, `--expert-cache-pct`). If GPU memory suddenly runs short because of other apps (e.g.
 Chrome), the cache shrinks itself by 1 GB per step instead of crashing.
@@ -153,14 +153,14 @@ arcinferzero notes:
   layer are in the same file). Dense models (27B, 9B, 4B, Gemma 12B / E4B) keep every weight on the GPU.
 - Expert files are never deleted automatically: the next start uses them right away (35B about 10 s, including
   filling the GPU cache from the last list). They are rewritten only when the GGUF changes; files of an old version
-  have to be deleted by hand from `%LOCALAPPDATA%\arcinfer\zero\`.
+  have to be deleted by hand from `%LOCALAPPDATA%\arcinferzero\zero\`.
 - Disk space: a MoE model's experts are stored twice, in the GGUF and in the expert file (Gemma 4 26B: 14.4 + 13.2
-  GB). `bin\serverz.exe --pack <model.gguf>` turns them into a package in `%LOCALAPPDATA%\arcinfer\zero\models\`: a
+  GB). `bin\serverz.exe --pack <model.gguf>` turns them into a package in `%LOCALAPPDATA%\arcinferzero\zero\models\`: a
   small GGUF with the other weights (26B: 1.6 GB) and the expert file (moved, not written again: seconds). Copy the
   `mmproj` file next to the package for images. The model list then uses the package, and the original GGUF can be
   moved to a backup disk. The package gives bit-identical logits and the same image answers (checked on the 26B,
   20 Oct; the 35B and Flash Next run from packages too).
-- GPU kernels are compiled once and then saved (`%LOCALAPPDATA%\arcinfer\kernels`): the first request of a model on
+- GPU kernels are compiled once and then saved (`%LOCALAPPDATA%\arcinferzero\kernels`): the first request of a model on
   zero, the first image, or the first use after an Intel driver update feels slower, after that it is normal.
 
 **DFlash2 drafter (`--dflash`, arcinferzero only: `serverz.exe` / `runz.exe`).** This drafter guesses 7 tokens at
@@ -204,14 +204,14 @@ engine's logits bit-identical alone, interleaved or batched). `ARC_NO_BATCH=1` t
 **Qwen3.8 Flash Next (arcinferzero only).** A MoE model with 512 experts fetched from the SSD (like the 35B). Run
 `serverz.exe` with `-m` pointing to the first file (`...-IQ3_S-00001-of-00002.gguf`); the second file must be in the
 same folder (or use `pi-arc flash` / `arc-server start -Model flash`). The first start writes a 56 GB expert file
-to `%LOCALAPPDATA%\arcinfer\zero\` (~9.5 minutes); later loads through the server take ~21–26 s. It writes ~6–7
+to `%LOCALAPPDATA%\arcinferzero\zero\` (~9.5 minutes); later loads through the server take ~21–26 s. It writes ~6–7
 tokens/s (the expert cache holds about a fifth of the experts at 131K); prompts: 166 tokens/s at 4K, ~145-163 at
 9-32K, ~123 at 125K. The automatic context is 131,072; up to 262,144 with `--ctx`. The difference from the CPU
 reference is small (KL 0.0014 on a short chat prompt, 0.020 on a 3,566-token prompt); accuracy at longer prompts is
 not measured. This model has no MTP block and cannot read images.
 
 Stop the server (`arc-server stop`) before using the laptop for other heavy GPU work (games, video editing), or
-before moving or rebuilding the arcinfer folder.
+before moving or rebuilding the arcinferzero folder.
 
 ## 4. Web UI and other apps
 
@@ -233,7 +233,7 @@ While the server is running:
   voice). The audio goes only to this server. Headphones avoid the AI hearing itself.
   With **Web** ticked as well, searches run in the background while you talk: the AI says it is looking, and
   talks about the results when they arrive.
-- **OpenAI API**: base URL `http://127.0.0.1:8090/v1`, any API key (for example `arcinfer`), model `qwen3.8-27b`
+- **OpenAI API**: base URL `http://127.0.0.1:8090/v1`, any API key (for example `arcinferzero`), model `qwen3.8-27b`
   (or the model currently loaded; other models in the list are loaded automatically). Supports streaming,
   `reasoning_content`, tool calls, `usage`, repetition penalties (`frequency_penalty`, `repeat_penalty`),
   `logit_bias`, `logprobs`, several answers at once (`n`), guaranteed-valid JSON answers (`response_format` with
@@ -265,7 +265,7 @@ Example from PowerShell:
 
 ```powershell
 $body = @{ model = "qwen3.8-27b"; reasoning_effort = "none"
-           messages = @(@{ role = "user"; content = "Hi! Explain arcinfer in one sentence." }) } | ConvertTo-Json -Depth 4
+           messages = @(@{ role = "user"; content = "Hi! Explain arcinferzero in one sentence." }) } | ConvertTo-Json -Depth 4
 (Invoke-RestMethod http://127.0.0.1:8090/v1/chat/completions -Method Post -ContentType "application/json" -Body $body).choices[0].message.content
 ```
 
@@ -273,7 +273,7 @@ From Python (the `openai` package):
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://127.0.0.1:8090/v1", api_key="arcinfer")
+client = OpenAI(base_url="http://127.0.0.1:8090/v1", api_key="arcinferzero")
 r = client.chat.completions.create(model="qwen3.8-27b", messages=[{"role": "user", "content": "Hi!"}],
                                    extra_body={"reasoning_effort": "none"})
 print(r.choices[0].message.content)
@@ -296,7 +296,7 @@ for the driver, or the model's training limit. The context adjusts itself when t
 | Gemma 4 12B | 262,144 tokens (full) |
 | Gemma 4 E4B | 131,072 tokens (full) |
 
-arcinfer uses the whole GPU share you set except 1.2 GiB for the driver, so the share decides how much RAM is left
+arcinferzero uses the whole GPU share you set except 1.2 GiB for the driver, so the share decides how much RAM is left
 for Windows: if the laptop becomes slow or stops responding while a model runs, lower the GPU memory setting.
 
 The output limit (`maxTokens` in Pi) equals the context size: Pi itself clamps it to the room left. Very long
@@ -332,7 +332,7 @@ Tips:
   your message is processed. The first session in a new project folder processes its system prompt once (27B:
   ~40 s).
 - Going back to an old session after another session (or the web UI) loads its conversation from disk in seconds:
-  the session cache is on by default (8 GB in `%LOCALAPPDATA%\arcinfer\zero\sessions`, delete with
+  the session cache is on by default (8 GB in `%LOCALAPPDATA%\arcinferzero\zero\sessions`, delete with
   `arc-server clear-cache`, turn off with `pi-arc --session-cache 0`). `arc-server stop` / `restart` and a model
   switch first save the conversation the server holds, so afterwards that conversation is loaded too, not processed
   again.
@@ -343,10 +343,10 @@ Tips:
   that way is the conversation being held saved first.
 - A hot laptop slows down by 5–10 %. Do not run other GPU work at the same time.
 
-## 7. Moving the arcinfer folder
+## 7. Moving the arcinferzero folder
 
 1. `arc-server stop`
-2. Move the `arcinfer` folder to its new location (File Explorer or `mv`).
+2. Move the `arcinferzero` folder to its new location (File Explorer or `mv`).
 3. Run setup again from the new location: `<new-folder>\setup.cmd -Models none`
 
 Only the `pi-arc` / `arc-server` shortcut commands store the folder location; everything else uses relative paths.
@@ -356,20 +356,20 @@ Only the `pi-arc` / `arc-server` shortcut commands store the folder location; ev
 | Symptom | Cause and fix |
 |---|---|
 | `pi-arc` is not recognized | Run `setup.cmd` (section 1), then open a new terminal. |
-| Setup fails at the build step | Visual Studio Build Tools (C++) is not installed; setup shows how to install it. The compiler output is in `%LOCALAPPDATA%\arcinfer\build.log`. |
+| Setup fails at the build step | Visual Studio Build Tools (C++) is not installed; setup shows how to install it. The compiler output is in `%LOCALAPPDATA%\arcinferzero\build.log`. |
 | "The server stopped while loading" | Look at the log it shows. Usually there is not enough GPU memory: close heavy apps, or use `--ctx 32768` / a smaller model. |
 | Windows is slow or stops responding while a model loads | The GPU memory is set too high (section 5): lower it in Intel Graphics Software, then `arc-server restart`. |
 | `web_search` in Pi answers "No results found" or never finishes | Its default search engines are DuckDuckGo and Startpage; DuckDuckGo is blocked in Indonesia, so neither returns results. Add Yandex in `%USERPROFILE%\.pi\agent\settings.json`: `"webSearch": {"engines": ["yandex", "startpage", "duckduckgo"]}` (or with the `/search-config` command in Pi). |
 | A new Pi session takes ~40 s before answering | Normal for the first session in a new project folder (the system prompt is processed once); later sessions in that folder are fast. |
 | "Model file ... not found" | The model has not been downloaded to the Hugging Face cache yet (see [README, section 6](README.md#6-download-models)). |
-| Models moved to another drive | Write the folders (one per line) in `%LOCALAPPDATA%\arcinfer\model-dirs.txt`, e.g. `D:\models` (a Hugging Face cache layout `models--...`, or `.gguf` files directly in that folder). The Hugging Face cache on C: is still searched first. If that drive is removed, its models disappear from the list until the drive is connected again. |
+| Models moved to another drive | Write the folders (one per line) in `%LOCALAPPDATA%\arcinferzero\model-dirs.txt`, e.g. `D:\models` (a Hugging Face cache layout `models--...`, or `.gguf` files directly in that folder). The Hugging Face cache on C: is still searched first. If that drive is removed, its models disappear from the list until the drive is connected again. |
 | Pi stops with a context error | Type `/compact` in Pi, or start a new session. |
 | The answer is very slow at the start | Normal for the first large prompt (see section 6); later ones use the cache. |
-| Want to see what is happening | `arc-server status`, and the log in `%LOCALAPPDATA%\arcinfer\server.log` (prompt processing time, speed, MTP statistics per request). |
+| Want to see what is happening | `arc-server status`, and the log in `%LOCALAPPDATA%\arcinferzero\server.log` (prompt processing time, speed, MTP statistics per request). |
 
 ## 9. Rebuilding from source
 
-Needs Visual Studio 2026 Build Tools (MSVC). From the arcinfer folder, `.\setup.cmd -Models none` rebuilds only what
+Needs Visual Studio 2026 Build Tools (MSVC). From the arcinferzero folder, `.\setup.cmd -Models none` rebuilds only what
 is needed (and stops the server first when `serverz.exe` is rebuilt too). Or by hand:
 
 ```powershell
@@ -379,6 +379,6 @@ arc-server stop
 
 GPU kernels (`zero\kernels\*.cl`) are compiled by the driver
 when the server starts, so kernel changes do not need a build.
-Compiled kernels are saved in `%LOCALAPPDATA%\arcinfer\kernels`, so only the first use of each variant waits for
+Compiled kernels are saved in `%LOCALAPPDATA%\arcinferzero\kernels`, so only the first use of each variant waits for
 compilation.
 Regression tests: `.\tests\run_tests.ps1 -Model4B <path to 4B gguf> -Model27B <path to 27B gguf> -ModelGemma <path to Gemma 12B> -Model35B <path to 35B gguf>`.

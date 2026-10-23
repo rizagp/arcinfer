@@ -325,7 +325,7 @@ model is fine ("yang penting akurat"); other models (Qwen) stay bit-identical. O
 and E4B), then 21.3 / 21.4 for all three, then the speed items checked against the same KL.
 
 The user: optimize the 26B "until done", MTP as other 26B builds have, tiling and sub-grouping too, and an
-acceptable KL divergence below 0.01. Measured on the package (`%LOCALAPPDATA%\arcinfer\zero\models\gemma-4-26B_q4_0-it`,
+acceptable KL divergence below 0.01. Measured on the package (`%LOCALAPPDATA%\arcinferzero\zero\models\gemma-4-26B_q4_0-it`,
 experts once on disk), 480 tokens of `bench/prompts/gemma-code-11k.ids.txt` against `tools/ref_forward` (f32, now
 reading packages): engine KL 0.0985 (top token 433 / 480).
 
@@ -374,7 +374,7 @@ So both are needed (each alone leaves 0.07-0.09); with both the KL is at the mod
 ## F22: web search / web fetch for the web UI (requested 2026-10-21)
 
 The user wants the web UI to search and fetch the web as Pi does (Pi uses the `pi-unsloth-webtools` package).
-That package is **AGPL-3.0** (a port of Unsloth Studio's backend); arcinfer is Apache-2.0, so **do not copy, port
+That package is **AGPL-3.0** (a port of Unsloth Studio's backend); arcinferzero is Apache-2.0, so **do not copy, port
 or read its code**: write an independent implementation (the user chose this, option B).
 
 | # | Item | Status | Notes |

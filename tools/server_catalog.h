@@ -3,10 +3,10 @@
 // own. Split out of tools/server.cpp unchanged on 2026-10-24 (QUEUE item 11).
 
 // ---------------------------------------------------------------- model catalog
-// The GGUF models in the Hugging Face cache and in arcinfer's model folder: name (org/repo), file, path, size (a
+// The GGUF models in the Hugging Face cache and in arcinferzero's model folder: name (org/repo), file, path, size (a
 // split file: all its parts), architecture, trained context, whether an image projector (mmproj-*, with or without
 // a Gemma 4 audio encoder) or a Gemma drafter (mtp-*) sits next to it, Qwen MTP layers, and the model id clients use
-// (the alias; the six models arcinfer was tuned on keep their short ids). Projectors, drafters and the later parts
+// (the alias; the six models arcinferzero was tuned on keep their short ids). Projectors, drafters and the later parts
 // of split files are not models.
 struct ModelInfo {
   std::string name, file, path, arch, alias, shortcut;
@@ -45,7 +45,7 @@ static std::string hf_hub_dir() {
   if (const char* u = getenv("USERPROFILE")) return std::string(u) + "/.cache/huggingface/hub";
   return "";
 }
-// extra model folders (e.g. a second drive): ARC_MODEL_DIRS (';'-separated) and %LOCALAPPDATA%\arcinfer\model-dirs.txt
+// extra model folders (e.g. a second drive): ARC_MODEL_DIRS (';'-separated) and %LOCALAPPDATA%\arcinferzero\model-dirs.txt
 // (one folder per line, '#' comments); each in the Hugging Face cache layout or with .gguf files directly in it
 static std::vector<std::string> extra_model_dirs() {
   std::vector<std::string> extra;
@@ -62,8 +62,8 @@ static std::vector<std::string> extra_model_dirs() {
       add(all.substr(a, b - a));
     }
   }
-  if (const char* la = getenv("LOCALAPPDATA")) {
-    std::ifstream f(std::filesystem::path(la) / "arcinfer" / "model-dirs.txt");
+  {
+    std::ifstream f(std::filesystem::path(app_dir()) / "model-dirs.txt");
     for (std::string line; std::getline(f, line);) add(line);
   }
   return extra;
@@ -86,7 +86,7 @@ static int folder_reachable(const std::filesystem::path& d) {
 static std::vector<ModelInfo> scan_models() {
   namespace fs = std::filesystem;
   const std::string hub = hf_hub_dir();
-  // (prio: 0 the Hugging Face cache and arcinfer's own folders, 1+ the extra model folders in their order, so a model
+  // (prio: 0 the Hugging Face cache and arcinferzero's own folders, 1+ the extra model folders in their order, so a model
   //  kept in both places loads from the first)
   struct Cand { std::string name, file; fs::path path; fs::file_time_type t; int prio = 0; };
   std::vector<Cand> cands;
@@ -125,10 +125,9 @@ static std::vector<ModelInfo> scan_models() {
       ++prio;
     }
   }
-  if (const char* la = getenv("LOCALAPPDATA"))
-    for (const auto& e : fs::directory_iterator(fs::path(la) / "arcinfer" / "models", ec))
-      if (is_model(e.path())) cands.push_back({"arcinfer/" + e.path().stem().string(), e.path().filename().string(), e.path(), e.last_write_time(ec)});
-  // arcinferzero packages (zero/gguf_pack.h): %LOCALAPPDATA%\arcinfer\zero\models\<name>\<name>.gguf
+  for (const auto& e : fs::directory_iterator(fs::path(app_dir()) / "models", ec))
+    if (is_model(e.path())) cands.push_back({"arcinferzero/" + e.path().stem().string(), e.path().filename().string(), e.path(), e.last_write_time(ec)});
+  // arcinferzero packages (zero/gguf_pack.h): %LOCALAPPDATA%\arcinferzero\zero\models\<name>\<name>.gguf
   for (const auto& d : fs::directory_iterator(zpack::packages_dir(), ec)) {
     const fs::path g = d.path() / (d.path().filename().string() + ".gguf");
     if (d.is_directory(ec) && fs::exists(g, ec))
@@ -170,7 +169,7 @@ static std::vector<ModelInfo> scan_models() {
     try {
       GgufFile g(m.path);
       m.arch = g.get_str("general.architecture", "?");
-      gsq = g.get_str("arcinfer.expert_format", "") == "gsq2-v1";
+      gsq = g.get_str("arcinferzero.expert_format", g.get_str("arcinfer.expert_format", "")) == "gsq2-v1";  // (old name too)
       m.ctx_train = g.get_int(m.arch + ".context_length", 0);
       nextn = g.get_int(m.arch + ".nextn_predict_layers", 0);
       m.moe = g.get_int(m.arch + ".expert_count", 0) > 0;
@@ -180,7 +179,7 @@ static std::vector<ModelInfo> scan_models() {
     for (const auto& s : fs::directory_iterator(c.path.parent_path(), ec)) {
       const std::string f = lower(s.path().filename().string());
       if (s.path().extension() != ".gguf") continue;
-      if (f.find("mmproj") != std::string::npos && !mmproj) {  // images: a projector arcinfer reads
+      if (f.find("mmproj") != std::string::npos && !mmproj) {  // images: a projector arcinferzero reads
         try {
           const GgufFile g(s.path().string());
           const std::string pt = g.get_str("clip.vision.projector_type", "");
@@ -229,12 +228,13 @@ static std::vector<ModelInfo> scan_models() {
   // folders (a backup on another drive); the others get -2, -3, ...
   {
     std::error_code e2;
-    const std::string hub_c = lower_ascii(fs::weakly_canonical(hf_hub_dir(), e2).string());
+    const std::string hub_c = lower_ascii(fs::weakly_canonical(hf_hub_dir(), e2).string()),
+                      pk_c = lower_ascii(fs::weakly_canonical(zpack::packages_dir(), e2).string());
     std::vector<std::pair<int, ModelInfo>> ranked;  // (each path looked at once)
     for (ModelInfo& m : out) {
       std::error_code e3;
       const std::string p = lower_ascii(fs::weakly_canonical(m.path, e3).string());
-      const int r = m.name.rfind("arcinferzero/", 0) == 0 ? 0 : !hub_c.empty() && p.rfind(hub_c, 0) == 0 ? 1 : 2;
+      const int r = p.rfind(pk_c, 0) == 0 ? 0 : !hub_c.empty() && p.rfind(hub_c, 0) == 0 ? 1 : 2;
       ranked.push_back({r, std::move(m)});
     }
     std::stable_sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
@@ -354,7 +354,7 @@ static std::string find_dflash(const std::string& model) {
 // The largest context (a multiple of 4096, at most the trained one) for which the server's GPU memory, the ~0.22 GiB
 // the driver adds and ~0.95 GiB for the desktop and other apps fit the device's global memory. A dry load (the
 // engine adds up its allocations without making them: seconds, no GPU memory) gives what does not depend on the
-// context; the result is remembered per model file, chunk size, MTP setting and device memory in %LOCALAPPDATA%\arcinfer\ctx-auto.txt.
+// context; the result is remembered per model file, chunk size, MTP setting and device memory in %LOCALAPPDATA%\arcinferzero\ctx-auto.txt.
 static uint64_t device_global_mem() {
   static uint64_t dev = 0;
   if (!dev) {
@@ -366,8 +366,7 @@ static uint64_t device_global_mem() {
   return dev;
 }
 static std::string ctx_cache_file() {
-  const char* la = getenv("LOCALAPPDATA");
-  return std::string(la ? la : ".") + ARC_DATA "ctx-auto.txt";
+  return app_dir() + ARC_DATA "ctx-auto.txt";
 }
 static std::string ctx_key(const std::string& model, const EngineOptions& eo) {
   namespace fs = std::filesystem;

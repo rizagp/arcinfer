@@ -1,4 +1,4 @@
-"""Extracts the IQ codebook tables from ggml-common.h into a standalone C++ header for arcinfer."""
+"""Extracts the IQ codebook tables from ggml-common.h into a standalone C++ header for arcinferzero."""
 import re
 import sys
 

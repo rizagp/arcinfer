@@ -1,7 +1,7 @@
-# Benchmarks arcinfer against llama.cpp (official Vulkan and SYCL builds) on the same models, prompts and text.
+# Benchmarks arcinferzero against llama.cpp (official Vulkan and SYCL builds) on the same models, prompts and text.
 # Every measurement is appended as one JSON object per line to $Out.
 #
-#   .\bench\run_bench.ps1 -Model <gguf> -Name 4b -Engines arcinfer,vulkan,sycl -Tests pp,ttft,ppl -Out results.jsonl
+#   .\bench\run_bench.ps1 -Model <gguf> -Name 4b -Engines arcinferzero,vulkan,sycl -Tests pp,ttft,ppl -Out results.jsonl
 #
 # Tests:  pp   = synthetic prompt processing (pp512, pp2048) + token generation (tg64), llama-bench style
 #         ttft = time to first token on real code prompts (token-id files) + generation speed at that context
@@ -9,7 +9,7 @@
 param(
   [Parameter(Mandatory)] [string]$Model,
   [Parameter(Mandatory)] [string]$Name,
-  [string[]]$Engines = @("arcinfer", "vulkan", "sycl"),
+  [string[]]$Engines = @("arcinferzero", "vulkan", "sycl"),
   [string[]]$Tests = @("pp", "ttft", "ppl"),
   [string[]]$PromptFiles = @(),
   [string]$Corpus = "",
@@ -56,7 +56,7 @@ foreach ($engine in $Engines) {
   Write-Host "=== $Name / $engine ==="
   # ---------------------------------------------------------------- synthetic pp / tg
   if ($Tests -contains "pp") {
-    if ($engine -eq "arcinfer") {
+    if ($engine -eq "arcinferzero") {
       foreach ($n in 512, 2048) {
         Cool
         Push-Location $arcDir
@@ -64,8 +64,8 @@ foreach ($engine in $Engines) {
         Pop-Location
         $runs = [regex]::Matches($o, "pp$n run \d: [\d.]+ ms\s+->\s+([\d.]+) tokens/s") | ForEach-Object { [double]$_.Groups[1].Value }
         $tg = [regex]::Match($o, "tg64: [\d.]+ ms\s+->\s+([\d.]+) tokens/s").Groups[1].Value
-        Emit @{ engine = "arcinfer"; test = "pp$n"; tps = ($runs | Select-Object -Skip 1 | Measure-Object -Maximum).Maximum }
-        if ($n -eq 512) { Emit @{ engine = "arcinfer"; test = "tg64"; tps = [double]$tg } }
+        Emit @{ engine = "arcinferzero"; test = "pp$n"; tps = ($runs | Select-Object -Skip 1 | Measure-Object -Maximum).Maximum }
+        if ($n -eq 512) { Emit @{ engine = "arcinferzero"; test = "tg64"; tps = [double]$tg } }
       }
     } else {
       $exe = Llama $engine "llama-bench.exe"
@@ -85,13 +85,13 @@ foreach ($engine in $Engines) {
       $n = ($ids -split ",").Count
       $tag = [IO.Path]::GetFileNameWithoutExtension($pf) -replace "\.ids$", ""
       Cool
-      if ($engine -eq "arcinfer") {
+      if ($engine -eq "arcinferzero") {
         Push-Location $arcDir
         $o = & $arc $Model --tokens-file $pf --n 32 --ctx ($n + 64) 2>&1 | Out-String
         Pop-Location
         $ttft = [regex]::Match($o, "time to first token ([\d.]+) ms").Groups[1].Value
         $g = [regex]::Match($o, "generation: (\d+) tokens in ([\d.]+) ms \(([\d.]+) t/s\)")
-        Emit @{ engine = "arcinfer"; test = "ttft"; prompt = $tag; n_prompt = $n; ttft_s = [double]$ttft / 1000;
+        Emit @{ engine = "arcinferzero"; test = "ttft"; prompt = $tag; n_prompt = $n; ttft_s = [double]$ttft / 1000;
                 pp_tps = $n / ([double]$ttft / 1000); tg_tps = [double]$g.Groups[3].Value; tg_n = [int]$g.Groups[1].Value }
       } else {
         $port = 8097
@@ -113,12 +113,12 @@ foreach ($engine in $Engines) {
   # ---------------------------------------------------------------- perplexity
   if ($Tests -contains "ppl" -and $Corpus) {
     Cool
-    if ($engine -eq "arcinfer") {
+    if ($engine -eq "arcinferzero") {
       Push-Location $arcDir
       $o = & $arc $Model --perplexity $Corpus --ppl-ctx 512 --ppl-chunks $PplChunks 2>&1 | Out-String
       Pop-Location
       $m = [regex]::Match($o, "perplexity: ([\d.]+) over (\d+) chunks .* in ([\d.]+) s")
-      Emit @{ engine = "arcinfer"; test = "ppl"; ppl = [double]$m.Groups[1].Value; chunks = [int]$m.Groups[2].Value; seconds = [double]$m.Groups[3].Value }
+      Emit @{ engine = "arcinferzero"; test = "ppl"; ppl = [double]$m.Groups[1].Value; chunks = [int]$m.Groups[2].Value; seconds = [double]$m.Groups[3].Value }
     } else {
       $exe = Llama $engine "llama-perplexity.exe"
       $t0 = Get-Date

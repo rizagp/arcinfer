@@ -27,7 +27,7 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
   auto L = std::make_unique<Loaded>();
   L->alias = alias;
   L->path = model;
-  fprintf(stderr, "arcinfer-server: loading %s\n", model.c_str());
+  fprintf(stderr, "arcinferzero-server: loading %s\n", model.c_str());
   EngineOptions eo = so.eo;
   bool dfl_auto = false;
   if (eo.mtp && eo.dflash.empty() && so.dflash_auto) {  // (before --ctx auto: the drafter takes GPU memory)
@@ -87,7 +87,7 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
   srv.model_bytes_ = gguf_bytes(model);
   std::string mmproj = so.mmproj;
   if (!eng.hp.gemma && mmproj != "-") {
-    // Qwen vision (dense and MoE): --mmproj, or an mmproj-*.gguf next to the model with a Qwen3-VL projector arcinfer runs
+    // Qwen vision (dense and MoE): --mmproj, or an mmproj-*.gguf next to the model with a Qwen3-VL projector arcinferzero runs
     if (mmproj.empty())
       for (const auto& de : std::filesystem::directory_iterator(std::filesystem::path(model).parent_path()))
         if (lower_ascii(de.path().filename().string()).find("mmproj") != std::string::npos && de.path().extension() == ".gguf") { mmproj = de.path().string(); break; }
@@ -160,22 +160,18 @@ static std::unique_ptr<Loaded> load_model(const std::string& model, const std::s
   if (!eo.mtp) layout += "-std";
   if (eo.mtp && !eo.dflash.empty() && !eo.mtp_block) layout += "-nomtp";
   if (L->eng->hp.gemma) layout += "-q2";  // (Gemma 4: two-pass states; the one-pass ones of before 2026-10-22 stay unused)
-  if (so.prefix_cache && eo.attn_int8) {  // %LOCALAPPDATA%\arcinfer\prefix\<model>-<size>[<layout>]
+  if (so.prefix_cache && eo.attn_int8) {  // %LOCALAPPDATA%\arcinferzero\prefix\<model>-<size>[<layout>]
     std::error_code ec;
     const std::filesystem::path mp(model);
-    const char* la = getenv("LOCALAPPDATA");
-    srv.open_prefix_cache(std::string(la ? la : ".") + ARC_DATA "prefix/" + mp.stem().string() + "-" +
+    srv.open_prefix_cache(app_dir() + ARC_DATA "prefix/" + mp.stem().string() + "-" +
                           std::to_string(std::filesystem::file_size(mp, ec)) + layout, so.prefix_gb);
   }
   if (so.sess_gb > 0 && eo.attn_int8) {
-    // saved conversations of this model file: %LOCALAPPDATA%\arcinfer\sessions\<model>-<size>
+    // saved conversations of this model file: %LOCALAPPDATA%\arcinferzero\sessions\<model>-<size>
     std::error_code ec;
     const std::filesystem::path mp(model);
     std::string dir = so.sess_dir;
-    if (dir.empty()) {
-      const char* la = getenv("LOCALAPPDATA");
-      dir = std::string(la ? la : ".") + ARC_DATA "sessions";
-    }
+    if (dir.empty()) dir = app_dir() + ARC_DATA "sessions";
     srv.open_sessions(dir + "/" + mp.stem().string() + "-" + std::to_string(std::filesystem::file_size(mp, ec)) + layout,
                       so.sess_gb);
   }

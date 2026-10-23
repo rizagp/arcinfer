@@ -1,9 +1,10 @@
-// arcinferzero: the subset of the OpenCL API the arcinfer engine uses, implemented on Level Zero, so that
+// arcinferzero: the subset of the OpenCL API the engine uses (it began as an OpenCL engine), implemented on Level Zero, so that
 // zero/engine.h (begun as a copy of the OpenCL engine's src/engine.h) runs unchanged on top of it. Buffers are device USM allocations (a sub-buffer is
-// a pointer into its parent), commands go to one in-order immediate command list (the same order as arcinfer's in-order
+// a pointer into its parent), commands go to one in-order immediate command list (the same order as the former OpenCL engine's in-order
 // OpenCL queue, hence the same results), and kernels are the native binaries of the OpenCL compiler: built through
-// OpenCL.dll (loaded under other names) and shared with arcinfer's kernel cache (%LOCALAPPDATA%\arcinfer\kernels).
+// OpenCL.dll (loaded under other names) and the kernel cache (%LOCALAPPDATA%\arcinferzero\kernels) is the one the OpenCL engine used.
 #pragma once
+#include "../src/app_dir.h"
 #include "ze_min.h"
 #include <dxgi1_4.h>
 #pragma comment(lib, "dxgi.lib")
@@ -488,7 +489,7 @@ struct ClRt {
     char name[256] = {}, drv[256] = {};
     zrt::rcl::getDeviceInfo(zrt::rcl::device, 0x102B, sizeof(name) - 1, name, nullptr);  // CL_DEVICE_NAME
     zrt::rcl::getDeviceInfo(zrt::rcl::device, 0x102D, sizeof(drv) - 1, drv, nullptr);   // CL_DRIVER_VERSION
-    device_id = std::string(name) + "|" + drv;  // (the same key as arcinfer's kernel cache)
+    device_id = std::string(name) + "|" + drv;  // (the same key as the OpenCL engine's kernel cache)
     {  // CL_DEVICE_SUB_GROUP_SIZES_INTEL; ARC_NO_SG8=1 takes the 16-lane kernels anyway (tests)
       size_t sz[8] = {}, ret = 0;
       if (zrt::rcl::getDeviceInfo(zrt::rcl::device, 0x4108, sizeof sz, sz, &ret) == 0 && ret >= sizeof(size_t)) {
@@ -505,7 +506,7 @@ struct ClRt {
         xmx = !sg8 && ext.find("cl_intel_subgroup_matrix_multiply_accumulate") != std::string::npos;
       if (getenv("ARC_NO_XMX") && atoi(getenv("ARC_NO_XMX")) != 0) xmx = false;
     }
-    if (const char* la = getenv("LOCALAPPDATA"); la && !getenv("ARC_NO_KCACHE")) cache_dir = std::string(la) + "\\arcinfer\\kernels";
+    if (!getenv("ARC_NO_KCACHE")) cache_dir = app_dir() + "\\kernels";
     // a second engine in the process (the server switching models, after the first one freed its memory) keeps the
     // runtime: the context, its command lists and events, the staging buffer (all of zrt:: belongs to that context)
     if (zrt::ctx) return true;

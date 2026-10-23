@@ -1,4 +1,4 @@
-"""Compares arcinfer's native chat rendering (chat_render.exe) with the GGUF Jinja templates rendered by jinja2."""
+"""Compares arcinferzero's native chat rendering (chat_render.exe) with the GGUF Jinja templates rendered by jinja2."""
 import json
 import os
 import subprocess

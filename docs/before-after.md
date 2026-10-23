@@ -29,10 +29,10 @@ Two conversations at once (`--slots 2`), both writing their answers, their next 
 the two together): 27B prose 7.3 -> 10.5, code 11.6 -> 15.4; 35B 20.2 -> 24.7, 29.0 -> 30.7; Gemma 4 26B 19.8 -> 26.2
 (taking turns -> batched; logits bit-identical to each slot alone).
 
-Against llama.cpp on the same files and laptop (10 October, arcinfer's OpenCL engine; arcinferzero gives the same
+Against llama.cpp on the same files and laptop (10 October, the project's first, OpenCL engine; the Level Zero engine gives the same
 logits as that engine and the newer numbers in the table above):
 
-| Model | Prompt, 2K tokens: arcinfer / llama.cpp Vulkan / SYCL | 34K-token code prompt, time to first token | Generation after the 34K prompt |
+| Model | Prompt, 2K tokens: arcinferzero / llama.cpp Vulkan / SYCL | 34K-token code prompt, time to first token | Generation after the 34K prompt |
 |---|---|---|---|
 | Qwen3.5 4B | 911 / 242 / 337 tok/s (**2.7-3.8x**) | 57.5 s / 376 s / 163 s | 15.7 / 10.6 / 8.2 tok/s |
 | Qwen3.5 9B | 402 / 151 / 189 | 96 s / 461 s / 243 s | 8.6 / 7.3 / 6.4 |
@@ -56,7 +56,7 @@ measures how far the int8 GPU arithmetic moves the model:
 
 **Perplexity against llama.cpp** (40 chunks of llama.cpp documentation, lower is better): Qwen3.5 4B 6.056 vs
 6.141 (Vulkan), 9B 5.417 vs 5.499, 27B 4.274 vs 4.311. Speed did not cost quality: on the same GGUF files
-arcinfer's int8 path scores as well as llama.cpp's.
+arcinferzero's int8 path scores as well as llama.cpp's.
 
 **Consistency.** The engine is deterministic: the same prompt gives the same logits, bit for bit, run after run.
 That property is what every speed change is held to:

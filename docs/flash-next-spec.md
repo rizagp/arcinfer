@@ -84,7 +84,7 @@ IQ2_S for dense and expert gate/up; **IQ4_NL (20)** and **Q2_0 (42)** for expert
 
 ## Risks / design points
 
-1. **K = 640** for every `ffn_down` (expert and shared): arcinfer assumes K % 256 == 0 (superblocks, activation scales
+1. **K = 640** for every `ffn_down` (expert and shared): arcinferzero assumes K % 256 == 0 (superblocks, activation scales
    per 256 or 32). Decision (2026-10-16): treat consecutive small blocks as a 256-element "superblock" (IQ4_NL: 8 x 18
    = 144 bytes; Q2_0: 4 x 18 = 72 bytes; both multiples of 8 for block reads) and pad each down row from K = 640 to 768
    with zero blocks (scale 0) when the experts are copied into the GPU cache: +20 % for the down projections only

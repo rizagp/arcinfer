@@ -1,5 +1,5 @@
 // Minimal OpenCL 3.0 declarations + dynamic loader for OpenCL.dll.
-// Only what arcinfer needs; avoids depending on the Khronos SDK.
+// Only what arcinferzero needs; avoids depending on the Khronos SDK.
 #pragma once
 #include <cstdint>
 #include <cstddef>

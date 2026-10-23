@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Converts the ISTA-DASLab GSQ checkpoint of Qwen3.6-35B-A3B (compressed-tensors "pack-quantized": 2-bit routed
-# experts, int8 attention / DeltaNet / shared experts / lm_head) into a GGUF for arcinfer (arch "qwen35moe").
+# experts, int8 attention / DeltaNet / shared experts / lm_head) into a GGUF for arcinferzero (arch "qwen35moe").
 #
 #   int8 matrices (group 128, or per channel for lm_head) -> Q8_0: the same int8 values, the scale per 32 as f16
 #   2-bit experts (q in {-2,-1,0,1} x bf16 scale per 128 inputs) -> the layout of kernels/moe.cl:
@@ -211,8 +211,8 @@ def main():
 
     # ---- metadata
     kv = [kv_str("general.architecture", "qwen35moe"),
-          kv_str("general.name", "Qwen3.6-35B-A3B GSQ 2-bit (ISTA-DASLab), arcinfer"),
-          kv_str("arcinfer.expert_format", "gsq2-v1")]
+          kv_str("general.name", "Qwen3.6-35B-A3B GSQ 2-bit (ISTA-DASLab), arcinferzero"),
+          kv_str("arcinferzero.expert_format", "gsq2-v1")]
     a = "qwen35moe."
     kv += [kv_u32(a + "block_count", nl), kv_u32(a + "context_length", tc.get("max_position_embeddings", 262144)),
            kv_u32(a + "embedding_length", E), kv_u32(a + "attention.head_count", nh),

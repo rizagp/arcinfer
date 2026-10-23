@@ -1,9 +1,9 @@
 // arcinferzero model packages: a MoE model kept without its original GGUF.
 //
-//   %LOCALAPPDATA%\arcinfer\zero\models\<name>\<name>.gguf      every tensor except the routed experts, all metadata
+//   %LOCALAPPDATA%\arcinferzero\zero\models\<name>\<name>.gguf      every tensor except the routed experts, all metadata
 //                                                              (the experts listed as virtual tensors: name, type,
 //                                                              shape) and "arcinferzero.package" = 1
-//   %LOCALAPPDATA%\arcinfer\zero\models\<name>\<name>.experts  the routed experts in the expert file layout
+//   %LOCALAPPDATA%\arcinferzero\zero\models\<name>\<name>.experts  the routed experts in the expert file layout
 //                                                              (expert_store.h), built from the source GGUF
 //
 // make_package() reads the source GGUF (one file or split parts, from any drive: a USB disk is fine) once and writes
@@ -24,8 +24,7 @@ inline bool is_expert_tensor(const std::string& name) {
   return name.find("_exps.weight") != std::string::npos;
 }
 inline std::string packages_dir() {
-  const char* la = getenv("LOCALAPPDATA");
-  return std::string(la ? la : ".") + "\\arcinfer\\zero\\models";
+  return app_dir() + "\\zero\\models";
 }
 
 // ---- a GGUF v3 writer for the metadata (with the stored types) and tensors

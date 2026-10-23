@@ -1,4 +1,4 @@
-# arcinfer launcher: a window with every model (and variant) serverz.exe finds, what each supports, how its automatic
+# arcinferzero launcher: a window with every model (and variant) serverz.exe finds, what each supports, how its automatic
 # context was counted (GPU memory by part), every server option, and the running server (state, GPU memory,
 # requests and speeds). Start / Stop go through arc-server.ps1, so the server keeps running after the window closes.
 # Start it with arc-launcher.cmd (project folder) or:  pwsh -STA -File scripts\arc-launcher.ps1
@@ -11,7 +11,8 @@ Add-Type -AssemblyName System.Drawing
 
 $root = Split-Path $PSScriptRoot -Parent
 $arcServer = Join-Path $PSScriptRoot "arc-server.ps1"
-$stateDir = Join-Path $env:LOCALAPPDATA "arcinfer"
+. (Join-Path $PSScriptRoot "app-dir.ps1")
+$stateDir = Get-AppDir  # (%LOCALAPPDATA%\arcinferzero; renamed from arcinfer once)
 New-Item -ItemType Directory -Force $stateDir | Out-Null
 # the engine: arcinferzero (bin\serverz.exe; MoE experts streamed from the SSD); the model list and its contexts come
 # from it
@@ -35,7 +36,7 @@ $script:running = $null
 $script:props = $null
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "arcinfer launcher"
+$form.Text = "arcinferzero launcher"
 $form.Size = New-Object System.Drawing.Size(1320, 860)
 $form.MinimumSize = New-Object System.Drawing.Size(1000, 640)
 $form.StartPosition = "CenterScreen"
@@ -154,7 +155,7 @@ Add-Opt "Prompt chunk" $chunkBox "smaller = more context, slower prompts" -Advan
 Add-Opt "Image tokens min / max" $imgMinBox -Advanced
 Add-Opt "" $imgMaxBox -Advanced
 Add-Opt "Resident W8 weights (GB)" $budgetBox "0 = chosen with the context" -Advanced
-Add-Opt "Session cache folder" $sessDirBox "empty = %LOCALAPPDATA%\arcinfer\zero\sessions" -Advanced
+Add-Opt "Session cache folder" $sessDirBox "empty = %LOCALAPPDATA%\arcinferzero\zero\sessions" -Advanced
 Add-Opt "Prefix cache (GB on disk)" $prefixBox "system prompts per project" -Advanced
 Add-Opt "" $noPrefixChk -Advanced
 Add-Opt "" $noSwapChk -Advanced
@@ -284,7 +285,7 @@ function Show-Detail {
   $L = New-Object System.Collections.Generic.List[string]
   $L.Add("$($m.name)")
   $L.Add("file    $($m.file)  ({0:N1} GB)" -f ($m.bytes / 1e9))
-  $L.Add("arch    $($m.arch)  -  " + $(if ($m.supported) { "supported by arcinfer" } else { "NOT supported by arcinfer" }))
+  $L.Add("arch    $($m.arch)  -  " + $(if ($m.supported) { "supported by arcinferzero" } else { "NOT supported by arcinferzero" }))
   $L.Add("id      $($m.alias)" + $(if ($m.short) { "   (shortcut: pi-arc $($m.short))" } else { "" }))
   $L.Add("variant $(if ($m.tags) { $m.tags } else { '-' })")
   $L.Add("MTP / drafter: $(if ($m.mtp) { 'yes (drafts checked by the main model: same output, faster)' } else { 'no' })")
@@ -425,7 +426,7 @@ function Start-Selected {
   if ($grid.SelectedRows.Count -eq 0) { return }
   $m = $grid.SelectedRows[0].Tag
   if (-not $m.supported) {
-    [void][System.Windows.Forms.MessageBox]::Show("arcinfer does not support this model yet (architecture $($m.arch)).", "arcinfer"); return
+    [void][System.Windows.Forms.MessageBox]::Show("arcinferzero does not support this model yet (architecture $($m.arch)).", "arcinferzero"); return
   }
   $a = @("start", "-Model", $m.alias)
   foreach ($k in @($script:over.Keys)) {
@@ -433,7 +434,7 @@ function Start-Selected {
     switch ($k) {
       "ctx" {
         if ($v -and $v -ne "auto") {
-          if ($v -notmatch '^\d+$') { [void][System.Windows.Forms.MessageBox]::Show("Context: a number of tokens, or auto.", "arcinfer"); return }
+          if ($v -notmatch '^\d+$') { [void][System.Windows.Forms.MessageBox]::Show("Context: a number of tokens, or auto.", "arcinferzero"); return }
           $a += @("-Ctx", $v)
         } elseif ($v -eq "auto") { $a += @("-Ctx", "auto") }
       }
@@ -488,7 +489,7 @@ $startBtn.Add_Click({ Start-Selected })
 $grid.Add_CellDoubleClick({ param($s, $e) if ($e.RowIndex -ge 0) { Start-Selected } })
 $grid.Add_SelectionChanged({ Show-Detail; Fill-Defaults; $startBtn.Enabled = -not ($script:actProc -and -not $script:actProc.HasExited) -and $grid.SelectedRows.Count -gt 0 })
 $stopBtn.Add_Click({
-    if ([System.Windows.Forms.MessageBox]::Show("Stop the server ($($script:running))? Its GPU memory is freed.", "arcinfer", "YesNo") -eq "Yes") {
+    if ([System.Windows.Forms.MessageBox]::Show("Stop the server ($($script:running))? Its GPU memory is freed.", "arcinferzero", "YesNo") -eq "Yes") {
       $msg.Text = "Stopping the server..."
       Start-Action @("stop")
     }
@@ -516,7 +517,7 @@ $timer.Add_Tick({
         if ($script:actProc.ExitCode -ne 0) {
           $err = Get-Content $script:actErr -Raw -ErrorAction SilentlyContinue
           $tail = Get-Content $script:actOut -Tail 8 -ErrorAction SilentlyContinue
-          [void][System.Windows.Forms.MessageBox]::Show("Failed:`n$(($tail -join "`n"))`n$err", "arcinfer")
+          [void][System.Windows.Forms.MessageBox]::Show("Failed:`n$(($tail -join "`n"))`n$err", "arcinferzero")
         }
         $script:actProc = $null
         Update-Status

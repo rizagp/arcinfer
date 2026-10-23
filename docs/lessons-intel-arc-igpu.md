@@ -1,6 +1,6 @@
 # LLM inference on an Intel Arc iGPU: what made it fast, and what did not
 
-Lessons from building arcinfer, a from-scratch inference engine for the integrated Arc GPU of a Meteor Lake laptop,
+Lessons from building arcinferzero, a from-scratch inference engine for the integrated Arc GPU of a Meteor Lake laptop,
 from the first working forward pass (early October 2026) to the Level Zero engine of 18 October 2026 (section 10:
 later lessons, to 23 October). Every number
 below was measured on one machine; your hardware, driver and models will differ, so treat them as starting points,
@@ -80,7 +80,7 @@ after the steps below (llama.cpp: 590 s Vulkan, 504 s SYCL).
 Prompt speed, tokens/s (10 October, OpenCL engine, same laptop; llama.cpp b11527 official builds, flash attention,
 best micro-batch per model):
 
-| Model | arcinfer pp2048 | llama.cpp Vulkan | llama.cpp SYCL |
+| Model | arcinferzero pp2048 | llama.cpp Vulkan | llama.cpp SYCL |
 |---|---|---|---|
 | Qwen3.5 4B | 911 | 242 | 337 |
 | Qwen3.5 9B | 402 | 151 | 189 |
@@ -225,7 +225,7 @@ the native binary; the module has to ask for it itself (`-ze-opt-large-register-
 that, decode attention at head size 256 spilled 4 KB per thread and took 3.6 instead of 1.9 ms per layer at 64K.
 
 **Reading the assembly** (`tools/kernel_isa.py`: Intel's `ocloc` compiles for Meteor Lake and disassembles; the
-driver's own binaries in arcinfer's kernel cache can be disassembled the same way, and they differ from ocloc's newer
+driver's own binaries in arcinferzero's kernel cache can be disassembled the same way, and they differ from ocloc's newer
 compiler). The prompt GEMM's hot loop (W8 per-32 scales, 256 GRF) is 1,957 instructions per superblock, 52 % DP4a;
 136 `mach` + extra `mul` come from `sc * acc`, an int32 multiply this GPU emulates. Removing it (a 16-bit scale, or
 the multiply done in float, both bit-identical) cut the loop to 1,751 instructions — and made the GEMM **3x slower**
@@ -294,7 +294,7 @@ predicating the loads gave 905 -> 843 ms, bit-identical. Check bit identity afte
   took 18.4 s for its first step (a dozen decode-attention variants compiled), then 238 ms per step; after an
   update, the 27B with DFlash2 needed 37 s for a 27-token prompt and then ran 1–3 tok/s while kernels compiled; a
   first image took ~60 s instead of ~3 s. Report the median step (runz prints it), warm up before timing, and in a
-  server compile ahead: arcinfer now runs a short prompt, a token and a verification pass of every draft count once
+  server compile ahead: arcinferzero now runs a short prompt, a token and a verification pass of every draft count once
   per model, options and kernel sources, with a marker in the kernel cache so later starts skip it (8 s once for the
   27B, 18 s for the 35B). A persistent kernel binary cache removes the stalls after the first use.
 - **The first request after a load also pays first-touch costs** for the weights (27B: 27.5 s for a 15-token request

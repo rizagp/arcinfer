@@ -1,12 +1,13 @@
 // arcinferzero: the routed experts of a MoE GGUF in a file of their own on the SSD, laid out for streaming:
-//   %LOCALAPPDATA%\arcinfer\zero\<gguf name>-<fingerprint>.experts
-// Every (layer, expert) is one record: its gate, up and down rows one after the other in the GPU raw form arcinfer
+//   %LOCALAPPDATA%\arcinferzero\zero\<gguf name>-<fingerprint>.experts
+// Every (layer, expert) is one record: its gate, up and down rows one after the other in the GPU raw form arcinferzero
 // uploads (src/quants.h gpu_raw_sb: regrouped / padded superblocks), the record padded to a multiple of 4 KB, so one
 // unbuffered read (FILE_FLAG_NO_BUFFERING: no Windows file cache in RAM) brings a whole expert, ready for the GPU.
 // The file is made from the GGUF when missing or when it does not match the GGUF (size, time, name: the fingerprint),
 // and reused otherwise; it can be deleted at any time.
 #pragma once
 #include <atomic>
+#include "../src/app_dir.h"
 #include "../src/gguf.h"
 #include "../src/quants.h"
 #include <chrono>
@@ -75,8 +76,7 @@ struct ExpertStore {
     mix(&kVersion, 4);
     char hex[17];
     snprintf(hex, sizeof hex, "%016llx", (unsigned long long)fp);
-    const char* la = getenv("LOCALAPPDATA");
-    const std::string dir = std::string(la ? la : ".") + "\\arcinfer\\zero";
+    const std::string dir = app_dir() + "\\zero";
     fs::create_directories(dir, ec);
     path = dir + "\\" + name + "-" + std::string(hex).substr(0, 8) + ".experts";
     const std::string def_path = path;  // (where the engine keeps this GGUF's expert file)

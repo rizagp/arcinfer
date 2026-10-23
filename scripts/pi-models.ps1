@@ -1,4 +1,4 @@
-# Pi's model list for arcinfer (provider "arcinfer" in ~/.pi/agent/models.json): every model serverz.exe can load,
+# Pi's model list for arcinferzero (provider "arcinferzero" in ~/.pi/agent/models.json): every model serverz.exe can load,
 # so Pi's /model switches between them (the server loads the requested one). Context window: each model's own, as
 # `serverz.exe --list-models` computes it for the current GPU memory; the running model's from the server.
 # Dot-sourced by pi-arc.ps1 and install-pi.ps1. Other providers in models.json are kept.
@@ -7,8 +7,11 @@ function Update-PiModels([string]$ServerExe, [string]$Base, [string]$RunningId =
   $cfgPath = Join-Path $env:USERPROFILE ".pi\agent\models.json"
   $cfg = if (Test-Path $cfgPath) { Get-Content $cfgPath -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
   if (-not $cfg.PSObject.Properties["providers"]) { $cfg | Add-Member providers ([pscustomobject]@{}) }
-  if (-not $cfg.providers.PSObject.Properties["arcinfer"]) {
-    $cfg.providers | Add-Member arcinfer ([pscustomobject]@{ baseUrl = "$Base/v1"; api = "openai-completions"; apiKey = "arcinfer"; models = @() })
+  # (the provider was called "arcinfer" until the project's rename, 2026-10-24: that entry is replaced)
+  $renamed = [bool]$cfg.providers.PSObject.Properties["arcinfer"]
+  if ($renamed) { $cfg.providers.PSObject.Properties.Remove("arcinfer") }
+  if (-not $cfg.providers.PSObject.Properties["arcinferzero"]) {
+    $cfg.providers | Add-Member arcinferzero ([pscustomobject]@{ baseUrl = "$Base/v1"; api = "openai-completions"; apiKey = "arcinferzero"; models = @() })
   }
   $list = New-Object System.Collections.Generic.List[object]
   # several files of one repository (e.g. Qwen3.6 35B UD-Q3_K_M and UD-Q3_K_S): the file name tells them apart in /model
@@ -17,8 +20,8 @@ function Update-PiModels([string]$ServerExe, [string]$Base, [string]$RunningId =
   foreach ($m in $all) {
     $n = if ($RunningId -and $m.alias -eq $RunningId -and $RunningCtx -gt 0) { $RunningCtx } elseif ($m.ctx -gt 0) { [int]$m.ctx } else { [int][Math]::Min(32768, $m.ctx_train) }
     $list.Add([pscustomobject][ordered]@{
-      # e.g. "unsloth/Qwen3.5-9B-MTP-GGUF - MTP + vision - 143K (arcinfer)" (ASCII: console output / PS 5 encodings)
-      id = $m.alias; name = ("{0}{1}{2} - {3}K (arcinfer)" -f $m.name, $(if ($shared -contains $m.name) { " " + ($m.file -replace '\.gguf$', '') } else { "" }), $(if ($m.tags) { " - $($m.tags)" } else { "" }), [int]($n / 1024)); reasoning = $true
+      # e.g. "unsloth/Qwen3.5-9B-MTP-GGUF - MTP + vision - 143K (arcinferzero)" (ASCII: console output / PS 5 encodings)
+      id = $m.alias; name = ("{0}{1}{2} - {3}K (arcinferzero)" -f $m.name, $(if ($shared -contains $m.name) { " " + ($m.file -replace '\.gguf$', '') } else { "" }), $(if ($m.tags) { " - $($m.tags)" } else { "" }), [int]($n / 1024)); reasoning = $true
       input = [string[]]$(if ($m.vision) { "text", "image" } else { "text" })  # typed: stays a JSON array with one item
       contextWindow = $n; maxTokens = $n
       cost = [ordered]@{ input = 0; output = 0; cacheRead = 0; cacheWrite = 0 }
@@ -26,9 +29,9 @@ function Update-PiModels([string]$ServerExe, [string]$Base, [string]$RunningId =
     })
   }
   $json = ($cfg | ConvertTo-Json -Depth 10)
-  $cfg.providers.arcinfer.models = $list.ToArray()
+  $cfg.providers.arcinferzero.models = $list.ToArray()
   $new = ($cfg | ConvertTo-Json -Depth 10)
-  if ($new -ne $json) {
+  if ($new -ne $json -or $renamed) {
     if (Test-Path $cfgPath) { Copy-Item $cfgPath "$cfgPath.bak" -Force }
     [IO.File]::WriteAllText($cfgPath, $new, (New-Object Text.UTF8Encoding($false)))  # no BOM (Node JSON.parse)
   }

@@ -4,7 +4,7 @@
 # usage: python -I scripts/hf-download.py REPO FILE [FILE ...] [--limit MBPS] [--rev REVISION]
 #   e.g. python -I scripts/hf-download.py unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-IQ4_XS.gguf
 # The files land where `hf download` puts them (HF_HUB_CACHE, else HF_HOME\hub, else ~\.cache\huggingface\hub,
-# snapshots\<commit>\FILE), so arcinfer finds them as usual. A dropped connection or a router that goes away is
+# snapshots\<commit>\FILE), so arcinferzero finds them as usual. A dropped connection or a router that goes away is
 # waited out (every 5..60 s, without limit) and the download continues from the partial file (FILE.incomplete next
 # to it); run the script again after stopping it and it continues too. --limit caps the average speed (default:
 # none). HF_TOKEN is sent only to huggingface.co, for gated or private repos, when it is set.
@@ -16,7 +16,7 @@ def cache_dir():
     return os.path.join(os.path.expanduser('~'), '.cache', 'huggingface', 'hub')
 
 def request(url, method='GET', start=0):
-    r = urllib.request.Request(url, method=method, headers={'User-Agent': 'arcinfer-hf-download/2'})
+    r = urllib.request.Request(url, method=method, headers={'User-Agent': 'arcinferzero-hf-download/2'})
     if os.environ.get('HF_TOKEN') and urllib.parse.urlparse(url).hostname == 'huggingface.co':
         r.add_header('Authorization', 'Bearer ' + os.environ['HF_TOKEN'])
     if start: r.add_header('Range', f'bytes={start}-')

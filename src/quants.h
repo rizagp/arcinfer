@@ -1,4 +1,4 @@
-// GGML quant block decoding (CPU reference) and repacking into arcinfer's GPU layouts.
+// GGML quant block decoding (CPU reference) and repacking into arcinferzero's GPU layouts.
 //
 // GPU layouts (all per 16-column group g and 256-element superblock s; "lane" = column within group):
 //   wq: [g][s][j=0..3][DPJ][lane] uint   -- data for the 64-element chunk j

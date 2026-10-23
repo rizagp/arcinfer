@@ -1,15 +1,15 @@
-// arcinfer-server: OpenAI-compatible HTTP server (chat completions with streaming, reasoning and tool calls),
+// arcinferzero-server: OpenAI-compatible HTTP server (chat completions with streaming, reasoning and tool calls),
 // prefix reuse across requests, and a built-in web UI.
-// usage: arcinfer-server -m model.gguf [--host 127.0.0.1] [--port 8080] [--ctx 40960] [--alias name] [--webui dir]
+// usage: arcinferzero-server -m model.gguf [--host 127.0.0.1] [--port 8080] [--ctx 40960] [--alias name] [--webui dir]
 //                       [--chunk N] [--budget GB] [--mtp] [--think-budget N] [--attn-f32] [--kernels dir]
 //                       [--session-cache-gb N] [--session-dir dir]   (saved conversations; default 0 = off)
 // Built as bin\serverz.exe (zero/serverz.cpp includes this file): the arcinferzero engine, zero/engine.h (Level Zero,
-// MoE experts streamed from the SSD), with its data folder %LOCALAPPDATA%\arcinfer\zero (context cache, saved
+// MoE experts streamed from the SSD), with its data folder %LOCALAPPDATA%\arcinferzero\zero (context cache, saved
 // prompts and conversations).
 #include "../zero/engine.h"
 #include "../zero/gguf_pack.h"
-#define ARC_DATA "/arcinfer/zero/"
-#define ARC_DATA_HELP "%%LOCALAPPDATA%%\\arcinfer\\zero\\"  // (the same folder, as --help prints it)
+#define ARC_DATA "/zero/"  // (under app_dir(), src/app_dir.h)
+#define ARC_DATA_HELP "%%LOCALAPPDATA%%\\arcinferzero\\zero\\"  // (the same folder, as --help prints it)
 #include "../src/tokenizer.h"
 #include "../src/chat.h"
 #include "../src/chat_gemma4.h"
@@ -43,9 +43,9 @@ static double ms_since(clk::time_point t) { return std::chrono::duration<double,
 
 // What a model takes as input, in the fields clients look for: llama-server ("modalities", and "capabilities" with
 // "multimodal" as in its Ollama-style list), Ollama ("vision"), OpenRouter ("architecture.input_modalities"),
-// LM Studio ("type": "vlm"). Only models whose image encoder arcinfer runs are marked (Gemma 4 12B, gemma4uv).
+// LM Studio ("type": "vlm"). Only models whose image encoder arcinferzero runs are marked (Gemma 4 12B, gemma4uv).
 // llama-server's own model list next to "data": a "models" array (Ollama style) whose "capabilities" hold
-// "multimodal" for a model with an image encoder. Clients that treat arcinfer as a llama.cpp server read it there.
+// "multimodal" for a model with an image encoder. Clients that treat arcinferzero as a llama.cpp server read it there.
 // bytes: model id -> its file size ("size"; 0 when not known).
 // The served context window in the fields clients read: llama-server's "meta" (n_ctx: the window served, n_ctx_train:
 // the trained one; Unsloth Studio takes meta.n_ctx) and vLLM's "max_model_len". served 0: not loaded, not known yet.
@@ -198,7 +198,7 @@ class Server {
       Json m = Json::object();
       m.set("id", model_id_);
       m.set("object", "model");
-      m.set("owned_by", "arcinfer");
+      m.set("owned_by", "arcinferzero");
       m.set("context_length", eng_.ctx);
       set_window(m, eng_.ctx, eng_.gguf().get_int(eng_.gguf().get_str("general.architecture") + ".context_length", 0),
                  eng_.hp.n_vocab, eng_.hp.n_embd);
@@ -810,14 +810,14 @@ int main(int argc, char** argv) {
     if (so.eo.mtp_drafts < 0) throw std::runtime_error("--mtp-drafts: expected 0 or more");
   }
   } catch (const std::exception& e) {
-    fprintf(stderr, "arcinfer-server: %s\n", e.what());
+    fprintf(stderr, "arcinferzero-server: %s\n", e.what());
     return 2;
   }
   if (model.empty() || help) {
     fprintf(stderr,
-            "usage: arcinfer-server -m model.gguf [options]   OpenAI-compatible server (API at /v1, web UI at /)\n"
-            "       arcinfer-server --list-models             the models it can load, as JSON (Hugging Face cache and\n"
-            "                                                 %%LOCALAPPDATA%%\\arcinfer\\models) with each one's auto context\n"
+            "usage: arcinferzero-server -m model.gguf [options]   OpenAI-compatible server (API at /v1, web UI at /)\n"
+            "       arcinferzero-server --list-models             the models it can load, as JSON (Hugging Face cache and\n"
+            "                                                 %%LOCALAPPDATA%%\\arcinferzero\\models) with each one's auto context\n"
             "  -m, --model FILE      model GGUF; an mmproj-* image projector and an mtp-* drafter next to it are found\n"
             "  --host H, --port P    listen address (default 127.0.0.1:8080)\n"
             "  --alias NAME          model id in the API (default: the file name)\n"
@@ -853,12 +853,12 @@ int main(int argc, char** argv) {
             "                        4 12B 2048, above the 1120 it was trained with)\n"
             "  --budget GB           keep decoded weights resident up to GB\n"
             "MoE models (experts read from the SSD into a GPU cache; expert file in\n"
-            "%%LOCALAPPDATA%%\\arcinfer\\zero, made on the first start, safe to delete):\n"
+            "%%LOCALAPPDATA%%\\arcinferzero\\zero, made on the first start, safe to delete):\n"
             "  --expert-cache-gb N   expert cache size in GiB (default: automatic: the GPU share Windows reports, your\n"
             "                        setting, less 1.2 GB for the driver, less the rest of the model)\n"
             "  --expert-cache-pct P  expert cache as a percentage of all experts\n"
             "  --pack FILE.gguf      make a package of a MoE model (its first part when split): the non-expert\n"
-            "                        weights + an expert file under %%LOCALAPPDATA%%\\arcinfer\\zero\\models; afterwards\n"
+            "                        weights + an expert file under %%LOCALAPPDATA%%\\arcinferzero\\zero\\models; afterwards\n"
             "                        the original GGUF can be moved away (e.g. to a USB disk)\n"
             "  --no-stream           every expert on the GPU (no SSD streaming; MoE models then get less context)\n"
             "  --attn-f32            f32 attention (tests)\n"
@@ -896,7 +896,7 @@ int main(int argc, char** argv) {
   try {  // (a model that cannot load: its reason, not a silent abort)
     cur = load_model(model, alias, so);
   } catch (const std::exception& e) {
-    fprintf(stderr, "arcinfer-server: cannot load %s: %s\n", model.c_str(), e.what());
+    fprintf(stderr, "arcinferzero-server: cannot load %s: %s\n", model.c_str(), e.what());
     return 1;
   }
   std::vector<ModelInfo> catalog = swap ? scan_models() : std::vector<ModelInfo>();
@@ -1193,7 +1193,7 @@ int main(int argc, char** argv) {
         Json j = Json::object();
         j.set("id", m.alias);
         j.set("object", "model");
-        j.set("owned_by", "arcinfer");
+        j.set("owned_by", "arcinferzero");
         j.set("name", m.name);
         j.set("loaded", loaded);
         if (loaded) j.set("context_length", cur->eng->ctx);
@@ -1215,7 +1215,7 @@ int main(int argc, char** argv) {
         Json j = Json::object(), d2 = Json::array();
         j.set("id", cur->alias);
         j.set("object", "model");
-        j.set("owned_by", "arcinfer");
+        j.set("owned_by", "arcinferzero");
         j.set("name", cur->alias);
         j.set("loaded", true);
         j.set("context_length", cur->eng->ctx);
@@ -1262,8 +1262,7 @@ int main(int argc, char** argv) {
             s2.warm_prompt = false;  // (the waiting request warms it)
             cur = load_model(m->path, m->alias, s2);
             fprintf(stderr, "switched to %s in %.1f s\n", m->alias.c_str(), ms_since(t0) / 1000);
-            if (const char* la = getenv("LOCALAPPDATA"))  // pi-arc starts with this model next time
-              std::ofstream(std::string(la) + "/arcinfer/last-model.txt") << m->path << "\n";
+            std::ofstream(app_dir() + "/last-model.txt") << m->path << "\n";  // (pi-arc starts with this model next time)
           } catch (const std::exception& e) {
             fprintf(stderr, "could not load %s: %s; loading %s again\n", m->path.c_str(), e.what(), prev_alias.c_str());
             ServeOpts s3 = so;

@@ -1,4 +1,4 @@
-# Pi on arcinfer in one command: starts the arcinfer server in the background if needed (the running model, else
+# Pi on arcinferzero in one command: starts the arcinferzero server in the background if needed (the running model, else
 # the one used last, else a list of every supported GGUF model in the Hugging Face cache by its full name), writes
 # every model with its context into Pi's model list (so Pi's /model switches between them), then starts Pi.
 # Other arguments go to Pi.
@@ -27,7 +27,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
   $a = [string]$args[$i]
   if ($a -in "--help-all", "-HelpAll") {
     Write-Host @'
-pi-arc: the Pi coding agent on the local arcinfer server (Intel Arc iGPU), every option.
+pi-arc: the Pi coding agent on the local arcinferzero server (Intel Arc iGPU), every option.
 
 USAGE
   pi-arc [model] [launcher options] [Pi options and message]
@@ -40,11 +40,11 @@ USAGE
   pi-arc -Model swift --think off -p "summarize README.md"
 
 SETUP
-  setup.cmd                      (in the arcinfer folder) checks the requirements, builds, downloads models and
+  setup.cmd                      (in the arcinferzero folder) checks the requirements, builds, downloads models and
                                  connects Pi; setup.cmd --help lists its options
 
 CHANGING THE MODEL INSIDE PI
-  /model                         every model below is in Pi's list (provider "arcinfer"); choosing one makes
+  /model                         every model below is in Pi's list (provider "arcinferzero"); choosing one makes
                                  the server unload the current model and load that one (5-40 s), with that
                                  model's own context. The next pi-arc starts with the model you switched to.
 
@@ -56,7 +56,7 @@ WORKING IN PI
                                  a model switch (27B: ~5 s to the first token instead of ~40 s).
   another project folder         Pi's system prompt contains the folder and its AGENTS.md, so the first session
                                  in a project processes it once (27B: ~40 s); later ones reuse it. Kept per
-                                 folder in %LOCALAPPDATA%\arcinfer\zero\prefix: its 2 latest versions, which other
+                                 folder in %LOCALAPPDATA%\arcinferzero\zero\prefix: its 2 latest versions, which other
                                  projects do not replace; past 8 GB in all the least recently used go first.
   going back to an old session   (pi-arc -c, pi-arc -r, /resume) right after closing it: only the new message.
                                  After other sessions (or the web UI): loaded from disk in seconds (session
@@ -65,7 +65,7 @@ WORKING IN PI
 
 MODEL
   --pick, -Pick                  numbered list of every supported GGUF model in the Hugging Face cache
-                                 (%USERPROFILE%\.cache\huggingface\hub) and %LOCALAPPDATA%\arcinfer\models,
+                                 (%USERPROFILE%\.cache\huggingface\hub) and %LOCALAPPDATA%\arcinferzero\models,
                                  by full name (e.g. ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF); Enter keeps the
                                  model that is already running. Image projectors (mmproj-*) and drafters
                                  (mtp-*) next to a model are loaded with it, not listed.
@@ -81,12 +81,12 @@ MODEL
   <shortcut>-nodf / -df          a model with a DFlash2 drafter (27b, 35b): drafts with the MTP block only /
                                  DFlash2 only (default: both, picked per step), e.g. 35b-nodf
   -Model <text>                  the model whose id, name or file contains <text>, or a path to a .gguf file.
-                                 Also --model <text> (or arcinfer/<id>, as in Pi), --arc-model, --model-name.
+                                 Also --model <text> (or arcinferzero/<id>, as in Pi), --arc-model, --model-name.
 
 LAUNCHER OPTIONS
   --think <level>                reasoning effort: off, minimal, low (default), medium, high, xhigh, max
                                  (also --thinking, -Thinking; Pi's /thinking changes it later). Pi sends a
-                                 thinking budget per level: minimal = reasoning off on arcinfer, low 2,048,
+                                 thinking budget per level: minimal = reasoning off on arcinferzero, low 2,048,
                                  medium 8,192, high / xhigh / max 16,384 tokens; the <think> block is closed there.
   --no-stream                    MoE models without the SSD expert cache: every expert on the GPU (a smaller
                                  context). Normally MoE models (35B, Flash Next, Gemma 4 26B) keep their experts,
@@ -104,7 +104,7 @@ LAUNCHER OPTIONS
                                  currently set (bin\clinfo.exe, "global mem") less 1.2 GiB for the driver,
                                  at most the model's max context length. Computed for every model in
                                  a few seconds (a dry load that only adds up the memory), remembered in
-                                 %LOCALAPPDATA%\arcinfer\zero\ctx-auto.txt, recomputed when the GPU memory changes.
+                                 %LOCALAPPDATA%\arcinferzero\zero\ctx-auto.txt, recomputed when the GPU memory changes.
                                  For example (2026-10-18, 21.5 GiB GPU budget): 27b 69,632 (images, MTP and
                                  DFlash2), 27b-df 94,208, 27b-std 188,416; 35b and flash 131,072 (the expert cache
                                  gets the rest). --pick shows every model's value.
@@ -117,7 +117,7 @@ LAUNCHER OPTIONS
                                  memory, which the auto context turns into more context: 27B with
                                  --chunk 1024 -> ~65K tokens at 17.4 GiB, 118,784 at 18.3 GiB; ~11K-token
                                  prompts ~4 % slower, long prompts the same speed.
-  --session-cache <GB>           keep conversations on disk (%LOCALAPPDATA%\arcinfer\zero\sessions) when you switch
+  --session-cache <GB>           keep conversations on disk (%LOCALAPPDATA%\arcinferzero\zero\sessions) when you switch
   (also -SessionCache)           Pi sessions: going back to one loads it in seconds instead of processing its
                                  whole prompt again (default: 8 GB; 0 = off). New sessions always reuse the
                                  system prompt (in memory; from disk after a restart or a model switch).
@@ -148,7 +148,7 @@ PI OPTIONS (passed to Pi unchanged; all of them: pi --help)
   --export <session> [file.html] write a session as HTML and exit
   Resuming a session the server still holds is instant; otherwise its whole conversation is processed again
   (unless the session cache saved it; on by default).
-  pi-arc gives Pi --model arcinfer/<id> and --thinking itself. Pi's model list (provider "arcinfer") is written
+  pi-arc gives Pi --model arcinferzero/<id> and --thinking itself. Pi's model list (provider "arcinferzero") is written
   to %USERPROFILE%\.pi\agent\models.json: every model the server finds, each with its context for the current
   GPU memory (the running one's as the server reports it); other providers are kept. It is rescanned on every
   pi-arc and arc-server start: a model deleted from the Hugging Face cache leaves Pi's /model.
@@ -194,24 +194,24 @@ bin\serverz.exe --help)
        /health, /props (also GPU memory by part and request stats), /tokenize, /sessions (GET size, DELETE clear)
 
 FILES
-  %LOCALAPPDATA%\arcinfer\server.log      server log: load time, context, per-request prompt / generation speed,
+  %LOCALAPPDATA%\arcinferzero\server.log      server log: load time, context, per-request prompt / generation speed,
                                           system-prompt cache loads and saves
-  %LOCALAPPDATA%\arcinfer\server.json     what arc-server started (model, context, chunk)
-  %LOCALAPPDATA%\arcinfer\last-model.txt  the model started last (pi-arc starts it again by default)
-  %LOCALAPPDATA%\arcinfer\kernels         compiled GPU kernels (cache)
-  %LOCALAPPDATA%\arcinfer\zero\          arcinferzero's data:
+  %LOCALAPPDATA%\arcinferzero\server.json     what arc-server started (model, context, chunk)
+  %LOCALAPPDATA%\arcinferzero\last-model.txt  the model started last (pi-arc starts it again by default)
+  %LOCALAPPDATA%\arcinferzero\kernels         compiled GPU kernels (cache)
+  %LOCALAPPDATA%\arcinferzero\zero\          arcinferzero's data:
     ctx-auto.txt                          computed contexts per model and GPU memory
     sessions                              saved conversations (--session-cache)
     prefix                                saved system prompts, per project folder (Pi's differs per
                                           project: it contains the folder and its AGENTS.md)
     *.experts / *.lru                     MoE expert files (written once per model) and their cache state
-  %LOCALAPPDATA%\arcinfer\build.log       compiler output of the last setup.cmd build
+  %LOCALAPPDATA%\arcinferzero\build.log       compiler output of the last setup.cmd build
 '@
     exit 0
   }
   if ($a -in "--help", "-h", "-?", "/?", "help") {
     Write-Host @'
-pi-arc: the Pi coding agent on the local arcinfer server (Intel Arc iGPU).
+pi-arc: the Pi coding agent on the local arcinferzero server (Intel Arc iGPU).
 
   pi-arc                         start Pi on the model the server runs, else the one used last
   pi-arc -c                      continue the last Pi session in this folder (pi-arc -r: choose a session)
@@ -234,7 +234,7 @@ shortens a long conversation (the details it drops are gone for the model).
   elseif ($a -in "--session-cache", "-SessionCache") { $sessGb = [double]$args[++$i] }
   elseif ($a -in "--think", "--thinking", "-Thinking") { $thinking = [string]$args[++$i] }
   elseif ($a -in "--arc-model", "-Model", "--model-name", "--model") {  # (--model: Pi's own option, taken here so
-    $model = ([string]$args[++$i]) -replace '^arcinfer/', ''           #  that Pi gets only the one pi-arc sets)
+    $model = ([string]$args[++$i]) -replace '^arcinfer(zero)?/', ''   #  that Pi gets only the one pi-arc sets)
   }
   elseif ($a -in "--ctx", "-Ctx") {
     $ctx = ([string]$args[++$i]).Trim().ToLower()
@@ -250,7 +250,8 @@ shortens a long conversation (the details it drops are gone for the model).
   else { $piArgs.Add($a) }
 }
 # Which model: the one the server is running, else the one started last, else ask (--pick: always ask).
-$stateDir = Join-Path $env:LOCALAPPDATA "arcinfer"
+. (Join-Path $PSScriptRoot "app-dir.ps1")
+$stateDir = Get-AppDir  # (%LOCALAPPDATA%\arcinferzero; renamed from arcinfer once)
 $base = "http://127.0.0.1:8090"
 # the id of the loaded model: the entry marked loaded (the server lists every model it can switch to), else the first
 function Get-LoadedId([int]$TimeoutSec) {
@@ -278,5 +279,5 @@ $id = Get-LoadedId 5
 
 $pi = Join-Path $env:USERPROFILE ".pi\agent\bin\pi.cmd"
 if (-not (Test-Path $pi)) { $pi = "pi" }
-& $pi --model "arcinfer/$id" --thinking $thinking @piArgs
+& $pi --model "arcinferzero/$id" --thinking $thinking @piArgs
 exit $LASTEXITCODE

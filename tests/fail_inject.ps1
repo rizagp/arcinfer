@@ -14,7 +14,7 @@ param(
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $exe = Join-Path $root "bin\serverz.exe"
-$log = Join-Path $env:TEMP "arcinfer-fail-inject.log"
+$log = Join-Path $env:TEMP "arcinferzero-fail-inject.log"
 $base = "http://127.0.0.1:$Port"
 $failed = 0
 function Check([string]$name, [bool]$ok, [string]$detail = "") {

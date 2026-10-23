@@ -1,4 +1,4 @@
-# arcinfer setup: everything needed on this laptop, in one command. Safe to run again: done steps are skipped.
+# arcinferzero setup: everything needed on this laptop, in one command. Safe to run again: done steps are skipped.
 #
 #   setup                        check the requirements, build, choose models to download, connect Pi
 #   setup -Models 27b,4b         download these without asking (27b 35b 9b 4b g12 e4b, all, none)
@@ -18,7 +18,7 @@ $bin = Join-Path $root "bin"
 $Models = @(($Models -join ",") -split "[,;\s]+" | Where-Object { $_ } | ForEach-Object { $_.ToLower() })
 if ($Help -or ($Models | Where-Object { $_ -in "--help", "-h", "help", "/?", "-?" })) {
   Write-Host @'
-setup: everything arcinfer needs on this laptop, in one command. Safe to run again: done steps are skipped.
+setup: everything arcinferzero needs on this laptop, in one command. Safe to run again: done steps are skipped.
 
 USAGE
   setup                          check, build, ask which models to download, connect Pi
@@ -34,12 +34,12 @@ STEPS
                    $env:ARC_VCVARS = a vcvars64.bat overrides), Python 3.10+ (downloads), Pi (optional).
                    Missing ones: where to get them.
   2 build          bin\serverz.exe, runz.exe, clinfo.exe when missing or older than their sources; the compiler
-                   output goes to %LOCALAPPDATA%\arcinfer\build.log (shown when a build fails). A running server
+                   output goes to %LOCALAPPDATA%\arcinferzero\build.log (shown when a build fails). A running server
                    is stopped first if serverz.exe has to be rebuilt.
   3 GPU check      bin\clinfo.exe: OpenCL device, DP4a (cl_khr_integer_dot_product), Intel sub-groups, GPU memory
   4 models         into the Hugging Face cache (HF_HUB_CACHE / HF_HOME respected): Gemma with its drafter and
                    image projector; the 35B downloaded and converted (tools\convert_gsq.py, with the 4B for its
-                   tokenizer) into %LOCALAPPDATA%\arcinfer\models. huggingface_hub / numpy are installed with
+                   tokenizer) into %LOCALAPPDATA%\arcinferzero\models. huggingface_hub / numpy are installed with
                    pip after asking; the free disk space is checked. Then: every model the server finds, with
                    its context for the current GPU memory.
   5 Pi             scripts\install-pi.ps1: the pi-arc and arc-server commands, Pi's model list
@@ -69,7 +69,7 @@ function Ask($q, [bool]$def = $true) {
   return $a -match '^(y|yes|ya)$'
 }
 
-Write-Host "arcinfer setup ($root)"
+Write-Host "arcinferzero setup ($root)"
 
 # ---------------------------------------------------------------- 1. requirements
 Head 1 "Requirements"
@@ -81,7 +81,7 @@ Ok "CPU: $cpu"
 $ramGb = [Math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
 if ($ramGb -lt 15) { Note "RAM $ramGb GB: enough for the 4B / E4B models only (32 GB for the 12B-35B models)" } else { Ok "RAM: $ramGb GB" }
 $gpus = @(Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match "Intel" })
-if (-not $gpus) { Bad "No Intel GPU found. arcinfer needs an Intel Core Ultra with Arc integrated graphics." }
+if (-not $gpus) { Bad "No Intel GPU found. arcinferzero needs an Intel Core Ultra with Arc integrated graphics." }
 foreach ($g in $gpus) { Ok "GPU: $($g.Name), driver $($g.DriverVersion)" }
 if (-not ($gpus | Where-Object { $_.Name -match "Arc" })) { Note "only Intel Arc integrated graphics (Xe-LPG tested; Xe2 / Xe3 reported to work) is supported" }
 
@@ -122,8 +122,9 @@ if ($hasPi) { Ok "Pi: $piBin" } elseif (-not $NoPi) { Note "Pi not found (option
 
 # ---------------------------------------------------------------- 2. build
 Head 2 "Build"
-# compiler output goes to %LOCALAPPDATA%\arcinfer\build.log; shown only when a build fails
-$buildLog = Join-Path $env:LOCALAPPDATA "arcinfer\build.log"
+# compiler output goes to %LOCALAPPDATA%\arcinferzero\build.log; shown only when a build fails
+. (Join-Path $root "scripts\app-dir.ps1")
+$buildLog = Join-Path (Get-AppDir) "build.log"
 New-Item -ItemType Directory -Force (Split-Path $buildLog) | Out-Null
 function Build([string[]]$srcs) {
   $ErrorActionPreference = "Continue"
@@ -154,7 +155,7 @@ foreach ($t in "tools\clinfo", "zero\serverz", "zero\runz") {
 if ($need) {
   $running = @(Get-Process server, serverz -ErrorAction SilentlyContinue | Where-Object { $_.Path -like (Join-Path $bin "server*.exe") })
   if ($running.Count -and $need -contains "zero\serverz.cpp") {
-    Note "stopping the running arcinfer server to rebuild it"
+    Note "stopping the running arcinferzero server to rebuild it"
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "scripts\arc-server.ps1") stop | Out-Null
   }
   Write-Host "  building $($need -join ', ') (about a minute)..."
@@ -183,7 +184,7 @@ if ($ciText -match "global mem: ([\d.]+) GiB") {
 # ---------------------------------------------------------------- 4. models
 Head 4 "Models"
 $hub = if ($env:HF_HUB_CACHE) { $env:HF_HUB_CACHE } elseif ($env:HF_HOME) { Join-Path $env:HF_HOME "hub" } else { Join-Path $env:USERPROFILE ".cache\huggingface\hub" }
-$arcModels = Join-Path $env:LOCALAPPDATA "arcinfer\models"
+$arcModels = Join-Path (Get-AppDir) "models"
 $gsq35 = Join-Path $arcModels "Qwen3.6-35B-A3B-GSQ2-arc.gguf"
 $catalog = @(
   [pscustomobject]@{ key = "27b"; name = "Qwen3.8 27B (best answers, slowest; MTP)"; repo = "ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF"; gb = 12.1

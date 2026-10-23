@@ -1,7 +1,17 @@
 # Changelog
 
-## 2026-10-24: Gemma sliding attention, Flint kernels, /W4 and CI
+## 2026-10-24: renamed to arcinferzero; Gemma sliding attention, Flint kernels, /W4 and CI
 
+- **The project is now called arcinferzero** (the repository `rizagp/arcinferzero`; GitHub forwards the old
+  `rizagp/arcinfer` address). Entries below this one keep the old name: there "arcinfer" is the project, and before
+  2026-10-20 also its first, OpenCL engine. What moved with the name:
+  - the data folder is `%LOCALAPPDATA%\arcinferzero` (kernel cache, model packages and expert files, context /
+    prefix / session caches, logs, `model-dirs.txt`): an existing `%LOCALAPPDATA%\arcinfer` is renamed once by the
+    first exe or script that runs (`src/app_dir.h`, `scripts/app-dir.ps1`), on the same drive, so nothing is copied;
+  - Pi's provider is `arcinferzero` (models `arcinferzero/<id>`): the next `pi-arc`, `arc-server` or `setup` replaces
+    the old `arcinfer` entry in `~/.pi/agent/models.json`; `pi-arc --model arcinfer/<id>` is still understood;
+  - models converted with `tools/convert_gsq.py` carry `arcinferzero.expert_format`; files with the old
+    `arcinfer.expert_format` load as before. The web UI keeps its settings (the old storage key is read once).
 - **Gemma 4 26B / 12B long prompts**: the sliding layers' attention scores two blocks of 16 keys per step, each
   query load used for both: 11K-token prompt, sliding attention 26B 8.6 -> 7.1 s, 12B 16.5-20.1 -> 13.4-14.0 s,
   bit-identical. E4B and the global layers keep one block (slower with two).

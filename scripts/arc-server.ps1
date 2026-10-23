@@ -1,7 +1,7 @@
-# Starts / stops the arcinfer server in the background for Pi and other OpenAI-compatible clients.
+# Starts / stops the arcinferzero server in the background for Pi and other OpenAI-compatible clients.
 #
 #   arc-server start                  asks which model to load: every supported GGUF model in the Hugging Face cache
-#                                     (and %LOCALAPPDATA%\arcinfer\models), listed by its full name; Enter keeps the
+#                                     (and %LOCALAPPDATA%\arcinferzero\models), listed by its full name; Enter keeps the
 #                                     running one. Waits until the server is ready.
 #   arc-server start -Model 27b       the same without asking: a shortcut (27b 35b 35b-s 35b-mtp flash 9b 4b g12 e4b g26,
 #                                     with -mtp / -vision / -std / -nodf / -df for a variant), a model id, part of a model's
@@ -17,7 +17,7 @@
 #   arc-server clear-cache            delete the saved conversations (session cache) of all models
 #
 # The server keeps running after Pi exits, so the next session skips the model load and reuses the prompt cache.
-# Log: %LOCALAPPDATA%\arcinfer\server.log
+# Log: %LOCALAPPDATA%\arcinferzero\server.log
 param(
   [ValidateSet("start", "stop", "status", "restart", "clear-cache", "help", "--help", "-h")] [string]$Action = "start",
   [string]$Model = "",
@@ -51,7 +51,8 @@ $Ctx = "$Ctx".Trim().ToLower()
 if ($Ctx -eq "0") { $Ctx = "" }
 if ($Ctx -and $Ctx -ne "auto" -and $Ctx -notmatch '^\d+$') { throw "-Ctx: a number of tokens or auto (got '$Ctx')" }
 $root = Split-Path $PSScriptRoot -Parent
-$stateDir = Join-Path $env:LOCALAPPDATA "arcinfer"
+. (Join-Path $PSScriptRoot "app-dir.ps1")
+$stateDir = Get-AppDir  # (%LOCALAPPDATA%\arcinferzero; renamed from arcinfer once)
 New-Item -ItemType Directory -Force $stateDir | Out-Null
 # the engine: arcinferzero (Level Zero); -NoStream keeps every expert on the GPU
 $Engine = if ($NoStream) { "zero-nostream" } else { "zero" }
@@ -70,7 +71,7 @@ $base = "http://127.0.0.1:$Port"
 # saved conversations (server --session-cache-gb, default 8 GB)
 $sessDir = Join-Path $stateDir "zero\sessions"
 
-# The models come from `serverz.exe --list-models` (Hugging Face cache + %LOCALAPPDATA%\arcinfer\models): name, file,
+# The models come from `serverz.exe --list-models` (Hugging Face cache + %LOCALAPPDATA%\arcinferzero\models): name, file,
 # alias (= the model id of the API and Pi), shortcut, the context --ctx auto chose for the current GPU memory. The
 # context is auto unless -Ctx is given: the largest that fits the GPU memory currently set less 1.2 GiB for the
 # driver, at most the trained one (Intel Graphics Software can change the GPU memory; it is then
@@ -116,19 +117,19 @@ function Stop-Arc {
     Get-Process -Name server, serverz -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$root\bin\server*.exe" } |
       Wait-Process -Timeout 20 -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 5
-    Say "arcinfer server stopped."
+    Say "arcinferzero server stopped."
   }
   return $stopped
 }
 
-# The models serverz.exe finds (Hugging Face cache + arcinfer's model folder), with their alias.
+# The models serverz.exe finds (Hugging Face cache + arcinferzero's model folder), with their alias.
 function Get-Models {
   $all = @(& $exe --list-models | ConvertFrom-Json | ForEach-Object { $_ })  # (Windows PowerShell: unroll the array)
   foreach ($m in $all) { $m | Add-Member ctx 0 -Force }  # (only -Ctx sets a fixed context here)
   return $all
 }
 
-# Pi's model list (~/.pi/agent/models.json, provider "arcinfer") follows what is on disk: a model deleted from the
+# Pi's model list (~/.pi/agent/models.json, provider "arcinferzero") follows what is on disk: a model deleted from the
 # Hugging Face cache leaves Pi's /model, a new one appears; each with its context (the running one's from the server)
 function Sync-PiModels {
   if (-not (Test-Path (Join-Path $env:USERPROFILE ".pi\agent"))) { return }
@@ -158,7 +159,7 @@ function Pick-Model($models, $runningPath, $runningAlias) {
     Write-Host ("   {0}  [{1}]{2}" -f $m.file, ($tags -join ", "), $mark)
   }
   $skip = @($models | Where-Object { -not $_.supported })
-  if ($skip.Count) { Write-Host ("  (not supported by arcinfer: " + (($skip | ForEach-Object { "$($_.name) [$($_.arch)]" }) -join ", ") + ")") }
+  if ($skip.Count) { Write-Host ("  (not supported by arcinferzero: " + (($skip | ForEach-Object { "$($_.name) [$($_.arch)]" }) -join ", ") + ")") }
   $prompt = if ($runningPath) { "Model number (Enter = keep the running model)" } else { "Model number" }
   while ($true) {
     $a = Read-Host $prompt
@@ -171,7 +172,7 @@ function Pick-Model($models, $runningPath, $runningAlias) {
 
 if ($Action -in "help", "--help", "-h") {
   Write-Host @"
-arc-server: the arcinfer server in the background (port $Port), for Pi and other OpenAI-compatible clients.
+arc-server: the arcinferzero server in the background (port $Port), for Pi and other OpenAI-compatible clients.
 
   arc-server start [options]     start, or switch to another model; waits until ready. Also brings Pi's model
                                  list up to date (a model deleted from the Hugging Face cache leaves it, a new
@@ -180,7 +181,7 @@ arc-server: the arcinfer server in the background (port $Port), for Pi and other
   arc-server status              running model, its context and chunk size, saved conversations
   arc-server stop                stop the server and free the GPU memory
   arc-server clear-cache         delete saved conversations (session cache). Saved system prompts (per project
-                                 folder, 8 GB in all, reused across restarts) are in %LOCALAPPDATA%\arcinfer\zero\prefix;
+                                 folder, 8 GB in all, reused across restarts) are in %LOCALAPPDATA%\arcinferzero\zero\prefix;
                                  deleting that folder is safe while the server is stopped.
   arc-server help                this text (also --help, -h)
 
@@ -211,7 +212,7 @@ Options for start / restart:
                                  and read the next layer's missing experts while the GPU computes (35B and Flash
                                  Next: 131,072 tokens of context by default, up to 262,144 with -Ctx; Windows keeps
                                  14 GB). The first start writes the expert file (35B: 16 GB, ~2.5 min; Flash Next:
-                                 56 GB, ~9.5 min; Gemma 4 26B: 13 GB, ~1 min) to %LOCALAPPDATA%\arcinfer\zero (safe
+                                 56 GB, ~9.5 min; Gemma 4 26B: 13 GB, ~1 min) to %LOCALAPPDATA%\arcinferzero\zero (safe
                                  to delete: it is written again).
   -Vision on|off                 image / audio input (default on). off: the projector (mmproj) is not loaded and
                                  --ctx auto keeps no GPU memory for it, so the context is longer
@@ -226,7 +227,7 @@ Options for start / restart:
   -NoPrefixCache                 do not keep system prompts on disk;  -PrefixCacheGb <N>  their disk space (8)
   -NoSwap                        the server keeps its model (requests for another model do not switch)
   -ListenHost <addr>             listen address (default 127.0.0.1; 0.0.0.0 = other computers too)
-  -SessionDir <folder>           where saved conversations go (default %LOCALAPPDATA%\arcinfer\zero\sessions)
+  -SessionDir <folder>           where saved conversations go (default %LOCALAPPDATA%\arcinferzero\zero\sessions)
   -Quiet                         no messages
 A running server is kept when the model and every option given match; otherwise it is restarted with them.
 
@@ -248,10 +249,10 @@ switch ($Action) {
     $id = Get-Running
     if ($id) {
       $p = Invoke-RestMethod "$base/props" -TimeoutSec 2
-      Say "arcinfer server running on $base : model $id"
+      Say "arcinferzero server running on $base : model $id"
       if (Test-Path $lastFile) { Say ("  " + (Get-Content $lastFile -Raw).Trim()) }  # (also after switching in Pi)
       Say ("  " + ($p | ConvertTo-Json -Compress -Depth 3))
-    } else { Say "arcinfer server is not running." }
+    } else { Say "arcinferzero server is not running." }
     $files = @(Get-ChildItem $sessDir -Recurse -Filter *.arcs -ErrorAction SilentlyContinue)
     Say ("Saved conversations: {0} ({1:N1} GiB) in {2}" -f $files.Count, (($files | Measure-Object Length -Sum).Sum / 1GB), $sessDir)
     return
@@ -267,7 +268,7 @@ switch ($Action) {
     Say ("Deleted {0} saved conversations ({1:N1} GiB)." -f $n, ($bytes / 1GB))
     return
   }
-  "stop" { if (-not (Stop-Arc)) { Say "arcinfer server is not running." }; return }
+  "stop" { if (-not (Stop-Arc)) { Say "arcinferzero server is not running." }; return }
 }
 
 # ---- start / restart
@@ -333,7 +334,7 @@ $extraGiven = @("MtpDrafts", "ThinkBudget", "ImageMinTokens", "ImageMaxTokens", 
 $same = $running -eq $m.alias -and (-not $Ctx -or ($st -and "$($st.ctx)" -eq $ctxArg)) -and
   ($Chunk -eq 0 -or ($st -and "$($st.chunk)" -eq "$Chunk")) -and (-not $PSBoundParameters.ContainsKey("SessionCacheGb") -or ($st -and "$($st.sess)" -eq "$SessionCacheGb")) -and
   (-not $extraGiven -or ($st -and "$(if ($st.extra) { $st.extra } else { '|think 8192' })" -eq $extraKey)) -and
-  (-not $st -or "$(if ($st.engine) { $st.engine } else { 'arcinfer' })" -eq $Engine)
+  (-not $st -or "$(if ($st.engine) { $st.engine } else { 'opencl' })" -eq $Engine)
 if ($Action -eq "start" -and $same) {
   Say "Server already running: $running on $base"
   Say "  engine: $(Engine-Text $Engine ([bool]$m.moe))"
@@ -341,7 +342,7 @@ if ($Action -eq "start" -and $same) {
   return
 }
 if ($running) {
-  $was = if ($st -and $st.engine) { $st.engine } else { "arcinfer" }
+  $was = if ($st -and $st.engine) { $st.engine } else { "opencl" }  # (a server.json without engine: the old OpenCL one)
   Say "Switching the server: $running ($(Engine-Text $was))"
   Say "                  to: $($m.alias) ($(Engine-Text $Engine ([bool]$m.moe)))"
   Stop-Arc | Out-Null

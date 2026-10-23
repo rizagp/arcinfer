@@ -1,4 +1,4 @@
-# arcinfer regression tests. Run from any folder (the script switches to the project folder itself).
+# arcinferzero regression tests. Run from any folder (the script switches to the project folder itself).
 #
 # Usage examples:
 #   .\tests\run_tests.ps1 -SkipGpu                       # model-free CPU checks only (no GPU, no model)
@@ -21,7 +21,7 @@
 #   -Port <n>                  server smoke-test port (default 8091)
 #
 # Models that are not given are searched in %USERPROFILE%\.cache\huggingface\hub\models--*\snapshots and in the
-# folders listed one per line in %LOCALAPPDATA%\arcinfer\model-dirs.txt (# starts a comment; missing folders, e.g.
+# folders listed one per line in %LOCALAPPDATA%\arcinferzero\model-dirs.txt (# starts a comment; missing folders, e.g.
 # an unplugged drive, are ignored). A check whose model is missing prints [SKIP] and does not fail.
 #
 # Checks: model-free unit tests (HTTP parser, API compatibility, expert-cache pools, tool-call streaming, chat
@@ -84,7 +84,7 @@ function Run-Exe([string]$exe, [string[]]$argv = @()) {
   return $o
 }
 function Get-KL([string]$o) {
-  $m = [regex]::Match($o, "KL\(ref \|\| arcinfer\) = ([\d.]+)")
+  $m = [regex]::Match($o, "KL\(ref \|\| arcinferzero\) = ([\d.]+)")
   if (-not $m.Success) { return $null }
   return [double]::Parse($m.Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture)
 }
@@ -103,9 +103,10 @@ if (Test-Path -LiteralPath $hub) {
   $searchRoots += @(Get-ChildItem -LiteralPath $hub -Directory -Filter "models--*" -ErrorAction SilentlyContinue |
     ForEach-Object { Join-Path $_.FullName "snapshots" } | Where-Object { Test-Path -LiteralPath $_ })
 }
-$pkgs = Join-Path $env:LOCALAPPDATA "arcinfer\zero\models"  # (MoE packages: Gemma 4 26B, Qwen3.6 35B, Flash Next)
+. (Join-Path $root "scripts\app-dir.ps1")
+$pkgs = Join-Path (Get-AppDir) "zero\models"  # (MoE packages: Gemma 4 26B, Qwen3.6 35B, Flash Next)
 if (Test-Path -LiteralPath $pkgs) { $searchRoots += $pkgs }
-$dirsFile = Join-Path $env:LOCALAPPDATA "arcinfer\model-dirs.txt"
+$dirsFile = Join-Path (Get-AppDir) "model-dirs.txt"
 if (Test-Path -LiteralPath $dirsFile) {
   foreach ($line in Get-Content -LiteralPath $dirsFile) {
     $d = $line.Trim()
@@ -154,7 +155,7 @@ function Why([string]$p, [string]$what) { if ($p) { return "$what not found: $p"
 
 $engines = @("zero")
 $bins = @{ zero = @{ run = ".\bin\runz.exe"; server = ".\bin\serverz.exe" } }
-Write-Host ("arcinfer tests: engine {0}{1}" -f ($engines -join " + "), $(if ($SkipGpu) { ", model-free CPU checks only (-SkipGpu)" } else { "" }))
+Write-Host ("arcinferzero tests: engine {0}{1}" -f ($engines -join " + "), $(if ($SkipGpu) { ", model-free CPU checks only (-SkipGpu)" } else { "" }))
 if (-not $SkipGpu -or $ListModels) {
   foreach ($kv in @(@("4B", $Model4B), @("27B", $Model27B), @("35B-A3B", $Model35B), @("Flash Next", $ModelFlashNext),
                     @("Gemma 4 12B", $ModelGemma), @("DFlash2 27B", $DFlash27B), @("DFlash2 35B", $DFlash35B))) {
@@ -197,7 +198,7 @@ else {
 if (-not $PackGguf) { Skip "GGUF pack round trip" "no -PackGguf" }
 elseif (-not (Test-Path -LiteralPath $PackGguf)) { Skip "GGUF pack round trip" "not found: $PackGguf" }
 else {
-  $out = Join-Path $env:TEMP ("arcinfer_pack_test_{0}.gguf" -f $PID)
+  $out = Join-Path $env:TEMP ("arcinferzero_pack_test_{0}.gguf" -f $PID)
   try { Unit "GGUF pack round trip ($([System.IO.Path]::GetFileName($PackGguf)))" .\bin\test_gguf_pack.exe @($PackGguf, $out) "identical" }
   finally { Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue }
 }
@@ -242,7 +243,7 @@ $lt = Get-ChildItem (Join-Path $env:USERPROFILE "llama-builds") -Recurse -Filter
 if (-not (Have $ModelFlint)) { Skip "tokenizer Flint" (Why $ModelFlint "Flint model (-ModelFlint)") }
 elseif (-not $lt) { Skip "tokenizer Flint" "no llama-tokenize.exe under %USERPROFILE%\llama-builds" }
 else {
-  $idf = Join-Path $env:TEMP ("arcinfer_flint_{0}.ids" -f $PID)
+  $idf = Join-Path $env:TEMP ("arcinferzero_flint_{0}.ids" -f $PID)
   try {
     $ref = Run-Exe $lt.FullName @("-m", $ModelFlint, "-f", (Join-Path $root "README.md"), "--ids", "--no-bos", "--no-escape", "--log-disable")
     [IO.File]::WriteAllText($idf, ($ref -replace "[\[\]\s]", ""))
@@ -357,7 +358,7 @@ foreach ($eng in $engines) {
   # DFlash2 verification rows must equal plain decoding bit for bit (2026-10-24: they had drifted, 1.39 apart)
   if (-not (Have $Model27B)) { Skip "$tag 27B long prompt: MTP logits = plain" (Why $Model27B "27B model") }
   else {
-    $lt = Join-Path $env:TEMP ("arcinfer_long_{0}.txt" -f $PID)
+    $lt = Join-Path $env:TEMP ("arcinferzero_long_{0}.txt" -f $PID)
     $b = [IO.File]::ReadAllBytes((Join-Path $root "README.md"))
     [IO.File]::WriteAllBytes($lt, $b[0..4499])
     $dumps = @()
@@ -365,7 +366,7 @@ foreach ($eng in $engines) {
       $runs = @(@{ name = "plain"; args = @("--n", "12") }, @{ name = "MTP"; args = @("--n", "13", "--mtp") })
       if (Have $DFlash27B) { $runs += @{ name = "DFlash2"; args = @("--n", "13", "--dflash", $DFlash27B, "--draft", "dflash") } }
       foreach ($r in $runs) {
-        $d = Join-Path $env:TEMP ("arcinfer_long_{0}_{1}.bin" -f $PID, $r.name)
+        $d = Join-Path $env:TEMP ("arcinferzero_long_{0}_{1}.bin" -f $PID, $r.name)
         $dumps += $d
         $null = Run-Exe $run (@($Model27B, "--text-file", $lt) + $r.args + @("--dump-logits", $d))
       }

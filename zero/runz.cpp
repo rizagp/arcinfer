@@ -1,4 +1,4 @@
-// arcinfer driver: feeds token ids, prints top logits and a greedy continuation; or benchmarks prefill.
+// arcinferzero driver: feeds token ids, prints top logits and a greedy continuation; or benchmarks prefill.
 // usage:
 //   run model.gguf (--tokens 1,2,3 | --tokens-file ids.txt) [--n 16] [--prof] [--chunk N] [--ctx N]
 //   run model.gguf --bench-pp 2048 [--prof]
@@ -596,7 +596,7 @@ static int run_main(int argc, char** argv) {
         mxk = std::max(mxk, kl);
         agree += (std::max_element(l.begin(), l.end()) - l.begin()) == (std::max_element(rr, rr + V) - rr);
       }
-      printf("KL decode path (ref || arcinfer) = %.5f (mean over %zu positions, max %.5f), top-1 agreement %d/%zu\n",
+      printf("KL decode path (ref || arcinferzero) = %.5f (mean over %zu positions, max %.5f), top-1 agreement %d/%zu\n",
              sum / toks.size(), toks.size(), mxk, agree, toks.size());
       return 0;
     }
@@ -633,7 +633,7 @@ static int run_main(int argc, char** argv) {
     printf("top-10 next token:");
     for (auto& [id, p] : tk) printf(" %d(%.4f)", id, p);
     if (!kl_ref.empty()) {
-      // KL(reference || arcinfer) over the full vocabulary; the reference file holds f32 log-probs of the last
+      // KL(reference || arcinferzero) over the full vocabulary; the reference file holds f32 log-probs of the last
       // position, or of every prompt position (then the KL is averaged over the prompt; single-chunk prompts).
       const size_t V = lg.size();
       auto kl_of = [&](const std::vector<float>& l, const float* ref) {
@@ -655,7 +655,7 @@ static int run_main(int argc, char** argv) {
         fclose(fi);
       }
       if (ref.size() == V) {
-        printf("\nKL(ref || arcinfer) = %.5f", kl_of(lg, ref.data()));
+        printf("\nKL(ref || arcinferzero) = %.5f", kl_of(lg, ref.data()));
       } else if (ref.size() == V * toks.size() && (int)toks.size() <= eng.max_chunk) {
         const std::vector<float> last(lg.begin(), lg.end());  // logits_at() overwrites the shared logits buffer
         double sum = 0, mx = 0;
@@ -668,7 +668,7 @@ static int run_main(int argc, char** argv) {
           mx = std::max(mx, k);
           agree += std::max_element(l.begin(), l.end()) - l.begin() == std::max_element(rr, rr + V) - rr;
         }
-        printf("\nKL(ref || arcinfer) = %.5f (mean over %zu positions, max %.5f), top token agrees %d / %zu",
+        printf("\nKL(ref || arcinferzero) = %.5f (mean over %zu positions, max %.5f), top token agrees %d / %zu",
                sum / toks.size(), toks.size(), mx, agree, toks.size());
         std::copy(last.begin(), last.end(), const_cast<float*>(lg.data()));
       }

@@ -1,5 +1,6 @@
 // Small OpenCL runtime helpers: device selection, program build, timing.
 #pragma once
+#include "app_dir.h"
 #include "cl_min.h"
 #include <string>
 #include <vector>
@@ -40,12 +41,11 @@ struct ClRt {
     clGetDeviceInfo(device, CL_DEVICE_NAME, sizeof(name) - 1, name, nullptr);
     clGetDeviceInfo(device, CL_DRIVER_VERSION, sizeof(drv) - 1, drv, nullptr);
     device_id = std::string(name) + "|" + drv;
-    if (const char* la = getenv("LOCALAPPDATA"); la && !getenv("ARC_NO_KCACHE"))
-      cache_dir = std::string(la) + "\\arcinfer\\kernels";
+    if (!getenv("ARC_NO_KCACHE")) cache_dir = app_dir() + "\\kernels";
     return true;
   }
 
-  // Builds a program, or loads its binary from the kernel cache (%LOCALAPPDATA%\arcinfer\kernels, keyed by the
+  // Builds a program, or loads its binary from the kernel cache (%LOCALAPPDATA%\arcinferzero\kernels, keyed by the
   // source, the options, the device and the driver version): the driver compiles each variant only once.
   cl_program build(const std::string& src, const std::string& opts) {
     std::string path;
