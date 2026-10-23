@@ -2,6 +2,8 @@
 
 ## 2026-10-23: Xe2 / Xe3 GPUs (no 8-lane sub-groups); Unsloth Studio statistics and context
 
+- **Gemma 4 26B long prompts ~2 % faster**: the attention's ring slot computed once per 16-key block (global
+  layers 16.4 -> 15.2 s at 13,921 tokens), bit-identical.
 - **IQ1_S weights** (CPU and GPU decoders; IQ1_M's codebook with one scale per 32 values): agentionai's
   Qwen3.8-27B-AP quants (two IQ1_S `ffn_up` matrices in the IQ3_S file) load. Against ISTA's IQ3_S on this laptop:
   AP-IQ3_S same prompt speed (116 tok/s), generation 4.9 -> 5.05 tok/s, with MTP 11.6-11.9 -> 12.4-12.6 (drafts

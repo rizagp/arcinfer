@@ -1670,9 +1670,11 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
   const int tid = get_local_id(2) * 16 + lane;
   for (int b = blo; b <= bhi; ++b) {
     barrier(CLK_LOCAL_MEM_FENCE);
+    // (cap is a multiple of 16: a block's 16 keys are 16 consecutive slots, one modulo per block)
+    const int bslot = (b * 16) % cap;
     for (int i = tid; i < 16 * HD; i += 16 * FA_ROWS) {
       const int kk = i / HD, d = i % HD;
-      const size_t at = (size_t)((b * 16 + kk) % cap) * HD + d;
+      const size_t at = (size_t)(bslot + kk) * HD + d;
       sk[kk * FA_KS + d] = ((__global const FA_KW*)kb)[at];
       sv[kk * HD + d] = ((__global const ushort*)vb)[at];
     }
@@ -1686,7 +1688,7 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
 #else
   for (int b = lo / 16; b <= hi / 16; ++b) {
 #endif
-    const int t0 = b * 16, p = t0 + lane;
+    const int t0 = b * 16, p = t0 + lane, t0s = t0 % cap;  // (t0s + j: key t0 + j's slot, cap a multiple of 16)
     const bool valid = p >= lo && p <= hi;
     float s[GQ];
 #pragma unroll
@@ -1694,7 +1696,7 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
 #if FA_ROWS > 1
     __local const KC_T* krow = (__local const KC_T*)sk + lane * FA_KS;
 #else
-    __global const KC_T* krow = kb + (size_t)(p % cap) * HD;
+    __global const KC_T* krow = kb + (size_t)(t0s + lane) * HD;
 #endif
     for (int c = 0; c < HD / 16; ++c) {
       const float16 kv = valid ? vload16(0, krow + 16 * c) : (float16)0.0f;
@@ -1731,7 +1733,7 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
 #if FA_ROWS > 1
       __local const half* vrow = (__local const half*)sv + j * HD + 16 * lane;
 #else
-      __global const half* vrow = vb + (size_t)(pj % cap) * HD + 16 * lane;
+      __global const half* vrow = vb + (size_t)(t0s + j) * HD + 16 * lane;
 #endif
 #pragma unroll
       for (int c = 0; c < FDC; ++c) {
@@ -1846,7 +1848,13 @@ __kernel void attn_fa_gh(__global const float* qf, __global const KC_T* kc, __gl
     {  // scores of block bs + sgi
       const int b = bs + sgi, p = b * 16 + lane;
       const bool any = b <= b1 && p >= lo && p <= hi;
+      // (head 512: one modulo per block, cap a multiple of 16; 26B, 13,921 tokens: global attention 16.4 -> 15.3 s.
+      //  Head 256 keeps one per key: per block it was 5 % slower there; the same slots either way)
+#if HD >= 512
+      __global const KC_T* krow = kb + (size_t)((b * 16) % cap + lane) * HD;
+#else
       __global const KC_T* krow = kb + (size_t)(p % cap) * HD;
+#endif
       float s[GRH];
 #pragma unroll
       for (int h = 0; h < GRH; ++h) s[h] = 0.0f;
@@ -1876,7 +1884,7 @@ __kernel void attn_fa_gh(__global const float* qf, __global const KC_T* kc, __gl
     }
     barrier(CLK_LOCAL_MEM_FENCE);
     for (int i = 0; i < FS && bs + i <= b1; ++i) {  // the blocks in order, as attn_fa_g takes them
-      const int t0 = (bs + i) * 16, p = t0 + lane;
+      const int t0 = (bs + i) * 16, p = t0 + lane, t0s = t0 % cap;  // (t0s + j: key t0 + j's slot)
       float pr[GRH];
 #pragma unroll
       for (int h = 0; h < GRH; ++h) {
@@ -1894,7 +1902,11 @@ __kernel void attn_fa_gh(__global const float* qf, __global const KC_T* kc, __gl
       for (int j = 0; j < 16; ++j) {
         const int pj = t0 + j;
         if (pj < lo || pj > hi) continue;  // (the same for every lane)
+#if HD >= 512
+        __global const half* vrow = vb + (size_t)(t0s + j) * HD + sgi * (HD / FS) + GD * lane;
+#else
         __global const half* vrow = vb + (size_t)(pj % cap) * HD + sgi * (HD / FS) + GD * lane;
+#endif
 #if GD == 4
         const float4 vv = vload_half4(0, vrow);
 #pragma unroll
