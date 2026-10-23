@@ -211,8 +211,15 @@ __kernel void gdn_gates(__global float* ab, __global const float* dt_bias, __glo
 // x: conv output [M][C] = [q (nk*128) | k (nk*128) | v (nv*128)]; ab: [M][2*nv] = [decay | beta].
 // grid: nv*128 work-items. The state is read from S and written to Sout (the same buffer: in place; a speculative
 // verification pass writes elsewhere and keeps S for the replay of its accepted tokens).
-#define BC8(x, i) intel_sub_group_shuffle((x), (i))
-__attribute__((intel_reqd_sub_group_size(8)))
+// (-DNO_SG8, GPUs without 8-lane sub-groups (Xe2 / Xe3): 16 lanes, the same arithmetic in the same order; their
+//  64-byte registers hold the 128-float column as Xe-LPG's 32-byte ones do at 8 lanes)
+#ifdef NO_SG8
+#define GW 16
+#else
+#define GW 8
+#endif
+#define BCW(x, i) intel_sub_group_shuffle((x), (i))
+__attribute__((intel_reqd_sub_group_size(GW)))
 __kernel void gdn_recur(__global const float* x, int C, __global const float* ab, int nk, int nv,
                         __global const float* S, int M_valid, __global float* o, __global float* Sout) {
   const int col = get_global_id(0), lane = get_sub_group_local_id();
@@ -224,9 +231,11 @@ __kernel void gdn_recur(__global const float* x, int C, __global const float* ab
   float dn = 0.0f, bn = 0.0f;
   if (M_valid > 0) {
     kn0 = intel_sub_group_block_read8((__global const uint*)(x + ko));
-    kn1 = intel_sub_group_block_read8((__global const uint*)(x + ko + 64));
     qn0 = intel_sub_group_block_read8((__global const uint*)(x + qo));
+#if GW == 8
+    kn1 = intel_sub_group_block_read8((__global const uint*)(x + ko + 64));
     qn1 = intel_sub_group_block_read8((__global const uint*)(x + qo + 64));
+#endif
     vn = intel_sub_group_block_read((__global const uint*)(x + vo));
     dn = ab[h];
     bn = ab[nv + h];
@@ -261,6 +270,7 @@ __kernel void gdn_recur(__global const float* x, int C, __global const float* ab
   }
 #endif
   for (int t = 0; t < M_valid; ++t) {
+    // (element i of q / k: register i / GW of lane i % GW, as the sub-group block reads lay them out)
     const float kr[16] = {as_float(kn0.s0), as_float(kn0.s1), as_float(kn0.s2), as_float(kn0.s3),
                           as_float(kn0.s4), as_float(kn0.s5), as_float(kn0.s6), as_float(kn0.s7),
                           as_float(kn1.s0), as_float(kn1.s1), as_float(kn1.s2), as_float(kn1.s3),
@@ -273,9 +283,11 @@ __kernel void gdn_recur(__global const float* x, int C, __global const float* ab
     if (t + 1 < M_valid) {
       __global const float* nrow = x + (size_t)(t + 1) * C;
       kn0 = intel_sub_group_block_read8((__global const uint*)(nrow + ko));
-      kn1 = intel_sub_group_block_read8((__global const uint*)(nrow + ko + 64));
       qn0 = intel_sub_group_block_read8((__global const uint*)(nrow + qo));
+#if GW == 8
+      kn1 = intel_sub_group_block_read8((__global const uint*)(nrow + ko + 64));
       qn1 = intel_sub_group_block_read8((__global const uint*)(nrow + qo + 64));
+#endif
       vn = intel_sub_group_block_read((__global const uint*)(nrow + vo));
       dn = ab[(size_t)(t + 1) * 2 * nv + h];
       bn = ab[(size_t)(t + 1) * 2 * nv + nv + h];
@@ -284,23 +296,23 @@ __kernel void gdn_recur(__global const float* x, int C, __global const float* ab
 #pragma unroll
     for (int i = 0; i < 128; i += 4) {
       s[i] *= decay; s[i + 1] *= decay; s[i + 2] *= decay; s[i + 3] *= decay;
-      a0 = fma(s[i], BC8(kr[i / 8], i % 8), a0);
-      a1 = fma(s[i + 1], BC8(kr[(i + 1) / 8], (i + 1) % 8), a1);
-      a2 = fma(s[i + 2], BC8(kr[(i + 2) / 8], (i + 2) % 8), a2);
-      a3 = fma(s[i + 3], BC8(kr[(i + 3) / 8], (i + 3) % 8), a3);
+      a0 = fma(s[i], BCW(kr[i / GW], i % GW), a0);
+      a1 = fma(s[i + 1], BCW(kr[(i + 1) / GW], (i + 1) % GW), a1);
+      a2 = fma(s[i + 2], BCW(kr[(i + 2) / GW], (i + 2) % GW), a2);
+      a3 = fma(s[i + 3], BCW(kr[(i + 3) / GW], (i + 3) % GW), a3);
     }
     const float d = (v - ((a0 + a1) + (a2 + a3))) * beta;
     float b0 = 0.0f, b1 = 0.0f, b2 = 0.0f, b3 = 0.0f;
 #pragma unroll
     for (int i = 0; i < 128; i += 4) {
-      s[i] = fma(BC8(kr[i / 8], i % 8), d, s[i]);
-      s[i + 1] = fma(BC8(kr[(i + 1) / 8], (i + 1) % 8), d, s[i + 1]);
-      s[i + 2] = fma(BC8(kr[(i + 2) / 8], (i + 2) % 8), d, s[i + 2]);
-      s[i + 3] = fma(BC8(kr[(i + 3) / 8], (i + 3) % 8), d, s[i + 3]);
-      b0 = fma(s[i], BC8(qr[i / 8], i % 8), b0);
-      b1 = fma(s[i + 1], BC8(qr[(i + 1) / 8], (i + 1) % 8), b1);
-      b2 = fma(s[i + 2], BC8(qr[(i + 2) / 8], (i + 2) % 8), b2);
-      b3 = fma(s[i + 3], BC8(qr[(i + 3) / 8], (i + 3) % 8), b3);
+      s[i] = fma(BCW(kr[i / GW], i % GW), d, s[i]);
+      s[i + 1] = fma(BCW(kr[(i + 1) / GW], (i + 1) % GW), d, s[i + 1]);
+      s[i + 2] = fma(BCW(kr[(i + 2) / GW], (i + 2) % GW), d, s[i + 2]);
+      s[i + 3] = fma(BCW(kr[(i + 3) / GW], (i + 3) % GW), d, s[i + 3]);
+      b0 = fma(s[i], BCW(qr[i / GW], i % GW), b0);
+      b1 = fma(s[i + 1], BCW(qr[(i + 1) / GW], (i + 1) % GW), b1);
+      b2 = fma(s[i + 2], BCW(qr[(i + 2) / GW], (i + 2) % GW), b2);
+      b3 = fma(s[i + 3], BCW(qr[(i + 3) / GW], (i + 3) % GW), b3);
     }
     intel_sub_group_block_write((__global uint*)(o + (size_t)t * nv * 128 + h * 128 + jb),
                                 as_uint((b0 + b1) + (b2 + b3)));
@@ -325,6 +337,7 @@ __kernel void gdn_recur(__global const float* x, int C, __global const float* ab
                        s[i + 10], s[i + 11], s[i + 12], s[i + 13], s[i + 14], s[i + 15]), i / 16, so);
 #endif
 }
+#undef GW
 
 // y = rmsnorm_head(o) * w * silu(z) per 128-dim head, quantized (K = nv*128). grid (256, M).
 __attribute__((intel_reqd_sub_group_size(SG)))
@@ -2219,18 +2232,25 @@ __kernel void vit_bias_act(__global float* x, int N, __global const float* b, in
 #define FT 4
 #endif
 // head size HD (default 64; Qwen3.5 9B's encoder: 72): lane l of the SIMD8 sub-group holds dims PL*l .. PL*l + PL-1
+// (-DNO_SG8: 16 lanes, dims interleaved, ceil(HD / 16) per lane; the last block read may run past a row's HD values
+//  into the next row or the buffer's slack, never used)
 #ifndef HD
 #define HD 64
 #endif
-#define PL (HD / 8)
-#if PL == 8
+#ifdef NO_SG8
+#define VW 16
+#else
+#define VW 8
+#endif
+#define PL ((HD + VW - 1) / VW)
+#if PL == 8 && VW == 8
 #define KD(r, d) intel_sub_group_shuffle((r)[(d) % PL], (d) / PL)
 #else
-// other head sizes: interleaved, lane l holds dims l, l + 8, ... (one aligned sub-group block read per 8 dims)
-#define KD(r, d) intel_sub_group_shuffle((r)[(d) / 8], (d) % 8)
+// other head sizes: interleaved, lane l holds dims l, l + VW, ... (one aligned sub-group block read per VW dims)
+#define KD(r, d) intel_sub_group_shuffle((r)[(d) / VW], (d) % VW)
 inline void kv_row(__global const half* p, float* r) {
 #pragma unroll
-  for (int i = 0; i < PL; ++i) r[i] = (float)as_half(intel_sub_group_block_read_us((__global const ushort*)(p + 8 * i)));
+  for (int i = 0; i < PL; ++i) r[i] = (float)as_half(intel_sub_group_block_read_us((__global const ushort*)(p + VW * i)));
 }
 #endif
 #ifdef PRECISE_VEXP
@@ -2238,13 +2258,13 @@ inline void kv_row(__global const half* p, float* r) {
 #else
 #define AEXP native_exp
 #endif
-__attribute__((intel_reqd_sub_group_size(8)))
+__attribute__((intel_reqd_sub_group_size(VW)))
 __kernel void vit_attn_rows(__global const half* q, __global const half* k, __global const half* v, int n, int Mp,
                             int nh, __global float* out) {
   const int lane = get_sub_group_local_id(), h = get_group_id(1), m = get_global_id(0);
   const bool act = m < n;
   __global const half* qp = q + ((size_t)h * Mp + (act ? m : 0)) * HD;
-#if PL == 8
+#if PL == 8 && VW == 8
   float qr[HD];
 #pragma unroll
   for (int d = 0; d < HD; ++d) qr[d] = vload_half(d, qp);
@@ -2262,13 +2282,13 @@ __kernel void vit_attn_rows(__global const half* q, __global const half* k, __gl
     for (int jj = 0; jj < FT; ++jj) {
       const int key = min(j0 + jj, n - 1);
       float kr[PL];  // dims PL * lane ..
-#if PL == 8
+#if PL == 8 && VW == 8
       vstore8(vload_half8(lane, kh + (size_t)key * HD), 0, kr);
 #else
       kv_row(kh + (size_t)key * HD, kr);
 #endif
       float a0 = 0.0f, a1 = 0.0f;
-#if PL == 8
+#if PL == 8 && VW == 8
 #pragma unroll
       for (int d = 0; d < HD; d += 2) {
         a0 = fma(qr[d], KD(kr, d), a0);
@@ -2304,7 +2324,7 @@ __kernel void vit_attn_rows(__global const half* q, __global const half* k, __gl
       l += p;
       const int key = min(j0 + jj, n - 1);
       float vr[PL];
-#if PL == 8
+#if PL == 8 && VW == 8
       vstore8(vload_half8(lane, vh + (size_t)key * HD), 0, vr);
 #else
       kv_row(vh + (size_t)key * HD, vr);

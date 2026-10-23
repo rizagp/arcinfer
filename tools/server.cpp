@@ -47,6 +47,18 @@ static double ms_since(clk::time_point t) { return std::chrono::duration<double,
 // llama-server's own model list next to "data": a "models" array (Ollama style) whose "capabilities" hold
 // "multimodal" for a model with an image encoder. Clients that treat arcinfer as a llama.cpp server read it there.
 // bytes: model id -> its file size ("size"; 0 when not known).
+// The served context window in the fields clients read: llama-server's "meta" (n_ctx: the window served, n_ctx_train:
+// the trained one; Unsloth Studio takes meta.n_ctx) and vLLM's "max_model_len". served 0: not loaded, not known yet.
+static void set_window(Json& m, int64_t served, int64_t trained, int64_t n_vocab = 0, int64_t n_embd = 0) {
+  Json meta = Json::object();
+  if (served > 0) meta.set("n_ctx", (double)served);
+  if (trained > 0) meta.set("n_ctx_train", (double)trained);
+  if (n_vocab > 0) meta.set("n_vocab", (double)n_vocab);
+  if (n_embd > 0) meta.set("n_embd", (double)n_embd);
+  m.set("meta", meta);
+  if (served > 0) m.set("max_model_len", (double)served);
+}
+
 static Json llama_models(const Json& data, const std::map<std::string, uint64_t>& bytes) {
   Json out = Json::array();
   for (const Json& m : data.items()) {
@@ -187,6 +199,8 @@ class Server {
       m.set("object", "model");
       m.set("owned_by", "arcinfer");
       m.set("context_length", eng_.ctx);
+      set_window(m, eng_.ctx, eng_.gguf().get_int(eng_.gguf().get_str("general.architecture") + ".context_length", 0),
+                 eng_.hp.n_vocab, eng_.hp.n_embd);
       set_modalities(m, has_vision(), has_audio());
       Json d = Json::array();
       d.push(m);
@@ -1813,7 +1827,10 @@ class Server {
     }
 
     if (stream) {
+      // (the last chunk carries usage and timings together, as llama-server's does: Unsloth Studio keeps the timings
+      //  only from a chunk that has usage, and showed no token statistics)
       Json fin = chunk(id, created, Json::object(), Json(finish));
+      fin.set("usage", usage);
       fin.set("timings", timings);
       rs.sse_event(fin.dump());
       if (usage_in_stream) {
@@ -1824,6 +1841,7 @@ class Server {
         u.set("model", model_id_);
         u.set("choices", Json::array());
         u.set("usage", usage);
+        u.set("timings", timings);
         rs.sse_event(u.dump());
       }
       rs.sse_event("[DONE]");
@@ -3162,6 +3180,7 @@ int main(int argc, char** argv) {
         j.set("name", m.name);
         j.set("loaded", loaded);
         if (loaded) j.set("context_length", cur->eng->ctx);
+        set_window(j, loaded ? cur->eng->ctx : 0, m.ctx_train, loaded ? cur->eng->hp.n_vocab : 0, loaded ? cur->eng->hp.n_embd : 0);
         // (the loaded model: the encoders that did load)
         set_modalities(j, loaded ? cur->srv->has_vision() : m.vision, loaded ? cur->srv->has_audio() : m.audio);
         sizes[m.alias] = m.bytes;
@@ -3183,6 +3202,7 @@ int main(int argc, char** argv) {
         j.set("name", cur->alias);
         j.set("loaded", true);
         j.set("context_length", cur->eng->ctx);
+        set_window(j, cur->eng->ctx, 0, cur->eng->hp.n_vocab, cur->eng->hp.n_embd);
         set_modalities(j, cur->srv->has_vision(), cur->srv->has_audio());
         sizes[cur->alias] = cur->srv->model_bytes_;
         d2.push(j);

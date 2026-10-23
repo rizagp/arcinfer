@@ -1733,7 +1733,8 @@ class Engine {
     auto it = kcache_.find(key);
     if (it != kcache_.end()) return it->second;
     const std::string& src = which == "gemm" ? gemm_src_ : which == "decode" ? dec_src_ : which == "moe" ? moe_src_ : ops_src_;
-    auto p = cl_.build(src, "-cl-std=CL3.0 -cl-mad-enable " + defs + (which == "ops" ? q2_defs_ : std::string()));
+    auto p = cl_.build(src, "-cl-std=CL3.0 -cl-mad-enable " + defs + (which == "ops" ? q2_defs_ : std::string()) +
+                            (cl_.sg8 ? "" : " -DNO_SG8"));
     progs_.push_back(p);
     return kcache_[key] = cl_.kernel(p, name);
   }

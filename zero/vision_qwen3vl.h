@@ -272,8 +272,8 @@ class VisionQwen3VL {
     h_ = e_.buf((size_t)Mp * F * 4);
     o_ = e_.buf((size_t)Mp * std::max<size_t>(E, n_out) * 4);
     q_ = e_.buf((size_t)Mp * E * 2);
-    k_ = e_.buf((size_t)Mp * E * 2);
-    v_ = e_.buf((size_t)Mp * E * 2);
+    k_ = e_.buf((size_t)Mp * E * 2 + 64);  // (+64: the 16-lane vit_attn_rows reads a block past the last row)
+    v_ = e_.buf((size_t)Mp * E * 2 + 64);
     if (!dummy_) dummy_ = e_.buf(64);
     cap_ = Mp;
   }

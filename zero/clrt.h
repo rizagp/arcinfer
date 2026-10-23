@@ -469,6 +469,7 @@ inline cl_int clReleaseContext(cl_context) { return CL_SUCCESS; }
 
 struct ClRt {
   std::string device_id, cache_dir;
+  bool sg8 = true;  // (sub-groups of 8 lanes: Xe-LPG yes; Xe2 / Xe3 (Lunar Lake, Battlemage, Panther Lake) only 16 / 32)
   static uint64_t fnv1a(const std::string& s) {
     uint64_t h = 1469598103934665603ull;
     for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
@@ -486,6 +487,15 @@ struct ClRt {
     zrt::rcl::getDeviceInfo(zrt::rcl::device, 0x102B, sizeof(name) - 1, name, nullptr);  // CL_DEVICE_NAME
     zrt::rcl::getDeviceInfo(zrt::rcl::device, 0x102D, sizeof(drv) - 1, drv, nullptr);   // CL_DRIVER_VERSION
     device_id = std::string(name) + "|" + drv;  // (the same key as arcinfer's kernel cache)
+    {  // CL_DEVICE_SUB_GROUP_SIZES_INTEL; ARC_NO_SG8=1 takes the 16-lane kernels anyway (tests)
+      size_t sz[8] = {}, ret = 0;
+      if (zrt::rcl::getDeviceInfo(zrt::rcl::device, 0x4108, sizeof sz, sz, &ret) == 0 && ret >= sizeof(size_t)) {
+        sg8 = false;
+        for (size_t i = 0; i < ret / sizeof(size_t) && i < 8; ++i) sg8 = sg8 || sz[i] == 8;
+      }
+      if (getenv("ARC_NO_SG8") && atoi(getenv("ARC_NO_SG8")) != 0) sg8 = false;
+      if (!sg8) fprintf(stderr, "arcinferzero: no 8-lane sub-groups on this GPU: 16-lane kernels\n");
+    }
     if (const char* la = getenv("LOCALAPPDATA"); la && !getenv("ARC_NO_KCACHE")) cache_dir = std::string(la) + "\\arcinfer\\kernels";
     // a second engine in the process (the server switching models, after the first one freed its memory) keeps the
     // runtime: the context, its command lists and events, the staging buffer (all of zrt:: belongs to that context)

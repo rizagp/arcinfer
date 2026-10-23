@@ -1,6 +1,17 @@
 # Changelog
 
-## 2026-10-23: voice conversation in the web UI
+## 2026-10-23: Xe2 / Xe3 GPUs (no 8-lane sub-groups); Unsloth Studio statistics and context
+
+- **GPUs without 8-lane sub-groups** (Xe2 / Xe3: Lunar Lake, Battlemage, Panther Lake's Arc B390; GitHub issue #1):
+  the engine reads the sub-group sizes the GPU supports and builds the two 8-lane kernels (`gdn_recur`, Qwen
+  DeltaNet layers; `vit_attn_rows`, Qwen image encoder) with 16 lanes there. Same arithmetic in the same order:
+  forced on this Xe-LPG laptop (`ARC_NO_SG8=1`) the 35B's logits are bit-identical and Qwen3.5 4B / 9B describe
+  images as before (the 16-lane DeltaNet kernel spills here, Xe-LPG's registers are half as wide; not on Xe2 / Xe3).
+- **Unsloth Studio** (arcinfer as a llama.cpp endpoint): the last streamed chunk carries `usage` and `timings`
+  together, as llama-server's does (Studio keeps the timings only from a chunk with usage, so it showed no token
+  statistics), and `/v1/models` gives the served window as llama-server's `meta.n_ctx` (plus `max_model_len`), which
+  Studio reads for the context size.
+
 
 - **Talk** (web UI, Gemma 4 E4B / 12B): an always-open microphone with speech detection, each utterance sent as
   audio to the model, the answer read aloud sentence by sentence while it streams (browser speech synthesis, voice

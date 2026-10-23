@@ -25,6 +25,15 @@ Everything below this list is history plus the details of these items; a row not
 | low | Jump-forward in tool calls; first prompt of a new session | F25.2 / F25.3 |
 | parked | Fused FFN gate + up and small DeltaNet kernels (F17.2); review leftovers (F18.14); 35B expert decode once per layer (F19.6); larger staging (F19.2) | |
 
+## F29: other Intel GPUs (GitHub issue #1, 2026-10-23)
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 29.1 | Xe2 / Xe3 (no 8-lane sub-groups) | ✅ 2026-10-23 | gee456's Arc B390 (Core Ultra X7 358H): `gdn_recur` failed to build ("required subgroup size 8 ... unsupported"); the sub-group sizes are read at start and the 8-lane kernels built with 16 lanes there; bit-identical when forced here (`ARC_NO_SG8=1`). He measured his own 16-lane patch: 35B at 262K context, 1,182 tok/s prompt, 24.2 tok/s generation |
+| 29.2 | XMX (DPAS) for prompt GEMMs | 💡 needs a tester | Xe-HPG / Xe2 / Xe3 have XMX (~10x this laptop's DP4a TOPS): `cl_intel_subgroup_matrix_multiply_accumulate` (`intel_sub_group_i8_i8_matrix_mad_k32`) in gemm.cl / moe_rg / the MoE GEMM behind a capability check; int8 x int8 sums in int32 are exact, so the results can stay bit-identical to the DP4a path (a dump comparison on the tester's machine checks it). This laptop has no XMX: needs gee456 or another Xe2 / Xe3 machine |
+| 29.3 | setup.ps1: Visual Studio in another location | ⏳ | gee456 had to edit setup / build for his Visual Studio path: check Find-VcVars against his layout (vswhere, other editions / drives) |
+| 29.4 | Unsloth Studio: token statistics and context size | ✅ 2026-10-23 | usage + timings in the last chunk; `meta.n_ctx` / `max_model_len` in /v1/models |
+
 ## Done (F1-F14)
 
 Details: git history of QUEUE.md, CHANGELOG.md, docs/before-after.md.
