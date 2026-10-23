@@ -208,6 +208,9 @@ else { Unit "hyper-connection kernels (zero)" .\bin\test_hc.exe @() "ALL OK" }
 # float attention kernels (Gemma 4; head 128 for Flint) vs a CPU computation in double (uses the GPU)
 if ($SkipGpu) { Skip "float attention kernels (zero)" "-SkipGpu" }
 elseif (Test-Path .\bin\test_fa.exe) { Unit "float attention kernels (zero)" .\bin\test_fa.exe @() "test_fa: all passed" }
+# MoE routing kernels (softmax; sigmoid with an ungated shared FFN for Flint) vs a CPU computation (uses the GPU)
+if ($SkipGpu) { Skip "MoE routing kernels (zero)" "-SkipGpu" }
+elseif (Test-Path .\bin\test_route.exe) { Unit "MoE routing kernels (zero)" .\bin\test_route.exe @() "test_route: all passed" }
 
 if ($SkipGpu) {
   Pop-Location

@@ -27,6 +27,18 @@ __attribute__((intel_reqd_sub_group_size(SG)))
 #define ESCALE_ARG
 #define ESCALE_MUL(e)
 #endif
+// -DSIGMOID (Flint): the chosen experts' sigmoid scores, normalized over the selection (the top NU of the logits
+// are those of the sigmoids); -DSH_NOGATE: a shared FFN without a gate (sgate 1, no logit at column NE)
+#ifdef SIGMOID
+#define ROUTE_P(g, mx) (1.0f / (1.0f + exp(-(g))))
+#else
+#define ROUTE_P(g, mx) exp((g) - (mx))
+#endif
+#ifdef SH_NOGATE
+#define SGATE(lg) 1.0f
+#else
+#define SGATE(lg) (1.0f / (1.0f + exp(-(lg)[NE])))
+#endif
 __kernel void moe_route(__global const float* logits, int ldl, int T, __global int* ids, __global float* wts,
                         __global float* sgate, __global int* counts ESCALE_ARG) {
   const int t = get_group_id(1), l = get_sub_group_local_id();
@@ -55,7 +67,7 @@ __kernel void moe_route(__global const float* logits, int ldl, int T, __global i
     for (int i = 0; i < NE / SG; ++i)
       if (i * SG + l == gi) v[i] = -INFINITY;
     sel[k] = gi;
-    p[k] = exp(gv - mx);
+    p[k] = ROUTE_P(gv, mx);
     sum += p[k];
   }
 #pragma unroll
@@ -65,7 +77,7 @@ __kernel void moe_route(__global const float* logits, int ldl, int T, __global i
       wts[t * NU + k] = p[k] / sum ESCALE_MUL(sel[k]);
       atomic_inc(&counts[sel[k]]);
     }
-  if (l == 0) sgate[t] = 1.0f / (1.0f + exp(-lg[NE]));
+  if (l == 0) sgate[t] = SGATE(lg);
 }
 
 // Single token (TM = 1): routing straight into NU one-slot tiles, slot k = the k-th selected expert (no counts,
@@ -97,7 +109,7 @@ __kernel void moe_route1(__global const float* logits, __global float* sgate, __
     for (int i = 0; i < NE / SG; ++i)
       if (i * SG + l == gi) v[i] = -INFINITY;
     sel[k] = gi;
-    p[k] = exp(gv - mx);
+    p[k] = ROUTE_P(gv, mx);
     sum += p[k];
   }
 #pragma unroll
@@ -112,7 +124,7 @@ __kernel void moe_route1(__global const float* logits, __global float* sgate, __
     }
   if (l == 0) {
     tiles[0] = NU;
-    sgate[0] = 1.0f / (1.0f + exp(-logits[NE]));
+    sgate[0] = SGATE(logits);
   }
 }
 
