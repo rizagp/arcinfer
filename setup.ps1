@@ -144,7 +144,10 @@ foreach ($t in "tools\clinfo", "zero\serverz", "zero\runz") {
   $src = Get-Item (Join-Path $root "$t.cpp")
   $deps = @($newestHeader, $src.LastWriteTime)
   if ($t -like "zero*") { $deps += $newestZero }
-  if ($t -eq "zero\serverz") { $deps += (Get-Item (Join-Path $root "tools\server.cpp")).LastWriteTime }
+  # (serverz: tools\server.cpp and the headers beside it, server_*.h / web_tools.h / api_compat.h / sampler.h)
+  if ($t -eq "zero\serverz") {
+    $deps += (Get-ChildItem -Path (Join-Path $root "tools\*") -Include server.cpp, *.h -File | Measure-Object LastWriteTime -Maximum).Maximum
+  }
   $stale = -not (Test-Path $exe) -or @($deps | Where-Object { (Get-Item $exe).LastWriteTime -lt $_ }).Count -gt 0
   if ($stale) { $need += "$t.cpp" } else { Ok "bin\$name.exe is up to date" }
 }
