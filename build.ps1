@@ -33,7 +33,8 @@ foreach ($src in $Sources) {
   #  /utf-8: the sources are UTF-8, their string literals stay byte for byte)
   $fp = if ($name -match '^(ref_forward|test_|vision_test)') { '/fp:precise' } else { '/fp:fast' }
   $cmd = "`"$vcvars`" >nul && cl /nologo /utf-8 /std:c++20 /O2 /Oi /arch:AVX2 $fp /EHsc /MD /W3 /openmp:llvm /D_CRT_SECURE_NO_WARNINGS /I`"$root\third_party`" " +
-         "/Fe`"$out\$name.exe`" /Fo`"$out\\`" `"$full`""
+         "/Fe`"$out\$name.exe`" /Fo`"$out\\`" `"$full`" " +
+         "/link /MANIFEST:EMBED /MANIFESTINPUT:`"$root\tools\utf8.manifest`""  # (UTF-8 code page: paths with any characters)
   cmd /c $cmd
   if ($LASTEXITCODE -ne 0) { throw "build failed: $src" }
 }
