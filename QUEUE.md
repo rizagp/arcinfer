@@ -14,7 +14,7 @@ Everything below this list is history plus the details of these items; a row not
 | 1 | Flash Next prompt: the per-tile gate / up kernel (7.0 s of 22 s GPU at 4K after the scale transpose): its IQ2_S / IQ3_XXS decode (~4 s) and activation reads; generation is SSD-bound (DFlash2 works, no gain) | F21.15 / F21.16 |
 | 4 | Xe2 / Xe3: XMX prompt GEMMs built and self-checked, waiting for gee456's report (issue #1); then moe_rg / attention on XMX, setup's Visual Studio paths | F29 |
 | 5 | Voice: a real microphone test by the user; ASR for any model, human-sounding replies, omni models | F24.4-24.7 |
-| 6 | Flint (unsloth/flint-GGUF on D:): tokenizer, reference, engine (llama.cpp b11835 downloaded 2026-10-23, it reads flint) | F28 |
+| 6 | Flint (unsloth/flint-GGUF on D:): tokenizer done (2026-10-24, identical to llama.cpp b11835 on README / code / mixed scripts); left: f32 reference, engine, server | F28 |
 | 8 | Gemma 4 26B vision encoder (11.8 s per image; needs an image-accuracy reference) | F21.7 |
 | 9 | Batch decode for Flash Next (E4B done) | F20.6 |
 | 10 | Copy 4B / E4B / 12B from D: to C: (the user decides) | F20.8 |
@@ -22,6 +22,7 @@ Everything below this list is history plus the details of these items; a row not
 | 11 | DeepSeek audit 2026-10-23 (docs/deepseek-audit-2026-10-23.md, local): done XMX check (F29.5) and web fetch (rebinding, ranges, body limit); its "sliding attention regression" not reproduced (13,921 tokens: attn_fa_gh 11.05 s against 15.85 s for attn_fa_g, TTFT 71.1 vs 84.7 s; its 22.2 s was a slow run). Left: 12B prompt speed measured again (73.7 tok/s at 4K in one run), ring modulo per 16-key block, docs/f21-q2-speed.md marked historical, server.cpp split | |
 | 14 | Gemma 4 26B / 12B long prompts: attention is ~48 % of the 26B's GPU time at 14K (attn_fa_gh); a faster float attention kernel, bit-identical | F21.5 |
 | 15 | Larger expert staging for long prompts only (F19.2 gave +5-11 % prompt but -2-3 % generation as the default): sized up while a long prompt streams, back after | F19.2 |
+| 16 | Qwen3.8 27B: verification rows (MTP or DFlash2) are not bit-identical to plain decoding after a long prompt (bitcheck baselines of 2026-10-22 already: row 1 max 1.39, top token the same in 24 / 24; texts drift apart later); 35B is identical. Ruled out (2026-10-23 night): the output head (row by row: same), the MTP block (DFlash2 only: same), spec_ (off: same); prompt passes of 1 / 2 / 4 / 8 rows alone are identical layer by layer (fn64). Left: what a 1-row and an 8-row pass read differently after a 1,097-token prompt chunk (GEMM path) | |
 | later | Remote access through Cloudflare (Origin https, login) | F27 |
 | low | Jump-forward in tool calls | F25.2 |
 | parked | Fused FFN gate + up and small DeltaNet kernels (F17.2); review leftovers (F18.14); 35B expert decode once per layer (F19.6); larger staging (F19.2) | |

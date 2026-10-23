@@ -2,6 +2,7 @@
 #pragma once
 #include "gguf.h"
 #include "unicode_tables.h"
+#include "unicode_ps.h"
 #include <algorithm>
 #include <queue>
 #include <string>
@@ -21,6 +22,16 @@ inline uint16_t flags(uint32_t cp) {
     else hi = mid;
   }
   return kUniRangeFlags[lo];
+}
+inline bool is_ps(uint32_t cp) {  // \p{P} or \p{S} (unicode_ps.h)
+  const size_t n = sizeof(kUniPsStart) / sizeof(kUniPsStart[0]);
+  size_t lo = 0, hi = n;
+  while (hi - lo > 1) {
+    const size_t mid = (lo + hi) / 2;
+    if (kUniPsStart[mid] <= cp) lo = mid;
+    else hi = mid;
+  }
+  return kUniPsIs[lo] != 0;
 }
 inline bool is_ws(uint32_t cp) {
   for (uint32_t w : kUniWhitespace)
@@ -75,6 +86,7 @@ class Tokenizer {
     bos = (int)f.get_int("tokenizer.ggml.bos_token_id", -1);
     // Gemma 4: SentencePiece-style BPE (spaces as U+2581, merges over UTF-8 characters, <0xXX> byte fallback)
     spm_ = f.get_str("tokenizer.ggml.model") == "gemma4";
+    flint_ = f.get_str("tokenizer.ggml.pre") == "flint";
     for (size_t i = 0; i < tokens.size(); ++i) {
       if (i < types.size() && (types[i] == 3 || types[i] == 4)) {
         special[tokens[i]] = (int)i;
@@ -163,6 +175,7 @@ class Tokenizer {
 
  private:
   bool spm_ = false;
+  bool flint_ = false;  // (the Flint pre-tokenizer, pretokenize_flint)
   static constexpr const char* kSpace = "\xe2\x96\x81";  // U+2581, SentencePiece's visible space
   std::unordered_map<std::string, int> token_id_;
   std::unordered_map<std::string, int> merge_rank_;
@@ -235,6 +248,94 @@ class Tokenizer {
       if (!e) e = i + 1;
       words.push_back({i, e});
       i = e;
+    }
+  }
+
+  // Flint pre-tokenizer, as llama.cpp splits it (regexes applied one after the other, each to every piece the one
+  // before left; text a regex does not match stays a piece of its own):
+  //   1. \p{N}{1,3}   2. CJK runs (U+4E00-9FA5, U+3040-309F, U+30A0-30FF)
+  //   3. [^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?| ?[\p{P}\p{S}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+  // (the model's own regex has case classes, \p{Lu} / \p{Ll}, which llama.cpp's generic path reads as letters)
+  static void pretokenize_flint(const std::vector<uint32_t>& c, std::vector<std::pair<size_t, size_t>>& words) {
+    const size_t n = c.size();
+    std::vector<std::pair<size_t, size_t>> a, b;
+    auto num = [&](size_t i) { return (uni::flags(c[i]) & uni::NUMBER) != 0; };
+    auto cjk = [&](size_t i) {
+      const uint32_t x = c[i];
+      return (x >= 0x4E00 && x <= 0x9FA5) || (x >= 0x3040 && x <= 0x309F) || (x >= 0x30A0 && x <= 0x30FF);
+    };
+    // a regex matching runs of one class (passes 1 and 2): its matches and the gaps between them
+    auto split_runs = [&](const std::vector<std::pair<size_t, size_t>>& in, auto is_in, size_t max_run,
+                          std::vector<std::pair<size_t, size_t>>& out) {
+      out.clear();
+      for (auto [s, e] : in) {
+        size_t g = s;  // start of the current gap
+        for (size_t i = s; i < e;) {
+          if (!is_in(i)) { ++i; continue; }
+          if (g < i) out.push_back({g, i});
+          size_t j = i;
+          while (j < e && is_in(j) && j - i < max_run) ++j;
+          out.push_back({i, j});
+          i = g = j;
+        }
+        if (g < e) out.push_back({g, e});
+      }
+    };
+    a.push_back({0, n});
+    split_runs(a, num, 3, b);
+    split_runs(b, cjk, (size_t)-1, a);
+    for (auto [s, e] : a) {
+      auto F = [&](size_t i) -> uint16_t { return i < e ? uni::flags(c[i]) : 0; };
+      auto LM = [&](size_t i) { return i < e && (F(i) & (uni::LETTER | uni::MARK)); };
+      auto WS = [&](size_t i) { return i < e && uni::is_ws(c[i]); };
+      auto NL = [&](size_t i) { return i < e && (c[i] == '\r' || c[i] == '\n'); };
+      auto PS = [&](size_t i) { return i < e && uni::is_ps(c[i]); };
+      auto lower = [&](size_t i) -> uint32_t { return i < e && c[i] < 128 ? (uint32_t)tolower((int)c[i]) : (i < e ? c[i] : 0); };
+      size_t g = s;  // start of unmatched text
+      for (size_t i = s; i < e;) {
+        size_t m = 0;  // end of a match at i
+        // letters / marks after one optional character that is not a newline, letter or number, + a contraction
+        const bool pre = !NL(i) && !(F(i) & (uni::LETTER | uni::NUMBER));
+        size_t j = pre && LM(i + 1) ? i + 1 : LM(i) ? i : 0;
+        if (j || LM(i)) {
+          if (!j) j = i;
+          while (LM(j)) ++j;
+          if (j < e && c[j] == '\'') {
+            const uint32_t x = lower(j + 1), y = lower(j + 2);
+            if ((x == 'r' && y == 'e') || (x == 'v' && y == 'e') || (x == 'l' && y == 'l')) j += 3;
+            else if (x == 's' || x == 't' || x == 'm' || x == 'd') j += 2;
+          }
+          m = j;
+        }
+        // optional space + punctuation / symbol run + newlines
+        if (!m) {
+          size_t k = c[i] == ' ' && PS(i + 1) ? i + 1 : PS(i) ? i : 0;
+          if (k || PS(i)) {
+            if (!k) k = i;
+            while (PS(k)) ++k;
+            while (NL(k)) ++k;
+            m = k;
+          }
+        }
+        // whitespace: \s*[\r\n]+ | \s+(?!\S) | \s+
+        if (!m && WS(i)) {
+          size_t k = i;
+          while (WS(k)) ++k;
+          size_t last_nl = 0;
+          bool has_nl = false;
+          for (size_t q = i; q < k; ++q)
+            if (NL(q)) { last_nl = q; has_nl = true; }
+          if (has_nl) m = last_nl + 1;
+          else if (k == e) m = k;
+          else if (k - i >= 2) m = k - 1;
+          else m = k;
+        }
+        if (!m) { ++i; continue; }  // (no match here: part of the unmatched text)
+        if (g < i) words.push_back({g, i});
+        words.push_back({i, m});
+        i = g = m;
+      }
+      if (g < e) words.push_back({g, e});
     }
   }
 
@@ -337,7 +438,8 @@ class Tokenizer {
     std::vector<size_t> offs;
     uni::utf8_decode(text, cps, offs);
     std::vector<std::pair<size_t, size_t>> words;
-    pretokenize(cps, words);
+    if (flint_) pretokenize_flint(cps, words);
+    else pretokenize(cps, words);
     for (auto& [a, b] : words) bpe_word(text.substr(offs[a], offs[b] - offs[a]), out);
   }
 };
