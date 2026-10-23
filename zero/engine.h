@@ -2377,7 +2377,7 @@ class Engine {
     const uint32_t type = L.ex_type[i];
     const int nsb = K / 256;
     const bool sl = !w8_requant(type) && nsb <= 16 && N % 16 == 0 &&
-                    16 * nsb * raw_padded_sb_bytes(type) <= 32768 && type != GGML_IQ1_M;
+                    16 * nsb * raw_padded_sb_bytes(type) <= 32768 && type != GGML_IQ1_M && type != GGML_IQ1_S;
     cl_mem tab = xc_->xtab[L.il];
     int NN = G * N, xo = xoff(L, i);
     if (sl) {
@@ -3057,7 +3057,7 @@ class Engine {
     // mins (Qwen3.6 35B prompt experts, 2048-token chunk: IQ3_XXS 1038 -> 518 ms, IQ4_XS 433 -> 303 ms)
     const int nsb = K / 256;
     const bool sl = !w8_requant(type) && nsb <= 16 && N % 16 == 0 &&
-                    16 * nsb * raw_padded_sb_bytes(type) <= 32768 && type != GGML_IQ1_M;
+                    16 * nsb * raw_padded_sb_bytes(type) <= 32768 && type != GGML_IQ1_M && type != GGML_IQ1_S;
     if (sl) {
       cl_kernel k = kernel("decode", "-DQT=" + std::to_string(type) + " -DSL_NSB=" + std::to_string(nsb), "decode_w8_sl");
       set_args(k, 0, raw, N, K, tabs_, dq, dh);
@@ -3083,7 +3083,7 @@ class Engine {
   static bool gemv_v_ok(const GpuWeight& w) {
     // (measured per type with bench/gemv_bench on the regrouped GPU forms; IQ3_S stays faster in gemv)
     return (w.type == GGML_IQ4_XS || w.type == GGML_Q4_0 || w.type == GGML_IQ3_XXS || w.type == GGML_IQ2_XXS ||
-                    w.type == GGML_IQ2_XS || w.type == GGML_IQ2_S || w.type == GGML_IQ1_M || w.type == GGML_Q6_K);
+                    w.type == GGML_IQ2_XS || w.type == GGML_IQ2_S || w.type == GGML_IQ1_M || w.type == GGML_IQ1_S || w.type == GGML_Q6_K);
     // (Q6_K: every matrix, not only output heads: 27B MTP block FFN 63-67 -> 71-77 GB/s, attn_output 0.41 -> 0.34 ms,
     //  eh_proj 0.78 -> 0.61 ms; tiny matrices equal; 16 Oct)
   }

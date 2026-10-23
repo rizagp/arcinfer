@@ -40,6 +40,7 @@
 #define IQ2_S 22
 #define IQ4_XS 23
 #define IQ1_M 29
+#define IQ1_S 19
 
 #if QT == Q2_K
 #define BB 84
@@ -61,6 +62,8 @@
 #define BB 98
 #elif QT == IQ3_S
 #define BB 110
+#elif QT == IQ1_S
+#define BB 50
 #elif QT == IQ1_M
 #define BB 56
 #elif QT == IQ4_XS
@@ -98,7 +101,7 @@ inline float f16(uint h) { return vload_half(0, (const __private half*)&h); }
 #elif QT == IQ3_S
 #define GRID_OFF TAB_IQ3S
 #define GRID_N 512
-#elif QT == IQ1_M
+#elif QT == IQ1_M || QT == IQ1_S
 #define GRID_OFF TAB_IQ1S
 #define GRID_N 4096
 #endif
@@ -318,6 +321,26 @@ inline void decode32(const uchar* p, int ib, const uint* grid, const uint* aux, 
       const uint sg = p[72 + 4 * ib + l];
       w[2 * l] = apply_signs4(grid4w(grid, g1), sg & 0xF);
       w[2 * l + 1] = apply_signs4(grid4w(grid, g2), sg >> 4);
+    }
+  }
+#elif QT == IQ1_S
+  {
+    // (one 3-bit scale and delta sign per 32 values in qh[ib]: bits 12-14 and 15; grid index bits 8-10 per 8 values)
+    d = f16(rd16(p)) * 0.125f;
+    const uint qh = rd16(p + 34 + 2 * ib);
+    sc0 = sc1 = 2 * ((qh >> 12) & 7) + 1;
+    const int dl = (qh & 0x8000) ? -1 : 1;
+#pragma unroll
+    for (int l = 0; l < 4; ++l) {
+      const uint2 g = grid8w(grid, p[2 + 4 * ib + l] | (((qh >> (3 * l)) & 7) << 8));
+#pragma unroll
+      for (int hw = 0; hw < 2; ++hw) {
+        const uint gw = hw ? g.s1 : g.s0;
+        uint o = 0;
+#pragma unroll
+        for (int b = 0; b < 4; ++b) o |= (uint)(uchar)(char)(8 * (char)((gw >> (8 * b)) & 0xFF) + dl) << (8 * b);
+        w[2 * l + hw] = o;
+      }
     }
   }
 #elif QT == IQ1_M

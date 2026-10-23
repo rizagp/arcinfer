@@ -260,6 +260,20 @@ inline void decode_sb(uint32_t type, const uint8_t* p, DecodedSB& o) {
       }
       return;
     }
+    case GGML_IQ1_S: {  // (as IQ1_M: q = 8 * grid +- 1 with d / 8, one 3-bit scale and delta sign per 32 values)
+      const uint8_t* qs = p + 2;
+      o.wd = fp16_to_f32(rd16(p)) / 8; o.has_min = false; o.qoff = 0;
+      for (int ib = 0; ib < 8; ++ib) {
+        const uint16_t qh = rd16(p + 34 + 2 * ib);
+        o.wsc[2 * ib] = o.wsc[2 * ib + 1] = (int8_t)(2 * ((qh >> 12) & 7) + 1);
+        const int dl = (qh & 0x8000) ? -1 : 1;
+        for (int l = 0; l < 4; ++l) {
+          const int8_t* grid = (const int8_t*)(iq1s_grid + (qs[4 * ib + l] | (((qh >> (3 * l)) & 7) << 8)));
+          for (int j = 0; j < 8; ++j) o.q[32 * ib + 8 * l + j] = (int16_t)(8 * grid[j] + dl);
+        }
+      }
+      return;
+    }
     case GGML_IQ1_M: {
       const uint8_t* qs = p;
       const uint8_t* qh = p + 32;
@@ -583,7 +597,7 @@ inline void pad_small_block_rows(uint32_t type, const uint8_t* src, int N, int K
 inline bool is_w8_type(uint32_t t) {
   switch (t) {
     case GGML_Q2_K: case GGML_Q3_K: case GGML_Q4_K: case GGML_Q5_K: case GGML_Q6_K: case GGML_IQ2_XXS: case GGML_IQ2_XS:
-    case GGML_IQ2_S: case GGML_IQ3_XXS: case GGML_IQ3_S: case GGML_IQ1_M: case GGML_IQ4_XS: case GGML_Q8_0: case GGML_Q4_0:
+    case GGML_IQ2_S: case GGML_IQ3_XXS: case GGML_IQ3_S: case GGML_IQ1_S: case GGML_IQ1_M: case GGML_IQ4_XS: case GGML_Q8_0: case GGML_Q4_0:
     case GGML_IQ4_NL: case GGML_Q2_0: return true;
     default: return false;
   }

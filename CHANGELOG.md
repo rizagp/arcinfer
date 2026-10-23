@@ -2,6 +2,13 @@
 
 ## 2026-10-23: Xe2 / Xe3 GPUs (no 8-lane sub-groups); Unsloth Studio statistics and context
 
+- **IQ1_S weights** (CPU and GPU decoders; IQ1_M's codebook with one scale per 32 values): agentionai's
+  Qwen3.8-27B-AP quants (two IQ1_S `ffn_up` matrices in the IQ3_S file) load. Against ISTA's IQ3_S on this laptop:
+  AP-IQ3_S same prompt speed (116 tok/s), generation 4.9 -> 5.05 tok/s, with MTP 11.6-11.9 -> 12.4-12.6 (drafts
+  accepted 76 -> 81 %); AP-IQ4_XS generation 4.44, with MTP 12.25 (83.5 % accepted), 18.3 GiB GPU with MTP + DFlash2;
+  auto context 40,960 for all three. KL of AP-IQ3_S against its own f32 reference 0.00071 (64 tokens, top token 64 / 64).
+- **Qwen 27B MTP / DFlash2 output equals plain decoding again** (verification rows' attention one by one, as single
+  tokens: they had been summed differently once the context needed more than one key split); MTP -3 %.
 - **Gemma 4 E4B prompts +12-33 %**: its global layers' prompt attention reads an int8 copy of K / V again
   (`attn_ps`), the sliding layers and generation stay float: 13,921 tokens 30.2 -> 22.6 s, 4K 648 -> 724 tok/s;
   KL 0.00075 -> 0.00088 (the limit is 0.015); +0.34 GiB GPU. `ARC_G4_ATT8=0` turns it off.
