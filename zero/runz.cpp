@@ -79,7 +79,7 @@ static int run_main(int argc, char** argv) {
             "  --n N                 tokens to generate (default 16)     --show   print the generated text\n"
             "  --dump-logits F       write the prompt logits and every generation step's (f32) to F, to compare runs bitwise\n"
             "  --mtp                 speculative decoding (MTP block / Gemma drafter)  --mtp-drafts N  drafts per step\n"
-            "  --dflash DIR          speculative decoding with a DFlash2 block drafter (Qwen3.8 27B, Qwen3.6 35B-A3B)\n"
+            "  --dflash DIR          speculative decoding with a DFlash2 block drafter (Qwen3.8 27B, Qwen3.6 35B-A3B, Flash Next)\n"
             "  --draft auto|mtp|dflash  with --dflash: both drafters picked per step (auto), the MTP block only, or\n"
             "                        DFlash2 only (the MTP block is not loaded)\n"
             "  --mtp-min-p P         draft a second token only above this MTP probability (default 0.5)\n"

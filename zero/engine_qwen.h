@@ -75,6 +75,7 @@
     const int QR = L.qr, D = hp.qsa_dim, H = hp.qsa_heads, ldx = (1 + H) * D, ntop = hp.qsa_topk / QR;
     const std::string defs = "-DQR=" + std::to_string(QR) + " -DQH=" + std::to_string(H);
     matmul("qsa_ix", L.ix, Mp, qsa_ixo_, ldx, 0, 0, a_in);
+    if (spec_) CL_CHECK(clEnqueueCopyBuffer(cl_.queue, qsa_ixo_, L.ixsv, 0, 0, (size_t)T * ldx * 4, 0, nullptr, nullptr));
     float eps = hp.eps, ts = std::pow(hp.rope_base, -2.0f / hp.n_rot);
     int p0 = pos, ld = ldx, nr = hp.n_rot;
     const int b0 = pos / QR, b1 = (pos + T) / QR;

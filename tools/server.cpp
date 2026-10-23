@@ -2847,7 +2847,7 @@ int main(int argc, char** argv) {
             "  --dflash DIR          speculative decoding with a DFlash2 block drafter (z-lab Qwen3.8 27B, incoai\n"
             "                        Qwen3.6 35B-A3B; 7 drafts per step); default with --mtp: a *DFlash2* drafter\n"
             "                        for the model in the Hugging Face cache or the extra model folders, if any\n"
-            "                        (Qwen3.8 Flash Next: not supported yet, it decodes without one)\n"
+            "                        (incoai Qwen3.8 Flash Next: with --dflash DIR only; no faster on an SSD-bound laptop)\n"
             "  --no-dflash           no DFlash2 drafter (--mtp: the model's MTP block only)\n"
             "  --draft auto|mtp|dflash  with --mtp and a DFlash2 drafter: both, picked per step (auto, default), the MTP\n"
             "                        block only (= --no-dflash), or DFlash2 only (the MTP block is not loaded: more\n"

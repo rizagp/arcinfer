@@ -276,7 +276,8 @@
     const int v = (pos - dfl_cap_base_) / max_chunk, li = (int)(it - dfl_tl_.begin());
     if (v >= (int)dfl_acc_.size()) return;
     const int a32 = act32_for(false);
-    quant_rows(x_, hp.n_embd, Mp, T, a32);
+    if (hp.hc) hc_mean(T);
+    quant_rows(hp.hc ? hco_ : x_, hp.n_embd, Mp, T, a32);
     matmul("dfl_fc", dfl_fc_[li], Mp, dfl_acc_[v], hp.n_embd, 0, li > 0 ? 1 : 0, a32);
   }
   // the context K / V of rows r0 .. r0 + n of accumulator v (positions p0 ..) into every drafter layer's ring
@@ -651,6 +652,7 @@
     toks.insert(toks.end(), drafts.begin(), drafts.end());
     last_drafts_ = drafts;
     vrows_ = false;
+    if (hp.hc && hp.ple_layer >= 0) hc_spec_save(tok);  // (before embed: it advances the token ids)
     embed(toks.data(), T, 16);
     if (dfl_) dfl_window(pos, T);
     spec_ = !gemma_mtp_;
@@ -689,6 +691,7 @@
         }
         std::swap(L.S, L.S_next);
       }
+    if (hp.hc && hp.ple_layer >= 0 && accepted < nd) hc_rollback(accepted + 1);
     if (accepted < nd) pos -= nd - accepted;
     CL_CHECK(clEnqueueCopyBuffer(cl_.queue, hver_, hlast_, accepted * E4, 0, E4, 0, nullptr, nullptr));
     if (gemma_mtp_) {  // the drafter keeps no state of its own

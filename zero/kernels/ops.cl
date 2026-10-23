@@ -2749,6 +2749,14 @@ __kernel void hc_combine(__global float* res, __global const float* out, __globa
   res[(size_t)m * HC * E + j] += w * out[(size_t)m * E + i];
 }
 
+// the mean of the HC streams per row (Flash Next's DFlash2 features). grid (E, M_valid).
+__kernel void hc_mean(__global const float* res, int E, int HC, __global float* out) {
+  const int i = get_global_id(0), m = get_global_id(1);
+  float s = 0.0f;
+  for (int c = 0; c < HC; ++c) s += res[((size_t)m * HC + c) * E + i];
+  out[(size_t)m * E + i] = s / (float)HC;
+}
+
 // ---- Flash Next PLE (n-gram embedding block of one layer; docs/flash-next-spec.md, llama.cpp qwen4exp)
 // Per row m < M_valid and stream c: s = <rmsnorm(key_c) * wk_c, rmsnorm(res_c) * wq_c> / sqrt(E), gate =
 // sigmoid(sign(s) * sqrt(max(|s|, 1e-6))), gated_c = value * gate, nrm_c = rmsnorm(gated_c) * wc_c.

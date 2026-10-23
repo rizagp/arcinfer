@@ -7,7 +7,8 @@ code, so the implementation can be checked against them.
 Status 2026-10-23: implemented in arcinferzero (README "Supported models"). KL against the f32 reference 0.048 on 363
 tokens (above the 0.015 limit: QUEUE.md F21.13, where the error comes from); prompts 160-190 tok/s at 4K (F21.15);
 generation 6-7 tok/s. incoai's DFlash2 drafter (trained on layers 5 / 15 / 25 / 35 / 45 averaged over the 4 HC
-streams) is downloaded but not supported yet (F21.16).
+streams) works with `--dflash DIR` (F21.16): the greedy text equals plain decoding, ~79 % of the drafts are accepted,
+but generation is no faster here (SSD-bound: a verification pass reads the experts of all its rows).
 
 ## Hyperparameters (GGUF metadata)
 

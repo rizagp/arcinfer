@@ -1139,6 +1139,7 @@ class Engine {
     int qr = 0, qsa_i = -1;
     GpuWeight ix;
     cl_mem ix_kn = nullptr, ix_qn = nullptr, pk = nullptr, qtail = nullptr;
+    cl_mem ixsv = nullptr;  // (a verification pass: its indexer rows, for verify_done)
   };
 
   struct Snap {
@@ -1437,6 +1438,10 @@ class Engine {
   // QSA: indexer rows of the pass, normed / rotated queries, block scores of up to 256 rows, the selection masks
   cl_mem qsa_ixo_ = nullptr, qsa_qx_ = nullptr, qsa_sc_ = nullptr, qsa_mask_ = nullptr;
   int qsa_n_ = 0;
+  // (a verification pass on Flash Next: the PLE / QSA state before it, the pass's PLE conv rows and the token ids
+  //  before it, so that verify_done() rebuilds the state after the accepted tokens)
+  cl_mem hc_bak_ = nullptr, ple_sv_ = nullptr;
+  int spec_prev_[2] = {-1, -1}, spec_tok_ = -1;
   const GgufTensor* tok_embd_ = nullptr;
   // activations
   cl_mem x_ = nullptr, aq_ = nullptr, asc_ = nullptr, absum_ = nullptr, big_ = nullptr, z_ = nullptr,
@@ -2160,13 +2165,8 @@ class Engine {
       shnorm_ = load_f32(mp + "nextn.shared_head_norm.weight");
       clFinish(cl_.queue);
     }
-    // DFlash2 (with or without the MTP block: with both, mtp_draft picks one per step)
-    // (Flash Next: its verification pass and the rollback of its QSA / PLE state are not built yet; incoai's drafter
-    //  for it is found by the catalog, so it is refused here rather than drafting wrongly)
-    if (!opt.dflash.empty() && hp.hc) {
-      fprintf(stderr, "arcinferzero: DFlash2 drafting is not supported for this model yet: plain decoding\n");
-      opt.dflash.clear();
-    }
+    // DFlash2 (with or without the MTP block: with both, mtp_draft picks one per step; Flash Next: the features are the
+    // means of the residual streams, the PLE / QSA state rolled back in verify_done)
     if (!opt.dflash.empty()) load_dflash(opt.dflash);
   }
 
@@ -2513,6 +2513,7 @@ class Engine {
       L.ix_qn = load_f32(p + "indexer.q_norm.weight");
       if (L.ix.N != (1 + hp.qsa_heads) * hp.qsa_dim) throw std::runtime_error("unexpected QSA indexer shape");
       L.pk = buf((size_t)qsa_blocks(ctx) * hp.qsa_dim * 4 + 64);
+      L.ixsv = buf((size_t)(1 + kMaxDrafts) * L.ix.N * 4);
       L.qsa_i = qsa_n_++;
       if (!opt.dry) {  // its tail raw keys inside the PLE layer's recurrent state (see conv_bytes)
         cl_buffer_region r{qsa_tail_off(L.qsa_i), (size_t)(L.qr - 1) * hp.qsa_dim * 4};
@@ -2765,6 +2766,8 @@ class Engine {
       }
       if (hp.ple_layer >= 0) {
         ple_emb_ = buf(M * hp.n_embd * 4);
+        hc_bak_ = buf(conv_bytes() - ple_hist_off());
+        ple_sv_ = buf((size_t)(1 + kMaxDrafts) * hp.hce() * 4);
         ple_host_.resize(M * hp.n_embd);
         if (!opt.dry) {  // the PLE conv history inside the PLE layer's recurrent state (see conv_bytes)
           cl_buffer_region r{ple_hist_off(), (size_t)ple_hist() * hp.hce() * 4};
@@ -3312,6 +3315,7 @@ class Engine {
       layer_moe(L, T, Mp);
       hc_combine(L.hc_down[1].N, T);
       if (dbg_rows) dbg_row(T - 1);
+      if (dfl_) dfl_capture(L, T, Mp);
       return;
     }
     if (hp.recurrent(L.il)) layer_gdn(L, T, Mp);

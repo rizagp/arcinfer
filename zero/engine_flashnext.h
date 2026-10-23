@@ -174,4 +174,50 @@
       size_t g1 = W;
       run("ple", k, 1, &g1, nullptr);
     }
+    if (spec_) CL_CHECK(clEnqueueCopyBuffer(cl_.queue, big_, ple_sv_, 0, 0, (size_t)T * W * 4, 0, nullptr, nullptr));
+  }
+  // before a verification pass: the PLE / QSA state and the token ids before it (see hc_rollback)
+  void hc_spec_save(int tok) {
+    spec_prev_[0] = ple_prev_[0];
+    spec_prev_[1] = ple_prev_[1];
+    spec_tok_ = tok;
+    CL_CHECK(clEnqueueCopyBuffer(cl_.queue, layers_[hp.ple_layer].conv_state, hc_bak_, ple_hist_off(), 0,
+                                 conv_bytes() - ple_hist_off(), 0, nullptr, nullptr));
+  }
+  // after a verification pass with rejected drafts (pos still after the whole pass): the PLE history, the token ids and
+  // every QSA layer's tail as after the pass's first `rows` tokens (the state before the pass, then the same kernels
+  // over those rows of the pass)
+  void hc_rollback(int rows) {
+    const int p0 = pos - 1 - (int)last_drafts_.size();
+    CL_CHECK(clEnqueueCopyBuffer(cl_.queue, hc_bak_, layers_[hp.ple_layer].conv_state, 0, ple_hist_off(),
+                                 conv_bytes() - ple_hist_off(), 0, nullptr, nullptr));
+    {
+      cl_kernel k = kernel("ops", "", "ple_hist_update");
+      int w = hp.hce(), tt = rows, hist = ple_hist();
+      set_args(k, 0, ple_hist_, ple_sv_, w, tt, hist);
+      size_t g1 = w;
+      run("ple", k, 1, &g1, nullptr);
+    }
+    for (auto& L : layers_) {
+      if (!L.qtail) continue;
+      cl_kernel k = kernel("ops", "-DQR=" + std::to_string(L.qr) + " -DQH=" + std::to_string(hp.qsa_heads), "qsa_tail");
+      int ld = L.ix.N, pp = p0, tt = rows;
+      set_args(k, 0, L.ixsv, ld, pp, tt, L.qtail);
+      size_t g1 = hp.qsa_dim, l1 = g1;
+      run("qsa", k, 1, &g1, &l1);
+    }
+    auto tk = [&](int i) { return i == 0 ? spec_tok_ : last_drafts_[i - 1]; };
+    ple_prev_[0] = tk(rows - 1);
+    ple_prev_[1] = rows >= 2 ? tk(rows - 2) : spec_prev_[0];
+    const int32_t v[2] = {ple_prev_[0] + 1, ple_prev_[1] + 1};
+    CL_CHECK(clEnqueueWriteBuffer(cl_.queue, layers_[hp.ple_layer].conv_state, CL_TRUE, ple_tok_off(), 8, v, 0, nullptr,
+                                  nullptr));
+  }
+  // the mean of the residual streams of rows 0 .. T into hco_ (the DFlash2 features of Flash Next)
+  void hc_mean(int T) {
+    cl_kernel k = kernel("ops", "", "hc_mean");
+    int e = hp.n_embd, hc = hp.hc_n;
+    set_args(k, 0, x_, e, hc, hco_);
+    size_t gws[2] = {(size_t)hp.n_embd, (size_t)T};
+    run("hc_mean", k, 2, gws, nullptr);
   }

@@ -2,6 +2,14 @@
 
 ## 2026-10-23: Xe2 / Xe3 GPUs (no 8-lane sub-groups); Unsloth Studio statistics and context
 
+- **Qwen3.8 Flash Next with the DFlash2 drafter** (`--dflash DIR`, incoai/Qwen3.8-Flash-Next-DFlash2): the drafter's
+  features are the means of the 4 residual streams, a verification pass of up to 8 rows computes every row as a single
+  token is (the HC mixers' single-token kernels for several rows), and rejected drafts roll back the PLE history and
+  token ids and the QSA tails. Greedy logits bit-identical to plain decoding (1,097-token prompt, 128 tokens;
+  3,291-token prompt with QSA, 96 tokens); 79 % of the drafts accepted, 3.66 tokens per pass, but 5.8-6.6 tok/s
+  against 6.4-6.8 plain: decoding here waits on the SSD, and a pass reads the experts of all its rows. Not picked
+  automatically.
+
 - **GPUs without 8-lane sub-groups** (Xe2 / Xe3: Lunar Lake, Battlemage, Panther Lake's Arc B390; GitHub issue #1):
   the engine reads the sub-group sizes the GPU supports and builds the two 8-lane kernels (`gdn_recur`, Qwen
   DeltaNet layers; `vit_attn_rows`, Qwen image encoder) with 16 lanes there. Same arithmetic in the same order:
