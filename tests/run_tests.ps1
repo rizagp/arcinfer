@@ -9,7 +9,8 @@
 #   .\tests\run_tests.ps1 -NoAutoDetect -Model4B <4b.gguf> # only the models given on the command line
 #
 # Parameters:
-#   -Model4B / -Model27B / -Model35B / -ModelGemma / -ModelFlashNext   GGUF files (Flash Next: the -00001-of- shard)
+#   -Model4B / -Model27B / -Model35B / -ModelGemma / -ModelFlashNext / -ModelFlint   GGUF files (Flash Next: the
+#                              -00001-of- shard; Flint: its tokenizer against llama-tokenize under %USERPROFILE%lama-builds)
 #   -DFlash27B / -DFlash35B    DFlash2 drafter folders (containing model.safetensors), zero engine only
 #   -Ref35B <file>             opt-in 35B KL check. tests\data\ref_35b_capital_all.bin is the f32 reference of the
 #                              Qwen3.6-35B-A3B GSQ file (tools\convert_gsq.py), not of Unsloth's UD-IQ4_XS: only pass it
@@ -33,6 +34,7 @@ param(
   [string]$Model35B = "",
   [string]$ModelGemma = "",
   [string]$ModelFlashNext = "",
+  [string]$ModelFlint = "",
   [string]$DFlash27B = "",
   [string]$DFlash35B = "",
   [string]$Ref35B = "",
@@ -143,6 +145,7 @@ if (-not $NoAutoDetect -and (-not $SkipGpu -or $ListModels)) {
   if (-not $Model35B) { $Model35B = Find-Gguf @("Qwen3.6-35B-A3B-UD-IQ4_XS.gguf", "Qwen3.6-35B-A3B-UD-Q3_K_M.gguf") }
   if (-not $ModelFlashNext) { $ModelFlashNext = Find-Gguf @("Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf") }
   if (-not $ModelGemma) { $ModelGemma = Find-Gguf @("gemma-4-12b*qat*q4_0*.gguf", "gemma-4-12b*qat*.gguf") }
+  if (-not $ModelFlint) { $ModelFlint = Find-Gguf @("flint-*.gguf") }
   if (-not $DFlash27B) { $DFlash27B = Find-DFlash @("*Qwen3.8-27B-DFlash2*") }
   if (-not $DFlash35B) { $DFlash35B = Find-DFlash @("*Qwen3.6-35B-A3B-DFlash2*") }
 }
@@ -226,6 +229,20 @@ else {
     $o = Run-Exe .\bin\tok_test.exe @($Model4B, $p.FullName, $idf)
     Check "tokenizer $($p.Name)" ($o -match "IDENTICAL" -and $o -match "round-trip OK")
   }
+}
+# Flint's pre-tokenizer (tokenizer.ggml.pre = flint) against llama.cpp's llama-tokenize on README.md, when both exist
+$lt = Get-ChildItem (Join-Path $env:USERPROFILE "llama-builds") -Recurse -Filter "llama-tokenize.exe" -ErrorAction SilentlyContinue |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not (Have $ModelFlint)) { Skip "tokenizer Flint" (Why $ModelFlint "Flint model (-ModelFlint)") }
+elseif (-not $lt) { Skip "tokenizer Flint" "no llama-tokenize.exe under %USERPROFILE%\llama-builds" }
+else {
+  $idf = Join-Path $env:TEMP ("arcinfer_flint_{0}.ids" -f $PID)
+  try {
+    $ref = Run-Exe $lt.FullName @("-m", $ModelFlint, "-f", (Join-Path $root "README.md"), "--ids", "--no-bos", "--no-escape", "--log-disable")
+    [IO.File]::WriteAllText($idf, ($ref -replace "[\[\]\s]", ""))
+    $o = Run-Exe .\bin\tok_test.exe @($ModelFlint, (Join-Path $root "README.md"), $idf)
+    Check "tokenizer Flint (README.md vs llama-tokenize)" ($o -match "IDENTICAL" -and $o -match "round-trip OK") ([regex]::Match($o, "ours \d+ tokens").Value)
+  } finally { Remove-Item -LiteralPath $idf -Force -ErrorAction SilentlyContinue }
 }
 
 # the 20-token Qwen chat prompt shared by the Qwen checks
@@ -328,6 +345,32 @@ foreach ($eng in $engines) {
     Check "$n DFlash2 greedy identical" ($g2 -eq $g0) $(if ($g2 -eq $g0) { [regex]::Match($o, "MTP: [^\r\n]*").Value } else { $g2 })
     $o = Run-Exe $run @($q.model, "--tokens", $ids, "--n", "9", "--dflash", $q.dflash, "--slots-check")
     Check "$n slots (DFlash2): bit-identical, misuse refused, memory counted" ($o -match "slots check: passed" -and $o -match "slot bytes: \d+ real, \d+ counted: OK") ([regex]::Match($o, "slot bytes: [^,]*, [^:]*: \w+").Value)
+  }
+
+  # 4f. 27B after a long prompt (~1,700 tokens: the decode attention splits the keys): the logits of the MTP and
+  # DFlash2 verification rows must equal plain decoding bit for bit (2026-10-24: they had drifted, 1.39 apart)
+  if (-not (Have $Model27B)) { Skip "$tag 27B long prompt: MTP logits = plain" (Why $Model27B "27B model") }
+  else {
+    $lt = Join-Path $env:TEMP ("arcinfer_long_{0}.txt" -f $PID)
+    $b = [IO.File]::ReadAllBytes((Join-Path $root "README.md"))
+    [IO.File]::WriteAllBytes($lt, $b[0..4499])
+    $dumps = @()
+    try {
+      $runs = @(@{ name = "plain"; args = @("--n", "12") }, @{ name = "MTP"; args = @("--n", "13", "--mtp") })
+      if (Have $DFlash27B) { $runs += @{ name = "DFlash2"; args = @("--n", "13", "--dflash", $DFlash27B, "--draft", "dflash") } }
+      foreach ($r in $runs) {
+        $d = Join-Path $env:TEMP ("arcinfer_long_{0}_{1}.bin" -f $PID, $r.name)
+        $dumps += $d
+        $null = Run-Exe $run (@($Model27B, "--text-file", $lt) + $r.args + @("--dump-logits", $d))
+      }
+      $h0 = (Get-FileHash $dumps[0]).Hash
+      for ($i = 1; $i -lt $dumps.Count; ++$i) {
+        $same = (Test-Path $dumps[$i]) -and (Get-FileHash $dumps[$i]).Hash -eq $h0
+        Check "$tag 27B long prompt: $($runs[$i].name) logits = plain (bitwise)" $same
+      }
+    } finally {
+      Remove-Item -LiteralPath (@($lt) + $dumps) -Force -ErrorAction SilentlyContinue
+    }
   }
 }
 
