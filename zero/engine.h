@@ -141,6 +141,10 @@ class Engine {
     max_chunk = (std::max(max_chunk, o.min_chunk) + 127) / 128 * 128;
     q2_init();
     if (!opt.dry) build_kernels();
+    if (!opt.dry && (cl_.xmx || getenv("ARC_XMX_TRY"))) {  // (ARC_XMX_TRY=1: the check on any GPU, tests)
+      xmx_ = xmx_check();
+      if (xmx_) fprintf(stderr, "arcinferzero: XMX on for the prompt GEMMs (results checked against DP4a)\n");
+    }
     load_weights();
     {
       const size_t g0 = gpu_bytes;
@@ -1747,10 +1751,69 @@ class Engine {
     static const int tm = getenv("ARC_GEMM_TM") ? std::max(1, atoi(getenv("ARC_GEMM_TM"))) : 16;
     return tm;
   }
-  cl_kernel gemm_kernel(int qtype, bool act32) {
+  cl_kernel gemm_kernel(int qtype, bool act32, int xmx = -1) {
     return kernel("gemm", "-cl-intel-256-GRF-per-thread -DQTYPE=" + std::to_string(qtype) + (act32 ? " -DACT32" : "") +
-                              (gemm_tm() != 16 ? " -DTM=" + std::to_string(gemm_tm()) : std::string()) + gemm_extra(),
+                              (gemm_tm() != 16 ? " -DTM=" + std::to_string(gemm_tm()) : std::string()) + gemm_extra() +
+                              ((xmx < 0 ? xmx_ : xmx != 0) ? " -DXMX -DTP=8" : ""),
                   "gemm");
+  }
+  // XMX for the prompt GEMMs (gemm.cl -DXMX): taken only when the GPU offers 16-lane DPAS (ClRt::xmx) and the XMX
+  // kernel gives the DP4a kernel's results bit for bit on random data of every weight layout (with and without
+  // per-32 activation scales); a GPU or driver that differs keeps DP4a. Written without an XMX GPU at hand (this
+  // laptop's Xe-LPG has none): the check is what guards it on the GPUs that have one.
+  bool xmx_ = false;
+  bool xmx_check() {
+    if (gemm_tm() % 8) return false;
+    const int M = 32, N = 32, K = 512, nsb = K / 256, ng = N / 16;
+    uint32_t seed = 12345;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed; };
+    std::vector<uint32_t> wq((size_t)ng * nsb * 4 * 16 * 16), wh((size_t)ng * nsb * 10 * 16);
+    for (auto& v : wq) v = rnd();
+    for (auto& v : wh) {  // (floats in [0.001, 0.011): headers and scales of every layout read sensible values)
+      const float f = 0.001f + (float)(rnd() % 10000) * 1e-6f;
+      memcpy(&v, &f, 4);
+    }
+    std::vector<int8_t> aq((size_t)M * K);
+    for (auto& v : aq) v = (int8_t)(rnd() >> 24);
+    std::vector<float> asc((size_t)(K / 32) * M);
+    for (auto& v : asc) v = 0.01f + (float)(rnd() % 1000) * 1e-5f;
+    std::vector<uint16_t> ab((size_t)(K / 16) * M);
+    for (auto& v : ab) v = (uint16_t)(int16_t)((int)(rnd() % 4001) - 2000);
+    cl_mem bq = buf(wq.size() * 4, wq.data()), bh = buf(wh.size() * 4, wh.data()), ba = buf(aq.size(), aq.data()),
+           bs = buf(asc.size() * 4, asc.data()), bb = buf(ab.size() * 2, ab.data()), bc = buf((size_t)M * N * 4);
+    bool same = true;
+    std::string bad;
+    struct Soft { bool& f; ~Soft() { f = false; } } soft{cl_.soft_fail};
+    cl_.soft_fail = true;
+    try {
+      for (int q : {101, 100, 103, 102, 8, 12, 13, 14})
+        for (int a32 = 1; a32 >= 0; --a32) {
+          std::vector<float> out[2];
+          for (int x = 0; x < 2; ++x) {
+            cl_kernel k = gemm_kernel(q, a32 != 0, x);
+            int MM = M, NN = N, KK = K, ldc = N, coff = 0, acc = 0, rg = 4, s0 = 0, s1 = nsb;
+            set_args(k, 0, bq, bh, ba, bs, bb, bc, MM, NN, KK, ldc, coff, acc, rg, s0, s1);
+            size_t gws[2] = {(size_t)N * (M / gemm_tm() / 2), 2}, lws[2] = {16, 2};
+            run("xmx_check", k, 2, gws, lws);
+            out[x].resize((size_t)M * N);
+            CL_CHECK(clEnqueueReadBuffer(cl_.queue, bc, CL_TRUE, 0, out[x].size() * 4, out[x].data(), 0, nullptr, nullptr));
+          }
+          bool sane = false;  // (the reference itself: finite and not all zero, or the comparison proves nothing)
+          for (float v : out[0]) {
+            if (!std::isfinite(v)) { sane = false; break; }
+            sane = sane || v != 0.0f;
+          }
+          if (!sane || memcmp(out[0].data(), out[1].data(), out[0].size() * 4)) {
+            same = false;
+            bad += " " + std::to_string(q) + (a32 ? "/act32" : "");
+          }
+        }
+    } catch (const std::exception& e) {
+      fprintf(stderr, "arcinferzero: XMX kernels do not build here (%s): DP4a\n", e.what());
+      return false;
+    }
+    if (!same) fprintf(stderr, "arcinferzero: XMX results differ from DP4a (layouts%s): DP4a (please report)\n", bad.c_str());
+    return same;
   }
 
   void build_kernels() {

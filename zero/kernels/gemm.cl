@@ -1,5 +1,9 @@
 // C[M][ldc] (+)= A[M][K] * W[N][K]^T (written at column offset c_off): quantized weights x int8 activations,
 // DP4a on Intel Xe-LPG. Compiled once per weight layout with -DQTYPE=<id> (and optionally -DACT32).
+// -DXMX (GPUs with XMX matrix engines and 16-lane DPAS: Xe2 / Xe3, chosen at start by the engine and checked against
+// the DP4a kernel on random data): the int8 dot products of 8 tokens x 16 columns x 32 values per instruction
+// (cl_intel_subgroup_matrix_multiply_accumulate). Integer sums are exact either way, and the scales are applied by
+// the same code in the same order, so the results are the DP4a kernel's bit for bit.
 //
 // Weight layouts (see src/quants.h and kernels/decode.cl), per 16-column group g and 256-superblock s:
 //   native Q4_K(12) / Q5_K(13) / Q6_K(14) / Q8_0(8): repacked GGUF blocks
@@ -76,6 +80,20 @@
 #define DOT(a, w) dot_4x8packed_su_int((a), (w))
 #else
 #define DOT(a, w) dot_4x8packed_ss_int((a), (w))
+#endif
+
+#ifdef XMX
+#if TP != 8
+#error "XMX: 8 tokens per step (the DPAS tile's rows)"
+#endif
+// A: 8 token rows x 32 int8 (lane l holds values 2l, 2l + 1 of each row); B: 32 x 16 (lane n = column n = weight row
+// n, its 32 values as 8 words of 4); C: int32, component r = token r, lane = column
+#if QTYPE == Q4_K || QTYPE == Q5_K
+#define XMAD(a, b) intel_sub_group_i8_u8_matrix_mad_k32((a), (b), (int8)(0))
+#else
+#define XMAD(a, b) intel_sub_group_i8_i8_matrix_mad_k32((a), as_int8(b), (int8)(0))
+#endif
+#define XUNPACK(v, c) { c[0] = v.s0; c[1] = v.s1; c[2] = v.s2; c[3] = v.s3; c[4] = v.s4; c[5] = v.s5; c[6] = v.s6; c[7] = v.s7; }
 #endif
 
 // W8: int32 sum x weight scale (int8), activation sum (|b| <= 2048) x min (0..255) as 32x16 and 16x16-bit
@@ -270,6 +288,44 @@ __kernel void gemm(__global const uint* restrict wq, __global const uint* restri
       // this source order, and one token at a time leaves 2 chains and 1-3 loads in flight (3x slower).
 #pragma unroll
       for (int mg = 0; mg < TM; mg += TP) {
+#ifdef XMX
+#if SC32
+      int c0[TP], c1[TP];
+#else
+      int c0[TP], c1[TP], c2[TP], c3[TP];
+#endif
+      {
+        short ta[8], tb[8];  // this chunk's values 0..31 and 32..63 of the 8 tokens' rows
+#pragma unroll
+        for (int p = 0; p < 8; ++p) {
+#if defined(MOE_TILES)
+          __global const char* rp = aq + (size_t)BCAST(tokl, mg + p) * K + s * 256 + j * 64;
+#else
+          __global const char* rp = ap + (size_t)(mg + p) * K + s * 256 + j * 64;
+#endif
+          ta[p] = as_short(intel_sub_group_block_read_us((__global const ushort*)rp));
+          tb[p] = as_short(intel_sub_group_block_read_us((__global const ushort*)(rp + 32)));
+        }
+        const short8 al = (short8)(ta[0], ta[1], ta[2], ta[3], ta[4], ta[5], ta[6], ta[7]);
+        const short8 ah = (short8)(tb[0], tb[1], tb[2], tb[3], tb[4], tb[5], tb[6], tb[7]);
+#if SC32
+        const int8 r0 = XMAD(al, ((uint8)(lo[0], lo[1], lo[2], lo[3], lo[4], lo[5], lo[6], lo[7])));
+        const int8 r1 = XMAD(ah, ((uint8)(hi[0], hi[1], hi[2], hi[3], hi[4], hi[5], hi[6], hi[7])));
+        XUNPACK(r0, c0)
+        XUNPACK(r1, c1)
+#else
+        // (per-16 scales: each half of a 32-block alone, the other half's weights zero)
+        const int8 r0 = XMAD(al, ((uint8)(lo[0], lo[1], lo[2], lo[3], 0u, 0u, 0u, 0u)));
+        const int8 r1 = XMAD(al, ((uint8)(0u, 0u, 0u, 0u, lo[4], lo[5], lo[6], lo[7])));
+        const int8 r2 = XMAD(ah, ((uint8)(hi[0], hi[1], hi[2], hi[3], 0u, 0u, 0u, 0u)));
+        const int8 r3 = XMAD(ah, ((uint8)(0u, 0u, 0u, 0u, hi[4], hi[5], hi[6], hi[7])));
+        XUNPACK(r0, c0)
+        XUNPACK(r1, c1)
+        XUNPACK(r2, c2)
+        XUNPACK(r3, c3)
+#endif
+      }
+#else
       uint aw[TP];
 #pragma unroll
       for (int p = 0; p < TP; ++p) {
@@ -307,6 +363,7 @@ __kernel void gemm(__global const uint* restrict wq, __global const uint* restri
           c3[p] += DOT(BCAST(aw[p], w + 12), hi[w + 4]);
         }
 #endif
+#endif  // XMX
 #pragma unroll
       for (int p = 0; p < TP; ++p) {
         const int m = mg + p;

@@ -7,6 +7,10 @@
   DeltaNet layers; `vit_attn_rows`, Qwen image encoder) with 16 lanes there. Same arithmetic in the same order:
   forced on this Xe-LPG laptop (`ARC_NO_SG8=1`) the 35B's logits are bit-identical and Qwen3.5 4B / 9B describe
   images as before (the 16-lane DeltaNet kernel spills here, Xe-LPG's registers are half as wide; not on Xe2 / Xe3).
+- **XMX for prompt GEMMs** (Xe2 / Xe3 GPUs with XMX, e.g. Arc B390; not this laptop's Xe-LPG): the prompt GEMMs'
+  int8 dot products on DPAS, picked automatically and only after a start-up check that the XMX kernels give the DP4a
+  kernels' results bit for bit (else DP4a stays). `ARC_NO_XMX=1` turns it off. Untested on XMX hardware so far
+  (compiled for Lunar Lake / Battlemage / Panther Lake with ocloc); waiting for a report from issue #1.
 - **Unsloth Studio** (arcinfer as a llama.cpp endpoint): the last streamed chunk carries `usage` and `timings`
   together, as llama-server's does (Studio keeps the timings only from a chunk with usage, so it showed no token
   statistics), and `/v1/models` gives the served window as llama-server's `meta.n_ctx` (plus `max_model_len`), which

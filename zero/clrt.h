@@ -470,6 +470,8 @@ inline cl_int clReleaseContext(cl_context) { return CL_SUCCESS; }
 struct ClRt {
   std::string device_id, cache_dir;
   bool sg8 = true;  // (sub-groups of 8 lanes: Xe-LPG yes; Xe2 / Xe3 (Lunar Lake, Battlemage, Panther Lake) only 16 / 32)
+  bool soft_fail = false;  // (build: a failed compile throws instead of ending the process; the XMX check)
+  bool xmx = false;  // (XMX matrix engines with 16-lane DPAS: Xe2 / Xe3; the engine still checks them, Engine::xmx_check)
   static uint64_t fnv1a(const std::string& s) {
     uint64_t h = 1469598103934665603ull;
     for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
@@ -495,6 +497,13 @@ struct ClRt {
       }
       if (getenv("ARC_NO_SG8") && atoi(getenv("ARC_NO_SG8")) != 0) sg8 = false;
       if (!sg8) fprintf(stderr, "arcinferzero: no 8-lane sub-groups on this GPU: 16-lane kernels\n");
+    }
+    {  // CL_DEVICE_EXTENSIONS: DPAS from OpenCL C (16 lanes: the GPUs without 8-lane sub-groups); ARC_NO_XMX=1: off
+      std::string ext(16384, '\0');
+      size_t ret = 0;
+      if (zrt::rcl::getDeviceInfo(zrt::rcl::device, 0x1030, ext.size() - 1, ext.data(), &ret) == 0)
+        xmx = !sg8 && ext.find("cl_intel_subgroup_matrix_multiply_accumulate") != std::string::npos;
+      if (getenv("ARC_NO_XMX") && atoi(getenv("ARC_NO_XMX")) != 0) xmx = false;
     }
     if (const char* la = getenv("LOCALAPPDATA"); la && !getenv("ARC_NO_KCACHE")) cache_dir = std::string(la) + "\\arcinfer\\kernels";
     // a second engine in the process (the server switching models, after the first one freed its memory) keeps the
@@ -542,6 +551,8 @@ struct ClRt {
         zrt::rcl::getProgramBuildInfo(prog, zrt::rcl::device, 0x1183, 0, nullptr, &ln);
         std::string log(ln, 0);
         zrt::rcl::getProgramBuildInfo(prog, zrt::rcl::device, 0x1183, ln, log.data(), nullptr);
+        zrt::rcl::releaseProgram(prog);
+        if (soft_fail) throw std::runtime_error("kernel build failed: " + log.substr(0, 200));
         fprintf(stderr, "build log:\n%s\n", log.c_str());
         CL_CHECK(err);
       }
