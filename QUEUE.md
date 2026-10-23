@@ -24,7 +24,7 @@ Everything below this list is history plus the details of these items; a row not
 | 15 | Larger expert staging for long prompts only | closed 2026-10-24: measured again, Flash Next 4K prompt ARC_XSTAGE 64: 24.2 / 21.7 s, 256: 22.7 / 22.6 s (no gain beyond run-to-run spread since the deep prefetch), generation 6.5 -> 6.2 tok/s: nothing to make prompt-only | F19.2 |
 | 16 | Qwen3.8 27B: verification rows (MTP / DFlash2) not bit-identical to plain decoding after a long prompt | done 2026-10-24: attn_decode_rows grouped up to 4 verification rows into attn_split, whose key split length follows the rows' sub-groups, so with more than one split (1,097-token prompt) the rows were summed differently from a single token (attn_decode); every Qwen model's verification rows now go through attn_decode one by one, as the 35B's already did. 27B 64 tokens: MTP and DFlash2 logits bit-identical to plain (were 1.39 apart from row 1); MTP 11.6-11.9 -> 11.4 tok/s | |
 | later | Remote access through Cloudflare (Origin https, login) | F27 |
-| low | Jump-forward in tool calls | F25.2 |
+| dropped | Jump-forward in tool calls (not bit-identical, see F25.2) | F25.2 |
 | parked | Fused FFN gate + up and small DeltaNet kernels (F17.2); review leftovers (F18.14); 35B expert decode once per layer (F19.6); larger staging (F19.2) | |
 
 Done 2026-10-23 evening: item 13, E4B global-layer prompt attention on int8 again (14K 30.2 -> 22.6 s, KL 0.00088;
@@ -415,7 +415,7 @@ asks something else. That test showed sampled tool calls were slow (2.45 tok/s).
 | # | Item | Status | Notes |
 |---|---|---|---|
 | 25.1 | Sampled tool calls: skip the negligible vocabulary tail in constrained sampling | ✅ 3ba7880 | 35B short call 4.8 -> 20.4 tok/s, long `write` call 24.3 (greedy 24.4); same tokens in the seeded tests |
-| 25.2 | Jump-forward in tool calls | 💡 low priority | when the constraint allows only one continuation (the tool name, `":"`, closing tokens), append it without a decode step per token; output unchanged; estimate 10-20 % on tool calls, ~half a day; MTP already drafts most of these (78/92 accepted) |
+| 25.2 | Jump-forward in tool calls | ⚠️ dropped 2026-10-24 (the user: not without bit-identical output) | the constraints check strings, so every prefix of a forced text is an allowed token (r, re, read, read_file) and the Qwen format allows optional whitespace between parts: a state with one allowed token almost never occurs. Only string-level jump-forward (as SGLang, with retokenization) would skip anything, about 10-15 tokens per call (function=, a lone tool name or required key, the rest of a closing tag), mostly drafted by MTP already (78 / 92); it may change the token sequence and so what follows: not identical |
 | 25.3 | First prompt of a new session | ✅ 2026-10-23 | not expert misses: the first prompt of a process paid the first use of the large-chunk kernels (moe_rg and others from 320 rows; the warm-up ran 1 token, 32 after an update). 35B with its drafters, a 1,749-token request right after the start 8.6 s (203 tok/s), the next ones 3.5 s. The server's start now also runs a 512-token warm-up prompt: first request 4.0-4.4 s (439-444 tok/s), ready after 13 s; a model switched in for a request skips it (that request warms it) |
 
 ## F26: slim the code (requested 2026-10-22, after F21.11)
