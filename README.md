@@ -47,7 +47,8 @@ one command. Built and tuned on a Core Ultra 5 125H with 32 GB of RAM: no discre
 | Qwen3.8 27B, generation after that prompt | **3.7 tok/s** | 2.1 | 1.1 |
 | Perplexity, Qwen3.5 4B / 9B / 27B (lower is better) | **6.056 / 5.417 / 4.274** | 6.141 / 5.499 / 4.311 | 6.138 / 5.497 / 4.310 |
 
-Gemma rows measured on 2026-10-23 with the laptop on a cooling pad (two runs each within 1-2 %; a hot laptop
+Gemma 26B / 12B rows measured on 2026-10-23 with the laptop on a cooling pad, E4B without it (two runs each
+within 1-2 %; a hot laptop
 measured up to 25 % slower on long prompts).
 KL is the divergence of the next-token distributions from the f32 reference (0 = identical); run-to-run int8
 rounding noise is ~0.0003. The limit kept for every model and change is KL < 0.015; Flash Next, whose IQ3_S / IQ2_S weights
