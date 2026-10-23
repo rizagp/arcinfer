@@ -32,6 +32,8 @@ struct GpuWeight {
 struct Hparams {
   std::string arch = "qwen35";
   bool gemma = false;  // Gemma 4: sliding-window + global attention layers, GeGLU, sandwich norms
+  bool swa_rings = false;  // sliding-window layers in ring caches (Gemma 4; Flint later): no recurrent state, a cached
+                          // prefix is reused by rewind() while the rings still hold it, per-layer KV geometry (kv_layers)
   int n_layer = 0, n_embd = 0, n_ff = 0, n_head = 0, n_head_kv = 0, head_dim = 0, n_rot = 0, n_vocab = 0;
   int ssm_d_state = 0, ssm_nk = 0, ssm_nv = 0, ssm_d_inner = 0, conv_k = 0, full_attn_interval = 4;
   float eps = 1e-6f, rope_base = 1e7f;
@@ -431,10 +433,10 @@ class Engine {
     return true;
   }
 
-  // Moves back to position P to reuse a cached prefix (models without recurrent state, i.e. Gemma 4): possible
+  // Moves back to position P to reuse a cached prefix (models without recurrent state: swa_rings): possible
   // while the sliding-window rings still hold the n_swa positions before P. Qwen3.5 uses snapshot()/restore().
   bool rewind(int P) {
-    if (!hp.gemma || P < 0 || P > pos) return false;
+    if (!hp.swa_rings || P < 0 || P > pos) return false;
     if (written_hi_ - 1 - swa_cap_ >= P - hp.n_swa) return false;  // those slots were overwritten since
     if (swa_lo_ > 0 && P - hp.n_swa < swa_lo_) return false;  // a loaded conversation keeps K/V from there
     pos = P;
@@ -535,7 +537,7 @@ class Engine {
   size_t ctx_bytes(int c) const {
     c = (c + 15) / 16 * 16;
     size_t n = ctx_buf_bytes(c);
-    if (hp.gemma) {
+    if (hp.swa_rings) {
       const int swa_cap = std::min(c, (hp.n_swa + max_chunk + 4096 + 255) / 256 * 256);
       for (const Layer& L : layers_)
         if (L.kv_src < 0) {
@@ -564,9 +566,9 @@ class Engine {
     return v;
   }
 
-  // The first position rewind() accepts (Gemma): the sliding-window rings must still hold the n_swa positions before it.
+  // The first position rewind() accepts (swa_rings): the sliding-window rings must still hold the n_swa positions before it.
   int rewind_floor() const {
-    return hp.gemma ? std::max({0, written_hi_ - swa_cap_ + hp.n_swa, swa_lo_ > 0 ? swa_lo_ + hp.n_swa : 0}) : 0;
+    return hp.swa_rings ? std::max({0, written_hi_ - swa_cap_ + hp.n_swa, swa_lo_ > 0 ? swa_lo_ + hp.n_swa : 0}) : 0;
   }
 
   // A recurrent-state snapshot kept in host memory (no GPU memory): the server takes it where every conversation
@@ -988,9 +990,9 @@ class Engine {
   // before `keep_from`, the earliest position the conversation should be resumable at), the MTP block's cache and
   // hidden state, the DeltaNet states and all snapshots. Device data is copied in batches of up to 256 MB.
   // load_state() returns false (the engine left reset) for a stream from another model or an incompatible layout.
-  // Gemma: the first position a conversation saved with keep_from can be resumed at (see rewind()).
+  // swa_rings: the first position a conversation saved with keep_from can be resumed at (see rewind()).
   int saved_floor(int keep_from) const {
-    return hp.gemma ? std::max(rewind_floor(), swa_save_lo(keep_from) + hp.n_swa) : 0;
+    return hp.swa_rings ? std::max(rewind_floor(), swa_save_lo(keep_from) + hp.n_swa) : 0;
   }
   // save_state() writes through `out` (a file, or memory for a write in the background); saved_size() is its length.
   using Sink = std::function<bool(const void*, size_t)>;
@@ -1201,7 +1203,7 @@ class Engine {
         write_buf(L.conv_state, blk_[k++]);
       }
     prog_base_ = prog_total_ = 0;
-    if (hp.gemma && !rewind(p0)) reset();  // the rings no longer hold the n_swa positions before p0
+    if (hp.swa_rings && !rewind(p0)) reset();  // the rings no longer hold the n_swa positions before p0
     else pos = p0;
     throw Cancelled();
   }
@@ -1249,7 +1251,7 @@ class Engine {
   std::vector<KvGeom> kv_layers() {
     std::vector<KvGeom> v;
     for (auto& L : layers_) {
-      if (hp.gemma) {
+      if (hp.swa_rings) {
         if (L.kv_src < 0) v.push_back({&L, L.nkv, L.hd, L.cap, L.hd / 64});
       } else if (!hp.recurrent(L.il)) {
         v.push_back({&L, hp.n_head_kv, hp.head_dim, ctx, 1});
@@ -1258,7 +1260,7 @@ class Engine {
     if (mtp_block_) v.push_back({&mtp_, hp.n_head_kv, hp.head_dim, ctx, 1});
     return v;
   }
-  int kv_hi() const { return hp.gemma ? std::max(pos, written_hi_) : pos; }  // positions the caches hold
+  int kv_hi() const { return hp.swa_rings ? std::max(pos, written_hi_) : pos; }  // positions the caches hold
   // first position the sliding-window layers keep when saving: n_swa before keep_from (block-aligned), no older than
   // what the ring still holds
   int swa_save_lo(int keep_from) const {
@@ -1316,14 +1318,14 @@ class Engine {
     if (has_mtp) v.push_back({hlast_, 0, (size_t)hp.n_embd * 4});
     return v;
   }
-  // (a saved state loads only into the same layout: Gemma, the 4-bit V copy, the two-pass mode's float K / V rows)
-  int state_flags() const { return (hp.gemma ? 1 : 0) | (q2_ ? 4 | 8 : 0) | (q2_ && !q2mm_ ? 16 : 0) | (g4_att8_ ? 32 : 0); }  // (2: the removed
+  // (a saved state loads only into the same layout: ring caches (swa_rings), the 4-bit V copy, the two-pass mode's float K / V rows)
+  int state_flags() const { return (hp.swa_rings ? 1 : 0) | (q2_ ? 4 | 8 : 0) | (q2_ && !q2mm_ ? 16 : 0) | (g4_att8_ ? 32 : 0); }  // (2: the removed
   //  --v4; 8: int8 copies of the drafter's layers only; 16: Gemma's matmuls in one pass, E2B / E4B)
   // header and device ranges of save_state()
   void save_layout(int keep_from, std::vector<int32_t>& hdr, std::vector<Seg>& segs, bool host_snapshot = true) {
     const auto kl = kv_layers();
     // positions [0, pos) (beyond pos a Gemma cache may still hold a longer, rewound conversation: not needed)
-    const int hi = pos, slo = hp.gemma ? swa_save_lo(keep_from) : 0;
+    const int hi = pos, slo = hp.swa_rings ? swa_save_lo(keep_from) : 0;
     hdr = {kStateMagic, 2, hp.n_layer, hp.n_embd, hp.n_vocab, state_flags(), has_mtp ? 1 : 0, pos, pos, slo,
            (int)kl.size()};
     std::vector<std::pair<int, int>> br;  // blocks [b0, b1) saved per KV layer
@@ -1616,6 +1618,7 @@ class Engine {
       return (int)v;
     };
     hp.gemma = true;
+    hp.swa_rings = true;
     hp.n_layer = I("block_count");
     if (hp.n_layer <= 0 || hp.n_layer > 4096) throw std::runtime_error("invalid block_count in the GGUF");
     hp.n_embd = I("embedding_length");
@@ -2896,7 +2899,7 @@ class Engine {
     qi_ = buf(M * hp.n_head * hp.head_dim);
     if (q2_) qf_ = buf(M * hp.n_head * hp.head_dim * 4);  // (two-pass mode: the f32 queries of attn_fa_g)
     qsc_ = buf(M * hp.n_head * (hp.head_dim / 64) * 4);  // q scales per 64-dim block
-    if (hp.gemma) {
+    if (hp.swa_rings) {  // (RoPE tables per layer type: sliding / global)
       rope_tab_[0] = buf(M * (hp.hd_swa / 2) * 8);
       rope_tab_[1] = buf(M * (hp.hd_full / 2) * 8);
     }

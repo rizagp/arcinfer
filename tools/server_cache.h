@@ -136,7 +136,7 @@
       return;
     }
     std::filesystem::last_write_time(file, std::filesystem::file_time_type::clock::now(), ec);  // recently used
-    if (!gemma_) eng_.snapshot_host();  // new conversations resume here again
+    if (!rings_) eng_.snapshot_host();  // new conversations resume here again
     cached_ = toks;
     last_gen_cut_ = 0;
     cur_saved_ = false;

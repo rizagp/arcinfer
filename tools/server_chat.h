@@ -354,7 +354,7 @@
     bool ok = true;  // the prompt was processed up to where the stage aimed
     if (sys_cut > done && sys_cut < gen_cut) {
       ok = feed(sys_cut);
-      if (ok && !gemma_) eng_.snapshot_host();  // (Gemma resumes anywhere in its cache: rewind())
+      if (ok && !rings_) eng_.snapshot_host();  // (ring models resume anywhere in their cache: rewind())
       if (ok) save_prefix(P, sys_cut, folder);
     }
     if (ok && !client_gone() && turn_cut > done && turn_cut < gen_cut) {

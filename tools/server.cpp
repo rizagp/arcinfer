@@ -157,6 +157,7 @@ class Server {
     defaults_.top_k = (int)g.get_int("general.sampling.top_k", 20);
     defaults_.min_p = (float)g.get_float("general.sampling.min_p", 0.0);
     gemma_ = e.hp.gemma;
+    rings_ = e.hp.swa_rings;
     if (gemma_) {
       // Gemma 4: the GGUF template is rendered with minja; turns are <|turn>role ... <turn|>
       jinja_ = std::make_unique<JinjaChat>(g.get_str("tokenizer.chat_template"), "<bos>", "<eos>");
@@ -268,6 +269,7 @@ class Server {
   Tokenizer& tok_;
   std::string model_id_, webui_;
   bool q38_ = false, gemma_ = false;
+  bool rings_ = false;  // (ring caches, no recurrent state: a prefix is reused by rewind(), not snapshots)
 
  public:
   void set_vision(std::unique_ptr<GemmaImageEncoder> v) {
@@ -611,7 +613,7 @@ class Server {
     if (L >= P.size()) L = P.size() - 1;  // at least one token must be evaluated to get logits
     while (L > 0 && L < P.size() && P[L] < 0 && P[L - 1] == P[L]) --L;  // back to the start of an image span
     if (L == cached_.size() && (int)cached_.size() == eng_.pos) return L;  // pure extension
-    if (gemma_) {  // no recurrent state: move back to the common prefix if the sliding-window rings allow it
+    if (rings_) {  // no recurrent state: move back to the common prefix if the sliding-window rings allow it
       if (eng_.rewind((int)L)) {
         cached_.resize(L);
         return L;
@@ -684,7 +686,7 @@ class Server {
   // how much of P a state could keep: the largest resume point within the common prefix
   int usable(const std::vector<int>& P, const std::vector<int>& tokens, const std::vector<int>& resume, int floor) const {
     const int L = (int)std::min(common_prefix(P, tokens), P.size() - 1);
-    if (gemma_) return L >= floor ? L : 0;
+    if (rings_) return L >= floor ? L : 0;
     int u = 0;
     for (int r : resume)
       if (r <= L) u = std::max(u, r);
@@ -696,7 +698,7 @@ class Server {
     if ((int)cached_.size() == eng_.pos) r.push_back(eng_.pos);
     return r;
   }
-  int current_floor() const { return gemma_ ? eng_.rewind_floor() : 0; }
+  int current_floor() const { return rings_ ? eng_.rewind_floor() : 0; }
 
   // Saves the held conversation to the session cache and waits until it is on disk (arc-server stop / restart and a
   // model switch call it first, so that going back to the conversation afterwards loads it). False when there is
