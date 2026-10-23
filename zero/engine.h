@@ -1316,8 +1316,8 @@ class Engine {
     return v;
   }
   // (a saved state loads only into the same layout: Gemma, the 4-bit V copy, the two-pass mode's float K / V rows)
-  int state_flags() const { return (hp.gemma ? 1 : 0) | (q2_ ? 4 | 8 : 0); }  // (2: the removed --v4; 8: int8 copies
-  //  of the drafter's layers only)
+  int state_flags() const { return (hp.gemma ? 1 : 0) | (q2_ ? 4 | 8 : 0) | (q2_ && !q2mm_ ? 16 : 0); }  // (2: the removed
+  //  --v4; 8: int8 copies of the drafter's layers only; 16: Gemma's matmuls in one pass, E2B / E4B)
   // header and device ranges of save_state()
   void save_layout(int keep_from, std::vector<int32_t>& hdr, std::vector<Seg>& segs, bool host_snapshot = true) {
     const auto kl = kv_layers();
@@ -2161,6 +2161,12 @@ class Engine {
       clFinish(cl_.queue);
     }
     // DFlash2 (with or without the MTP block: with both, mtp_draft picks one per step)
+    // (Flash Next: its verification pass and the rollback of its QSA / PLE state are not built yet; incoai's drafter
+    //  for it is found by the catalog, so it is refused here rather than drafting wrongly)
+    if (!opt.dflash.empty() && hp.hc) {
+      fprintf(stderr, "arcinferzero: DFlash2 drafting is not supported for this model yet: plain decoding\n");
+      opt.dflash.clear();
+    }
     if (!opt.dflash.empty()) load_dflash(opt.dflash);
   }
 
@@ -3054,7 +3060,11 @@ class Engine {
   std::string q2_defs_;
   void q2_init() {
     q2_ = hp.gemma;  // (Gemma 4's only mode since 2026-10-22: KL < 0.01 against f32, the one-pass mode removed)
-    q2mm_ = q2_ || (hp.hc && getenv("ARC_FN_Q2") && atoi(getenv("ARC_FN_Q2")) > 0);
+    // (Gemma 4 E2B / E4B (per-layer embeddings): one int8 pass for the matmuls, the float attention kept; the
+    //  user's limit is KL 0.015 and the one-pass E4B measured 0.0010 with int8 attention as well (2026-10-23).
+    //  ARC_G4_Q2MM=1: two passes there too, as before)
+    const bool g4_one = hp.gemma && hp.n_ple > 0 && !(getenv("ARC_G4_Q2MM") && atoi(getenv("ARC_G4_Q2MM")) != 0);
+    q2mm_ = (q2_ && !g4_one) || (hp.hc && getenv("ARC_FN_Q2") && atoi(getenv("ARC_FN_Q2")) > 0);
     if (!q2mm_) return;
     const size_t M = max_chunk;
     const int maxK = std::max({hp.n_embd, hp.n_ff, hp.ssm_d_inner, hp.n_head * hp.head_dim, hp.hce(), hp.n_ff_exp_pad});
@@ -3068,7 +3078,7 @@ class Engine {
   void matmul(const char* name, const GpuWeight& w, int Mp, cl_mem C, int ldc, int c_off, int acc, bool act32) {
     // (the output head with a logit softcap: the cap applies to the sum of both passes, not to each; the head GEMVs
     //  cap in their epilogue, so both run without it and softcap_rows caps the sum)
-    const bool cap = q2_ && !q2_off_ && &w == &lm_head_ && hp.softcap > 0.0f;
+    const bool cap = q2mm_ && !q2_off_ && &w == &lm_head_ && hp.softcap > 0.0f;
     q2_nocap_ = cap;
     // (one token: the GEMV runs both passes over one read of the weights, -DQ2F; it says so in q2_fused_)
     q2_fuse_ = q2mm_ && !q2_off_ && cur_T_ <= 4;  // (2-4 tokens: gemv_mt_v only, see matmul1)

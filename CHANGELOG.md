@@ -7,6 +7,10 @@
   DeltaNet layers; `vit_attn_rows`, Qwen image encoder) with 16 lanes there. Same arithmetic in the same order:
   forced on this Xe-LPG laptop (`ARC_NO_SG8=1`) the 35B's logits are bit-identical and Qwen3.5 4B / 9B describe
   images as before (the 16-lane DeltaNet kernel spills here, Xe-LPG's registers are half as wide; not on Xe2 / Xe3).
+- **Gemma 4 E4B: matmuls in one int8 pass** (the float attention stays): KL against f32 0.00075 / 0.00093
+  (prompt / generation, 480 tokens), within the user's new limit of 0.015; 13,921-token prompt 45.4 -> 30.1 s,
+  generation with the drafter 29.3 -> 32.2 tok/s. 26B and 12B keep both passes (their one-pass KL was 0.098 /
+  0.033). Saved E4B states of the two-pass mode are not loaded (state flag 16). `ARC_G4_Q2MM=1`: two passes.
 - **XMX for prompt GEMMs** (Xe2 / Xe3 GPUs with XMX, e.g. Arc B390; not this laptop's Xe-LPG): the prompt GEMMs'
   int8 dot products on DPAS, picked automatically and only after a start-up check that the XMX kernels give the DP4a
   kernels' results bit for bit (else DP4a stays). `ARC_NO_XMX=1` turns it off. Untested on XMX hardware so far
