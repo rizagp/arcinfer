@@ -54,6 +54,19 @@
     //  ARC_FA_SPLIT=0: one sub-group per (row, q-head pair) over every key, as the prompt kernel)
     static const bool fa_split = !getenv("ARC_FA_SPLIT") || atoi(getenv("ARC_FA_SPLIT")) != 0;
     auto fa_g = [&](int r0, int n, int p0) {
+      if (g4_att8_ && !L.swa && n > 8 && batch_.empty() && hd == 512) {
+        // E2B / E4B prompt chunks, global layers: attn_ps on the int8 copy (head dims over 4 sub-groups of 4 q heads;
+        // 8 tokens per work-group, as before 2026-10-22: 870 -> 619 ms per layer at 13,921 tokens then)
+        const int tpw = hpg == 16 ? 2 : 8, lsz = 16 * (hpg / 4) * tpw * 4;
+        cl_kernel kp = kernel("ops", "-cl-intel-256-GRF-per-thread -DHD=512 -DHPG=" + std::to_string(hpg) + " -DHS=2 -DTPW=" +
+                                         std::to_string(tpw) + " -DPNS=4 -DPHG=4 -DPTT=1" + sb_opt(hd), "attn_ps");
+        int pp = p0, cap = L.cap, nn = nh, TT = n, w = win;
+        set_args(kp, 0, from(qi_, (size_t)r0 * nh * hd), from(qsc_, (size_t)r0 * nh * (hd / 64) * 4), L.kq, L.ksc, L.vq,
+                 L.vsc, cap, nn, pp, TT, from(o_, (size_t)r0 * nh * hd * 4), w);
+        size_t gws[2] = {(size_t)(n + tpw - 1) / tpw * lsz, (size_t)nkv}, lws[2] = {(size_t)lsz, 1};
+        run("attn_global", kp, 2, gws, lws);
+        return;
+      }
       if (fa_split && n <= 8) {
         const int gq = std::min(hpg, fa_gq ? fa_gq : hd >= 512 ? 2 : 4);
         const std::string fd = "-cl-intel-256-GRF-per-thread -DFA_G -DFA_SPLIT -DHD=" + std::to_string(hd) + " -DGQ=" +

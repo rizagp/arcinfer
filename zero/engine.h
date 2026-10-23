@@ -1317,7 +1317,7 @@ class Engine {
     return v;
   }
   // (a saved state loads only into the same layout: Gemma, the 4-bit V copy, the two-pass mode's float K / V rows)
-  int state_flags() const { return (hp.gemma ? 1 : 0) | (q2_ ? 4 | 8 : 0) | (q2_ && !q2mm_ ? 16 : 0); }  // (2: the removed
+  int state_flags() const { return (hp.gemma ? 1 : 0) | (q2_ ? 4 | 8 : 0) | (q2_ && !q2mm_ ? 16 : 0) | (g4_att8_ ? 32 : 0); }  // (2: the removed
   //  --v4; 8: int8 copies of the drafter's layers only; 16: Gemma's matmuls in one pass, E2B / E4B)
   // header and device ranges of save_state()
   void save_layout(int keep_from, std::vector<int32_t>& hdr, std::vector<Seg>& segs, bool host_snapshot = true) {
@@ -2638,7 +2638,8 @@ class Engine {
         // (the int8 copy only where the assistant drafter reads it: the sources of the last sliding and the last
         //  global layer, and only with the drafter; the two-pass attention reads the float rows. 26B: ~20 % less
         //  per token, the sliding rings ~0.7 GB less)
-        L.i8 = !q2_ || (opt.mtp && (il == g4_kv_layer(hp.n_layer - 2) || il == g4_kv_layer(hp.n_layer - 1)));
+        L.i8 = !q2_ || (opt.mtp && (il == g4_kv_layer(hp.n_layer - 2) || il == g4_kv_layer(hp.n_layer - 1))) ||
+               (g4_att8_ && !L.swa);  // (E2B / E4B: the global layers' prompt attention reads it, see g4_att8_)
         const size_t ib = L.i8 ? kvb : 64, is = L.i8 ? scb : 64;
         L.kq = buf(ib);
         L.vq = buf(ib);
@@ -3113,6 +3114,10 @@ class Engine {
   // (two-pass matmul inputs: Gemma 4's mode, and Flash Next's dense matmuls with ARC_FN_Q2=1, an F21.13 experiment:
   //  363-token KL against f32 0.0483 -> 0.0384, 4K prompt 191 -> 160 tok/s; its experts stay one pass)
   bool q2mm_ = false;
+  // (Gemma 4 E2B / E4B prompts: the global layers' attention on the int8 K / V copy, attn_ps, instead of the float
+  //  attention; f32 reference simulation, 480 tokens: KL 0.00081 -> 0.00145 with q / K / V / P rounded as attn_ps
+  //  does; 13,921-token prompt: attn_global 11.8 s of 29.7 s GPU. Generation stays float. ARC_G4_ATT8=0: off)
+  bool g4_att8_ = false;
   cl_mem qf_ = nullptr, mh2_ = nullptr;
   size_t q2m_hq_ = 0, q2m_sc_ = 0;  // (the experts' down input: residual offsets in mhq_ / mhsc_, bytes)
   bool q2_off_ = false;
@@ -3128,6 +3133,7 @@ class Engine {
     //  ARC_G4_Q2MM=1: two passes there too, as before)
     const bool g4_one = hp.gemma && hp.n_ple > 0 && !(getenv("ARC_G4_Q2MM") && atoi(getenv("ARC_G4_Q2MM")) != 0);
     q2mm_ = (q2_ && !g4_one) || (hp.hc && getenv("ARC_FN_Q2") && atoi(getenv("ARC_FN_Q2")) > 0);
+    g4_att8_ = q2_ && hp.gemma && hp.n_ple > 0 && !(getenv("ARC_G4_ATT8") && atoi(getenv("ARC_G4_ATT8")) == 0);
     if (!q2mm_) return;
     const size_t M = max_chunk;
     const int maxK = std::max({hp.n_embd, hp.n_ff, hp.ssm_d_inner, hp.n_head * hp.head_dim, hp.hce(), hp.n_ff_exp_pad});

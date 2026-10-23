@@ -2,6 +2,9 @@
 
 ## 2026-10-23: Xe2 / Xe3 GPUs (no 8-lane sub-groups); Unsloth Studio statistics and context
 
+- **Gemma 4 E4B prompts +12-33 %**: its global layers' prompt attention reads an int8 copy of K / V again
+  (`attn_ps`), the sliding layers and generation stay float: 13,921 tokens 30.2 -> 22.6 s, 4K 648 -> 724 tok/s;
+  KL 0.00075 -> 0.00088 (the limit is 0.015); +0.34 GiB GPU. `ARC_G4_ATT8=0` turns it off.
 - **Fixes from DeepSeek's second audit** (static reading, confirmed in the code):
   - a model switch whose model and then the previous model both fail to load no longer leaves the server to crash on
     the next request: it answers 503 until a request names a model that loads;

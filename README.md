@@ -35,7 +35,7 @@ one command. Built and tuned on a Core Ultra 5 125H with 32 GB of RAM: no discre
 | Qwen3.8 27B IQ3_S (dense) | ~135 tok/s | 4.9 tok/s; code 18.1 with DFlash2 + MTP | 0.0003-0.0004 |
 | Qwen3.8 Flash Next IQ3_S (512 experts on the SSD) | 160-190 tok/s (4K), 163 (32K), 123 (125K) | 6-7 tok/s | 0.020 (3.5K prompt); 0.048 on README text (was 0.065) |
 | Qwen3.5 4B | 911 tok/s (2K) | 17.6 tok/s | 0.0021 |
-| Gemma 4 E4B (Google QAT) | 570 tok/s (4K), 430-456 (14K) | 32 tok/s with its drafter | 0.00075 |
+| Gemma 4 E4B (Google QAT) | 724 tok/s (4K), 615 (14K) | 32 tok/s with its drafter | 0.00088 |
 | Gemma 4 12B (Google QAT) | 137 tok/s (4K), 102 (14K) | 19.0 tok/s with its drafter | 0.0002 (two-pass int8 activations) |
 | Gemma 4 26B-A4B (Google QAT, MoE, experts on the SSD) | 252 tok/s (4K), 210 (14K) | ~25 tok/s with its drafter; 14 after a 14K prompt without | 0.0042 (two-pass int8 activations) |
 
