@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-10-24: Gemma sliding attention, Flint kernels, /W4 and CI
+
+- **Gemma 4 26B / 12B long prompts**: the sliding layers' attention scores two blocks of 16 keys per step, each
+  query load used for both: 11K-token prompt, sliding attention 26B 8.6 -> 7.1 s, 12B 16.5-20.1 -> 13.4-14.0 s,
+  bit-identical. E4B and the global layers keep one block (slower with two).
+- **Flint groundwork** (the engine itself is not there yet): the float attention kernels take 128-dim heads and
+  attention sinks, attn_prep_g has V without a norm and layers without RoPE, the MoE routing has sigmoid weights
+  with an ungated shared FFN. New GPU tests against double / CPU computations: `tests/test_fa.cpp` (every
+  attention form, heads 128 / 256, global / sliding ring, with and without sinks) and `tests/test_route.cpp`.
+- **Build**: `/W4 /permissive-` (our sources warning-free; third_party as external headers) and a GitHub Actions
+  workflow that builds every exe and runs the model-free unit tests on Windows.
+- Measured and dropped: Flash Next gate / up on 32-slot tiles (bit-identical, 6.7 -> 8.4 s); larger key blocks or
+  other shapes for the head-512 attention (all slower).
+
 ## 2026-10-23: Xe2 / Xe3 GPUs (no 8-lane sub-groups); Unsloth Studio statistics and context
 
 - **Gemma 4 26B long prompts ~2 % faster**: the attention's ring slot computed once per 16-key block (global
