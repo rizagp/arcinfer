@@ -10,7 +10,7 @@
 #
 # Parameters:
 #   -Model4B / -Model27B / -Model35B / -ModelGemma / -ModelFlashNext / -ModelFlint   GGUF files (Flash Next: the
-#                              -00001-of- shard; Flint: its tokenizer against llama-tokenize under %USERPROFILE%lama-builds)
+#                              -00001-of- shard; Flint: its tokenizer against llama-tokenize under %USERPROFILE%\llama-builds)
 #   -DFlash27B / -DFlash35B    DFlash2 drafter folders (containing model.safetensors), zero engine only
 #   -Ref35B <file>             opt-in 35B KL check. tests\data\ref_35b_capital_all.bin is the f32 reference of the
 #                              Qwen3.6-35B-A3B GSQ file (tools\convert_gsq.py), not of Unsloth's UD-IQ4_XS: only pass it
