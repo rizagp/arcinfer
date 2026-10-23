@@ -146,6 +146,79 @@ int main(int argc, char** argv) {
       }
     }
   }
+  // attn_prep_g, head 128 as Flint uses it: q / k RMS norms with weights, NEOX RoPE (base 10000) or none
+  // (theta_base 0), q scaled by 1/sqrt(128), V as projected (has_v = 2, no norm); the f32 q and the float K / V rows
+  for (int rope : {1, 0}) {
+    const int HD = 128, Mr = 4, pos0 = 37, cap = 64, ldq = (nh + 2 * nkv) * HD;
+    const float eps = 1e-6f, base = rope ? 10000.0f : 0.0f, qs = 1.0f / std::sqrt(128.0f);
+    std::vector<float> qkv((size_t)Mr * ldq), qn(HD), kn(HD);
+    for (auto& x : qkv) x = nd(rng);
+    for (auto& x : qn) x = 1.0f + 0.3f * nd(rng);
+    for (auto& x : kn) x = 1.0f + 0.3f * nd(rng);
+    cl_program pr = cl.build(src, "-cl-std=CL3.0 -cl-mad-enable -DHD=128 -DSB=2");
+    cl_mem bqkv = cl.buffer(CL_MEM_READ_ONLY, qkv.size() * 4, qkv.data());
+    cl_mem bqn = cl.buffer(CL_MEM_READ_ONLY, qn.size() * 4, qn.data()), bkn = cl.buffer(CL_MEM_READ_ONLY, kn.size() * 4, kn.data());
+    cl_mem bqf = cl.buffer(CL_MEM_READ_WRITE, (size_t)Mr * nh * HD * 4);
+    cl_mem bkc = cl.buffer(CL_MEM_READ_WRITE, (size_t)nkv * cap * HD * 4), bvc = cl.buffer(CL_MEM_READ_WRITE, (size_t)nkv * cap * HD * 2);
+    cl_mem dummy = cl.buffer(CL_MEM_READ_WRITE, (size_t)Mr * nh * HD * 4);
+    cl_kernel k = cl.kernel(pr, "attn_prep_g");
+    int ld = ldq, nn = nh, nk = nkv, hv = 2, MM = Mr, pp = pos0, uff = 0, cp = cap, f16 = 3;
+    float ep = eps, bs = base, q_s = qs;
+    cl_mem no_table = nullptr;
+    set_args(k, 0, bqkv, ld, nn, nk, hv, bqn, bkn, MM, pp, ep, bs, bqn, uff, q_s, dummy, dummy, dummy, dummy, dummy, dummy,
+             cp, no_table);
+    set_args(k, 22, f16, bqf, bkc, bvc);
+    size_t gws[2] = {(size_t)(nh + nkv) * 16, (size_t)Mr}, lws[2] = {16, 1};
+    CL_CHECK(clEnqueueNDRangeKernel(cl.queue, k, 2, nullptr, gws, lws, 0, nullptr, nullptr));
+    std::vector<float> qf((size_t)Mr * nh * HD), kcg((size_t)nkv * cap * HD);
+    std::vector<uint16_t> vcg((size_t)nkv * cap * HD);
+    CL_CHECK(clEnqueueReadBuffer(cl.queue, bqf, CL_TRUE, 0, qf.size() * 4, qf.data(), 0, nullptr, nullptr));
+    CL_CHECK(clEnqueueReadBuffer(cl.queue, bkc, CL_TRUE, 0, kcg.size() * 4, kcg.data(), 0, nullptr, nullptr));
+    CL_CHECK(clEnqueueReadBuffer(cl.queue, bvc, CL_TRUE, 0, vcg.size() * 2, vcg.data(), 0, nullptr, nullptr));
+    // CPU: the same steps in double
+    auto head = [&](const float* x, const float* w, int pos, double scale, std::vector<double>& out) {
+      double ss = 0;
+      for (int d = 0; d < HD; ++d) ss += (double)x[d] * x[d];
+      const double r = 1.0 / std::sqrt(ss / HD + eps);
+      std::vector<double> y(HD);
+      for (int d = 0; d < HD; ++d) y[d] = x[d] * r * w[d];
+      out = y;
+      if (rope)
+        for (int i = 0; i < HD / 2; ++i) {
+          const double th = pos * std::pow(10000.0, -2.0 * i / HD), c = std::cos(th), s = std::sin(th);
+          out[i] = y[i] * c - y[i + HD / 2] * s;
+          out[i + HD / 2] = y[i + HD / 2] * c + y[i] * s;
+        }
+      for (double& v : out) v *= scale;
+    };
+    std::vector<float> gq, gk, gv;
+    std::vector<double> rq, rk, rv;
+    for (int m = 0; m < Mr; ++m) {
+      const int pos = pos0 + m;
+      for (int h = 0; h < nh; ++h) {
+        std::vector<double> o;
+        head(&qkv[(size_t)m * ldq + (size_t)h * HD], qn.data(), pos, qs, o);
+        rq.insert(rq.end(), o.begin(), o.end());
+        gq.insert(gq.end(), qf.begin() + ((size_t)m * nh + h) * HD, qf.begin() + ((size_t)m * nh + h + 1) * HD);
+      }
+      for (int g = 0; g < nkv; ++g) {
+        std::vector<double> o;
+        head(&qkv[(size_t)m * ldq + (size_t)(nh + g) * HD], kn.data(), pos, 1.0, o);
+        rk.insert(rk.end(), o.begin(), o.end());
+        const size_t at = ((size_t)g * cap + pos % cap) * HD;
+        gk.insert(gk.end(), kcg.begin() + at, kcg.begin() + at + HD);
+        for (int d = 0; d < HD; ++d) {
+          const float v = qkv[(size_t)m * ldq + (size_t)(nh + nkv + g) * HD + d];
+          rv.push_back(fp16_to_f32(f32_to_fp16(v)));
+          gv.push_back(fp16_to_f32(vcg[at + d]));
+        }
+      }
+    }
+    const double eq = rel_err(gq, rq), ek = rel_err(gk, rk), ev = rel_err(gv, rv);
+    const bool ok = eq < 1e-5 && ek < 1e-5 && ev == 0.0;
+    printf("HD 128 attn_prep_g %-8s q rel err %.2e, k %.2e, v %.2e %s\n", rope ? "RoPE" : "no RoPE", eq, ek, ev, ok ? "OK" : "FAIL");
+    fails += !ok;
+  }
   printf(fails ? "test_fa: %d FAILED\n" : "test_fa: all passed\n", fails);
   return fails ? 1 : 0;
 }

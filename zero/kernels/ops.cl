@@ -1460,7 +1460,8 @@ __kernel void rope_table(__global float2* rt, int hd, int pos0, float theta_base
   }
 // Attention inputs for one (token, head) per sub-group: RMS norm per head (weighted for q and k), NEOX RoPE over all
 // HD dims (theta = pos * base^(-2i/HD) / ff[i] with optional frequency factors), V = RMS norm without weight of the
-// V projection, or of the raw K projection when the layer has none (has_v = 0). int8 copies with a per-row scale:
+// V projection, or of the raw K projection when the layer has none (has_v = 0); has_v = 2: the V projection as it
+// is, no norm (Flint). theta_base <= 0: no RoPE (Flint's global layers). int8 copies with a per-row scale:
 // q -> qi/qsc, K/V -> the 16-key-block cache (slot = pos % cap). Lane l holds dims [VPL*l, VPL*l + VPL).
 // qkv rows: [q nh*HD | k nkv*HD | v nkv*HD]. With rt (rope_table of these rows) the angles come from the table.
 // grid (16*(nh+nkv), M), local (16, 1).
@@ -1496,6 +1497,7 @@ __kernel void attn_prep_g(__global const float* qkv, int ldq, int nh, int nkv, i
     for (int i = 0; i < PRP; ++i) v[c0 + i] *= r * nwv[i];
   }
   // NEOX RoPE: element e pairs with e +- HD/2, which lives in lane l ^ 8
+  if (theta_base > 0.0f) {  // (uniform)
   __global const float* rtl = (__global const float*)(rt + (size_t)m * (HD / 2) + (VPL * lane) % (HD / 2));
 #pragma unroll
   for (int c0 = 0; c0 < VPL; c0 += PRP) {
@@ -1518,6 +1520,7 @@ __kernel void attn_prep_g(__global const float* qkv, int ldq, int nh, int nkv, i
       }
       v[c0 + i] = e < HD / 2 ? v[c0 + i] * c - pv[i] * sn : v[c0 + i] * c + pv[i] * sn;
     }
+  }
   }
 #undef PRP
   float amax = 0.0f;
@@ -1574,7 +1577,7 @@ __kernel void attn_prep_g(__global const float* qkv, int ldq, int nh, int nkv, i
   } else {
     LOADF(raw, src + VPL * lane, VPL)
   }
-  r = rsqrt(ss / HD + eps);
+  r = has_v == 2 ? 1.0f : rsqrt(ss / HD + eps);
   float vmax = 0.0f;
 #pragma unroll
   for (int i = 0; i < VPL; ++i) { raw[i] *= r; vmax = fmax(vmax, fabs(raw[i])); }
