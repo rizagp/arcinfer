@@ -3542,10 +3542,12 @@ class Engine {
         continue;
       }
       int tpw = 1;
-      // (Qwen3.6 35B, 2 kv heads: a single token takes attn_decode (16 * nsp < 128), and attn_split over 2 rows split
-      // the keys differently, so MTP output drifted from plain decoding after ~40 tokens of a 2K prompt; its
-      // verification rows go through attn_decode one by one. The dense Qwen models pass the identity test as they are.)
-      if (!hp.moe || 16 * nsp >= 128 || drafter)
+      // (A single token takes attn_decode when 16 * nsp < 128, and attn_split over several rows splits the keys
+      // differently (its split length follows the rows' sub-groups), so MTP / DFlash2 output drifted from plain
+      // decoding once the context needs more than one split: Qwen3.6 35B after ~40 tokens of a 2K prompt, Qwen3.8
+      // 27B from the first verified token after 1,097 (logits 1.39 apart). Verification rows of every Qwen model now
+      // go through attn_decode one by one, as single tokens do.)
+      if (16 * nsp >= 128 || drafter)
         while (tpw < T - r0 && tpw < 4 && 16 * nsp * tpw * 2 <= 512) tpw *= 2;  // apart_ holds 4 rows of partials
       const int n = std::min(tpw, T - r0);
       if (16 * nsp * tpw >= 128) {
