@@ -50,8 +50,8 @@ and the DFlash2 drafters are not downloaded by setup.
 | `pi-arc 35b` | Qwen3.6 35B-A3B: smart and fast (mixture of experts, only ~3B active parameters per token) |
 | `pi-arc flash` | Qwen3.8 Flash Next: large mixture of experts, slower (~6-7 tokens/s) |
 | `pi-arc g12` | Gemma 4 12B: reads images (attach an image in Pi or the web UI) |
-| `pi-arc e4b` | Gemma 4 E4B: small and fast |
-| `pi-arc g26` | Gemma 4 26B-A4B (Google QAT Q4_0): mixture of experts (~4B active), ~20 tokens/s, reads images; 57K context with images, 106K with `--vision off` |
+| `pi-arc e4b` | Gemma 4 E4B: small and fast (~32 tokens/s with its drafter); hears audio: the voice model for Talk in the web UI |
+| `pi-arc g26` | Gemma 4 26B-A4B (Google QAT Q4_0): mixture of experts (~4B active), ~25 tokens/s with its drafter, reads images; 90K context with images, 118K with `--vision off` |
 | `pi-arc 9b` | Qwen3.5 9B: faster, medium quality |
 | `pi-arc 4b` | Qwen3.5 4B: fastest |
 | `pi-arc --think off` | No thinking (reasoning) phase: much faster answers |
@@ -177,13 +177,13 @@ use: `-df` for code, `-nodf` for Indonesian and other prose (the drafter was tra
 code), the default (both) when the text is mixed. Speeds of each variant:
 [docs/before-after.md, "Where it stands"](docs/before-after.md#where-it-stands-2026-10-20).
 
-**Gemma 4 runs in its accurate mode (since 2026-10-22, the only one).** Every activation goes through two int8
-passes (the value, then its rounding residual) and the attention is computed in float (f32 queries and keys, f16
-values). Its logits are close to the full-precision model's: KL against an f32 reference on a 480-token code prompt
-26B 0.0042, 12B 0.0002, E4B 0.00003 (the earlier one-pass mode: 0.0985 / 0.033 / 0.0010). Generation is about as fast
-as the one-pass mode was (26B with its drafter ~25 tokens/s, E4B ~38); prompts are slower (26B 4K prompt ~220
-tokens/s against ~525). Its saved conversations and system-prompt cache live in their own folders (`...-q2`);
-conversations saved by the one-pass mode are not loaded.
+**Gemma 4 runs in its accurate mode.** The attention is computed in float (f32 queries and keys, f16 values); on
+the 26B and 12B every matmul input also goes through two int8 passes (the value, then its rounding residual).
+E4B is accurate enough with one pass and keeps it (since 2026-10-23: its prompts ~1.5x faster). KL against an f32
+reference on a 480-token code prompt: 26B 0.0042, 12B 0.0002, E4B 0.00075 (the limit kept is 0.015; the old fully
+int8 mode gave 0.0985 / 0.033 / 0.0010). Speed: 26B with its drafter ~25 tokens/s, 4K prompt ~254 tokens/s; E4B
+with its drafter ~32 tokens/s, a 14K prompt in ~30 s. Conversations saved by an older mode are not loaded (they are
+processed again).
 
 **Two conversations at once (`-Slots 2`, arcinferzero).** By default the server holds one conversation and runs one
 request at a time: a second Pi window waits until the first one's answer is finished, and switching between them
@@ -282,21 +282,22 @@ print(r.choices[0].message.content)
 ## 5. Context size, and when a conversation gets long
 
 Each model uses the largest context that fits the GPU memory currently available (set in Intel Graphics Software,
-a 21.45 GiB GPU budget on this laptop now; the amount the driver offers changes with what other apps run), with ~1 GiB left for
-Windows and other apps, or the model's training limit. The context adjusts itself when that setting is changed (run
+a 20.4 GiB GPU share on this laptop now; the amount the driver offers changes with what other apps run), minus 1.2 GiB
+for the driver, or the model's training limit. The context adjusts itself when that setting is changed (run
 `arc-server restart` afterwards). The launcher window shows the current numbers. Examples:
 
 | Model | Default context |
 |---|---|
-| Qwen3.8 27B | 69,632 with images + MTP + DFlash2 (`27b`); 94,208 `27b-df`; 110,592 `27b-mtp` / `27b-nodf`; 143,360 `27b-vision`; 188,416 `27b-std` |
+| Qwen3.8 27B | 65,536 with images + MTP + DFlash2 (`27b`); 90,112 `27b-df`; 110,592 `27b-mtp` / `27b-nodf`; 143,360 `27b-vision`; 188,416 `27b-std` |
+| Gemma 4 26B-A4B | 90,112 with images + drafter (`g26`); 118,784 `g26-mtp`; 102,400 `g26-vision`; 131,072 `g26-std` (generation at 36K of depth: 11.4 tok/s with a 49K context, 10.5 with 131K) |
 | Qwen3.6 35B-A3B | 131,072 automatically (images + MTP + DFlash2, ~80 % of the experts cached); up to 262,144 with `--ctx` (smaller expert cache) |
 | Qwen3.8 Flash Next | 131,072 automatically; up to 262,144 with `--ctx` |
 | Qwen3.5 9B / 4B | 262,144 tokens (full) |
 | Gemma 4 12B | 262,144 tokens (full) |
 | Gemma 4 E4B | 131,072 tokens (full) |
 
-Do not set the GPU memory too high: at 20 GB (of 32 GB) the model leaves too little memory for Windows, so the
-laptop becomes slow or stops responding.
+arcinfer uses the whole GPU share you set except 1.2 GiB for the driver, so the share decides how much RAM is left
+for Windows: if the laptop becomes slow or stops responding while a model runs, lower the GPU memory setting.
 
 The output limit (`maxTokens` in Pi) equals the context size: Pi itself clamps it to the room left. Very long
 prompts still take time (see section 6), so a large context is mainly useful for long sessions that use the prefix

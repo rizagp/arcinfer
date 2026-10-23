@@ -101,8 +101,8 @@ LAUNCHER OPTIONS
   --no-mtp, -NoMtp               no speculative decoding (default: on when the model has an MTP block or a
                                  Gemma drafter; same output, faster generation)
   --ctx <N|auto>, -Ctx           context size in tokens, or auto = the largest that fits the GPU memory
-                                 currently set (bin\clinfo.exe, "global mem"), leaving ~1 GiB for Windows and
-                                 other apps, at most the model's max context length. Computed for every model in
+                                 currently set (bin\clinfo.exe, "global mem") less 1.2 GiB for the driver,
+                                 at most the model's max context length. Computed for every model in
                                  a few seconds (a dry load that only adds up the memory), remembered in
                                  %LOCALAPPDATA%\arcinfer\zero\ctx-auto.txt, recomputed when the GPU memory changes.
                                  For example (2026-10-18, 21.5 GiB GPU budget): 27b 69,632 (images, MTP and

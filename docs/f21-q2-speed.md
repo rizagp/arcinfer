@@ -7,6 +7,11 @@ one-pass code is removed). What was implemented and measured is in `docs/before-
 Tried and dropped: fused two-pass moe_rg for prompts (gate / up only -6 %), shuffle-free prompt attention, V from the
 int8 cache (KL 0.084), K f16 (KL 0.018).
 
+Update 2026-10-23: the user's KL limit is now 0.015, so Gemma 4 E4B runs its matmuls on one pass again (float
+attention kept; KL 0.00075, 14K prompt 45 -> 30 s); 26B and 12B stay on two passes. The prompt attention got faster
+for all three (attn_fa_gh with 8 sub-groups, several rows per work-group, also for the sliding layers): 26B 4K prompt
+~254 tok/s, 14K ~74 s. QUEUE.md F21.14: partial one-pass mixes for the 26B / 12B under 0.015.
+
 ## Why this file
 
 The accuracy target is already met with `ARC_Q2=1`:

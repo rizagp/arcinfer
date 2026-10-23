@@ -4,26 +4,30 @@ Target: token generation using > 90 % of measured bandwidth (~75 GB/s, so > 67.5
 every chat model in the Hugging Face cache, and vision / audio working on every model that has the encoder for it.
 Status: ✅ done · 🔄 in progress · ⏳ queued · ⏸️ parked · 💡 idea · ⚠️ note · [~] partial
 
-## Open now (tidied 2026-10-22)
+## Open now (tidied 2026-10-23)
 
 Everything below this list is history plus the details of these items; a row not listed here is done, dropped
-(⚠️ with the reason) or parked (⏸️).
+(⚠️ with the reason) or parked (⏸️). The KL limit for every model is 0.015 (the user, 2026-10-23).
 
 | Priority | Item | Section |
 |---|---|---|
-| ✅ 10-22 | Gemma 4 accurate mode: fast enough and the only mode (one-pass code and `--v4` removed) | F21.11 / F26.2 |
-| 1 | Register spills left (drafter attn_prep_g / attn_split, 35B moe_gateup_q variants, attn_prep, gdn_conv) | F21.12 |
-| 2 | Flash Next to KL < 0.01 (now 0.048): measured, waits for the user's decision (accuracy vs ~half the prompt speed) | F21.13 |
-| ✅ 10-22 | Web search / fetch in the web UI (text chat; the async variant comes with voice, F24.5) | F22 |
-| ✅ 10-23 | Voice conversation in the web UI (24.1-24.3 built with E4B; a real microphone test by the user pending; 24.4-24.7 open) | F24 |
-| 5 | Slim the code: audit the remaining ARC_* switches, split engine.h by model family | F26.1 / F26.3 |
-| 6 | Gemma 4 26B leftovers: vision encoder (11.8 s per image), auto context, prompt speed (two-pass 4K 254 tok/s after the 2026-10-23 attention work, one-pass was ~525; tried and dropped that night: both passes of moe_rg gate / up in one launch (bit-identical, +1 %, 2.5 KB spill), 16 sub-groups in attn_fa_gh (slower), attn_fa_gh rows for 26B global layers beyond 2 (same speed)) | F21.5-21.9 |
-| 7 | Batch decode for Flash Next (E4B done) | F20.6 |
-| 8 | Flint (unsloth/flint-GGUF on D:, MoE 256 experts): new architecture | F28 |
-| 9 | Copy 4B / E4B / 12B from D: to C: (the user decides) | F20.8 |
+| 1 | Flash Next speed: prompt (gate / up expert kernel for IQ2_S, ~1.6 TOPS) and generation (DFlash2 drafter, downloaded: capture, verification, QSA / PLE rollback) | F21.15 / F21.16 |
+| 2 | Flash Next accuracy, KL 0.048 > 0.015: waits for the user's decision (every part precise, prompts ~half as fast) | F21.13 |
+| 3 | Gemma 4 26B / 12B: partial one-pass mixes under KL 0.015 for prompt speed (E4B done: one pass, +51 %) | F21.14 |
+| 4 | Xe2 / Xe3: XMX prompt GEMMs built and self-checked, waiting for gee456's report (issue #1); then moe_rg / attention on XMX, setup's Visual Studio paths | F29 |
+| 5 | Voice: a real microphone test by the user; ASR for any model, human-sounding replies, omni models | F24.4-24.7 |
+| 6 | Flint (unsloth/flint-GGUF on D:): a newer llama.cpp for reference tokens (a download: ask), tokenizer, reference, engine | F28 |
+| 7 | Slim the code: split engine.h by model family | F26.3 |
+| 8 | Gemma 4 26B vision encoder (11.8 s per image; needs an image-accuracy reference) | F21.7 |
+| 9 | Batch decode for Flash Next (E4B done) | F20.6 |
+| 10 | Copy 4B / E4B / 12B from D: to C: (the user decides) | F20.8 |
 | later | Remote access through Cloudflare (Origin https, login) | F27 |
-| low | Jump-forward in tool calls; first prompt of a new session | F25.2 / F25.3 |
+| low | Jump-forward in tool calls | F25.2 |
 | parked | Fused FFN gate + up and small DeltaNet kernels (F17.2); review leftovers (F18.14); 35B expert decode once per layer (F19.6); larger staging (F19.2) | |
+
+Done 2026-10-22 / 23: Gemma 4 accurate mode and its speed (F21.11, F21.5 / 21.6), register spill survey (F21.12),
+26B auto context 90-131K (F21.9), web search (F22) and voice (F24.1-24.3, 24.5) in the web UI, switch audit 98 -> 74
+(F26.1), first prompt of a session (F25.3), Xe2 / Xe3 16-lane kernels and Unsloth Studio fields (F29).
 
 ## F29: other Intel GPUs (GitHub issue #1, 2026-10-23)
 

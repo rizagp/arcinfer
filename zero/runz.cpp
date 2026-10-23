@@ -104,7 +104,10 @@ static int run_main(int argc, char** argv) {
             "  --ppl-score-last N    score only the last N positions of each chunk   --ppl-score-step S  feed those S at a\n"
             "                        time (S <= 8: through the generation / verification kernels)\n"
             "PROMPT is text (special tokens such as <|im_start|> parsed); a long one: --text-file (Windows limits a\n"
-            "command line to ~32K characters).\n");
+            "command line to ~32K characters).\n"
+            "environment (tests): ARC_NO_XMX=1 DP4a instead of XMX (Xe2 / Xe3), ARC_XMX_TRY=1 the XMX check on any GPU,\n"
+            "  ARC_NO_SG8=1 the 16-lane kernels, ARC_G4_Q2MM=1 Gemma E4B on two passes, ARC_FN_Q2=1 Flash Next's dense\n"
+            "  matmuls on two passes, ARC_ZE_KPROPS=1 register spills per kernel (ARC_NO_KCACHE=1: build them again)\n");
     return help ? 0 : 1;
   }
   std::string model = argv[1], tokens_arg, kl_ref, ppl_file, ppl_dump, text_prompt, dump_ids;

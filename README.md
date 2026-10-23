@@ -1,10 +1,10 @@
 # arcinfer
 
 **Fast local LLMs on an Intel laptop iGPU.** A from-scratch inference engine for **Intel integrated GPUs
-(Xe-LPG / Meteor Lake "Arc Graphics")**, written in C++ on **Level Zero**. It loads GGUF files directly, serves an
-**OpenAI-, Anthropic- and Ollama-compatible API with a web UI**, and plugs into the [Pi](https://pi.dev) coding
-agent with one command. Built and tuned on a Core Ultra 5 125H with 32 GB of RAM: no discrete GPU, no XMX matrix
-engines.
+(Xe-LPG / Meteor Lake "Arc Graphics"; Xe2 / Xe3 such as Lunar Lake and Panther Lake's Arc B390 too)**, written in
+C++ on **Level Zero**. It loads GGUF files directly, serves an **OpenAI-, Anthropic- and Ollama-compatible API with
+a web UI** (web search and voice conversation included), and plugs into the [Pi](https://pi.dev) coding agent with
+one command. Built and tuned on a Core Ultra 5 125H with 32 GB of RAM: no discrete GPU, no XMX matrix engines.
 
 ### Why it is worth a look
 
@@ -23,15 +23,19 @@ engines.
   prompts kept on disk per project, images and audio input, schema-constrained tool calls, model switching from
   inside Pi, two Pi sessions at once on one model (`--slots 2`): when both are writing, their next tokens run in
   one engine pass (27B prose 7.3 -> 10.5 tok/s together, 35B 20.2 -> 24.7, Gemma 4 26B 19.8 -> 26.2).
+- **A web UI that searches and talks**: the model can search the web and read pages (the server fetches them,
+  public addresses only), and with Gemma 4 E4B / 12B you can talk to it: the microphone stays open, it hears the
+  audio itself, answers aloud sentence by sentence, can be interrupted, and looks things up while it talks.
 
-### Results at a glance (2026-10-20)
+### Results at a glance (2026-10-23)
 
 | Model | Prompt | Generation | KL vs f32 reference |
 |---|---|---|---|
 | Qwen3.6 35B-A3B UD-IQ4_XS (MoE, experts on the SSD) | 604 tok/s (32K prompt), 324 (128K) | 20.6 tok/s; code 49.9 with DFlash2; 12.6 at 128K depth | 0.004-0.008 |
 | Qwen3.8 27B IQ3_S (dense) | ~135 tok/s | 4.9 tok/s; code 18.1 with DFlash2 + MTP | 0.0003-0.0004 |
-| Qwen3.8 Flash Next IQ3_S (512 experts on the SSD) | ~191 tok/s (4K), 163 (32K), 123 (125K) | 6-7 tok/s | 0.020 (3.5K prompt); 0.048 on README text (was 0.065) |
+| Qwen3.8 Flash Next IQ3_S (512 experts on the SSD) | 160-190 tok/s (4K), 163 (32K), 123 (125K) | 6-7 tok/s | 0.020 (3.5K prompt); 0.048 on README text (was 0.065) |
 | Qwen3.5 4B | 911 tok/s (2K) | 17.6 tok/s | 0.0021 |
+| Gemma 4 E4B (Google QAT) | 463 tok/s (14K) | 32 tok/s with its drafter | 0.00075 |
 | Gemma 4 12B (Google QAT) | 102 tok/s (14K) | 19.0 tok/s with its drafter | 0.0002 (two-pass int8 activations) |
 | Gemma 4 26B-A4B (Google QAT, MoE, experts on the SSD) | 254 tok/s (4K), 189 (14K) | ~25 tok/s with its drafter; 13 after a 14K prompt without | 0.0042 (two-pass int8 activations) |
 
@@ -44,7 +48,8 @@ engines.
 | Perplexity, Qwen3.5 4B / 9B / 27B (lower is better) | **6.056 / 5.417 / 4.274** | 6.141 / 5.499 / 4.311 | 6.138 / 5.497 / 4.310 |
 
 KL is the divergence of the next-token distributions from the f32 reference (0 = identical); run-to-run int8
-rounding noise is ~0.0003. How each number was measured, every change with its before and after, and the
+rounding noise is ~0.0003. The limit kept for every model and change is KL < 0.015 (Flash Next is still above it:
+QUEUE.md F21.13). How each number was measured, every change with its before and after, and the
 consistency checks (56 of 56 regression runs bit-identical): **[docs/before-after.md](docs/before-after.md)**.
 
 ### The engine
@@ -52,7 +57,9 @@ consistency checks (56 of 56 regression runs bit-identical): **[docs/before-afte
 **arcinferzero** (`zero/`, `bin\serverz.exe`, `bin\runz.exe`) runs OpenCL-compiled kernels through **Level
 Zero**. It streams mixture-of-experts weights from the SSD (only the experts in use stay in GPU memory; the next
 layer's missing experts are read while the GPU computes the current one), and drafts with the MTP block, a DFlash2
-drafter or both. The automatic context gives the 35B and Flash Next 131,072 tokens.
+drafter or both. The automatic context gives the 35B and Flash Next 131,072 tokens, Gemma 4 26B 90K-131K. On GPUs
+without 8-lane sub-groups (Xe2 / Xe3) it builds its 8-lane kernels with 16 lanes, and where the GPU has XMX matrix
+engines the prompt GEMMs run on them after a start-up check against the DP4a kernels (not yet run on such a GPU).
 
 ### Read more
 
@@ -62,6 +69,8 @@ drafter or both. The automatic context gives the 35B and Flash Next 131,072 toke
 - Speed by date, long contexts, the 4-bit V cache: [docs/speed-progress.md](docs/speed-progress.md)
 - arcinferzero development log: [docs/archive/arcinferzero-log.md](docs/archive/arcinferzero-log.md)
 - What changed recently: [CHANGELOG.md](CHANGELOG.md); usage guide (step by step): [USAGE.md](USAGE.md)
+- Open work and decisions: [QUEUE.md](QUEUE.md); the Gemma 4 accurate-mode plan: [docs/f21-q2-speed.md](docs/f21-q2-speed.md);
+  Flash Next's architecture: [docs/flash-next-spec.md](docs/flash-next-spec.md)
 
 ## Supported models
 
@@ -69,8 +78,8 @@ drafter or both. The automatic context gives the 35B and Flash Next 131,072 toke
 |---|---|---|
 | `qwen35` | Qwen3.5 (0.8B–27B dense), Qwen3.6, Qwen3.8 27B | hybrid Gated DeltaNet + gated attention; MTP speculative decoding; image input with a Qwen3-VL `mmproj` next to the model (encoded on the GPU; Qwen3.5 4B and 9B) |
 | `qwen35moe` | Qwen3.6-35B-A3B: standard GGUFs (e.g. Unsloth UD-IQ4_XS / UD-Q3_K_M) or ISTA-DASLab GSQ 2-bit | mixture of experts (256 experts, 8 active); standard GGUF experts (IQ / Q3_K / Q4_K / Q5_K / Q6_K / Q8_0 / Q4_0) load as they are; GSQ converted from the safetensors checkpoint with `tools/convert_gsq.py`; Unsloth's MTP repository adds speculative decoding and its `mmproj` image input (arcinferzero: both together; the automatic context reserves 128K tokens of context, then sizes the expert cache: 131K tokens with ~80 % of the UD-IQ4_XS experts cached; up to 262K with `--ctx`, with a smaller cache; context sweep in docs/speed-progress.md) |
-| `gemma4` | Gemma 4 12B, Gemma 4 E4B, Gemma 4 26B-A4B (Google's QAT Q4_0 GGUFs) | sliding-window + global attention, per-layer embeddings (E4B); image and audio input (`mmproj`: 12B gemma4uv / gemma4ua, E4B gemma4v ViT and gemma4a conformer, 26B gemma4v with 72-dim heads, on the GPU); speculative decoding with the Gemma 4 assistant drafters (`mtp-*.gguf`; 12B, E4B). 26B-A4B: a dense FFN beside 128 routed experts (8 active, GELU, f32 router) streamed from the SSD like the 35B's |
-| `qwen4exp` | Qwen3.8 Flash Next (ISTA-DASLab GSQ-RCO IQ3_S, GGUF in 2 parts) | **arcinferzero only**; 4 hyper-connection streams, Gated DeltaNet + gated attention with QSA sparse attention, 512 experts (10 active) streamed from the SSD, PLE n-gram table read from part 2 per token; no MTP block, no image input; runs up to 262,144 tokens, accuracy measured up to a 3.5K-token prompt (KL 0.020) |
+| `gemma4` | Gemma 4 12B, Gemma 4 E4B, Gemma 4 26B-A4B (Google's QAT Q4_0 GGUFs) | sliding-window + global attention, per-layer embeddings (E4B); image and audio input (`mmproj`: 12B gemma4uv / gemma4ua, E4B gemma4v ViT and gemma4a conformer, 26B gemma4v with 72-dim heads, on the GPU); speculative decoding with the Gemma 4 assistant drafters (`mtp-*.gguf`; 12B, E4B, 26B). 26B-A4B: a dense FFN beside 128 routed experts (8 active, GELU, f32 router) streamed from the SSD like the 35B's. Accuracy: float attention (f32 q / K, f16 V) for all; 26B and 12B run their matmuls on two int8 passes (value and rounding residual: KL 0.0042 / 0.0002), E4B on one (KL 0.00075) |
+| `qwen4exp` | Qwen3.8 Flash Next (ISTA-DASLab GSQ-RCO IQ3_S, GGUF in 2 parts) | **arcinferzero only**; 4 hyper-connection streams, Gated DeltaNet + gated attention with QSA sparse attention, 512 experts (10 active) streamed from the SSD, PLE n-gram table read from part 2 per token; no MTP block, no image input (a DFlash2 drafter exists, incoai/Qwen3.8-Flash-Next-DFlash2, not supported yet: QUEUE F21.16); runs up to 262,144 tokens, accuracy measured up to a 3.5K-token prompt (KL 0.020; 0.048 on 363 tokens of README text) |
 
 Weight types: `Q4_0`, `Q8_0`, `Q2_K`, `Q4_K`, `Q5_K`, `Q6_K`, `IQ1_M`, `IQ2_XXS`, `IQ2_XS`, `IQ2_S`, `IQ3_XXS`, `IQ3_S`,
 `IQ4_XS` (mixed per tensor, e.g. Unsloth dynamic or ISTA-DASLab GSQ-RCO quants), plus `F32/F16/BF16` small matrices;
@@ -106,8 +115,8 @@ is missing. Steps 1–10 describe the same by hand.
 | | Needed | Tested with |
 |---|---|---|
 | OS | Windows 11, 64-bit | Windows 11 Home 25H2 (build 26200) |
-| GPU | Intel Core Ultra (Meteor Lake) with Intel Arc integrated graphics (Xe-LPG). The engine needs OpenCL 3.0 with `cl_intel_subgroups` and `cl_khr_integer_dot_product` (DP4a). Other GPUs are not supported. | Core Ultra 5 125H, Arc iGPU 112 EU |
-| Memory | 16 GB works for the 4B / E4B models; 32 GB for the 12B–35B models and long contexts. The iGPU can use part of the RAM (`bin\clinfo.exe`, "global mem": 16.5 GiB on 32 GB by default, set in Intel Graphics Software; 18.3 GiB on the test laptop now), shared with the desktop and other apps (~0.7 GiB). Each model's context follows that setting. | 32 GB LPDDR5x-6400 |
+| GPU | Intel Core Ultra with Intel Arc integrated graphics: Meteor Lake / Arrow Lake (Xe-LPG), and Lunar Lake / Panther Lake (Xe2 / Xe3: the 8-lane kernels are built with 16 lanes there, and the prompt GEMMs use XMX after a start-up check; a user ran the 35B on an Arc B390 at 1,182 tok/s prompt, 24 tok/s generation, before the XMX path existed). The engine needs OpenCL 3.0 with `cl_intel_subgroups` and `cl_khr_integer_dot_product` (DP4a). Discrete Arc GPUs are not supported. | Core Ultra 5 125H, Arc iGPU 112 EU |
+| Memory | 16 GB works for the 4B / E4B models; 32 GB for the 12B–35B models and long contexts. The iGPU can use part of the RAM (`bin\clinfo.exe`, "global mem": set in Intel Graphics Software; 20.4 GiB of 32 GB on the test laptop now); arcinfer uses all of it but 1.2 GiB for the driver, the rest of the RAM stays with Windows. Each model's context follows that setting. | 32 GB LPDDR5x-6400 |
 | CPU | AVX2 (every Core Ultra has it; the build uses `/arch:AVX2`) | |
 | Graphics driver | Intel Arc & Iris Xe graphics driver (it contains the OpenCL runtime; nothing else to install) | 32.0.101.9033 |
 | Compiler | Visual Studio 2026 Build Tools with the **Desktop development with C++** workload (MSVC + Windows SDK) | VS Build Tools 18 |
@@ -181,7 +190,7 @@ in the same folder as the model: download them from the same repository in the s
 | `4b` | Qwen3.5 4B (with MTP head) | `hf download unsloth/Qwen3.5-4B-MTP-GGUF Qwen3.5-4B-UD-Q4_K_XL.gguf` | 3.0 GB |
 | `g12` | Gemma 4 12B QAT (Google, Q4_0) + image projector; drafter from Unsloth, copied into the model's snapshot folder | `hf download google/gemma-4-12B-it-qat-q4_0-gguf` and `hf download unsloth/gemma-4-12B-it-qat-GGUF mtp-gemma-4-12B-it.gguf` | 7.0 + 0.2 + 0.3 GB |
 | `e4b` | Gemma 4 E4B QAT (Google, Q4_0); drafter from Unsloth, copied into the model's snapshot folder | `hf download google/gemma-4-E4B-it-qat-q4_0-gguf gemma-4-E4B_q4_0-it.gguf` and `hf download unsloth/gemma-4-E4B-it-qat-GGUF mtp-gemma-4-E4B-it.gguf` | 5.2 + 0.1 GB |
-| `g26` | Gemma 4 26B-A4B QAT (Google, Q4_0) + image projector; no drafter | `hf download google/gemma-4-26B-A4B-it-qat-q4_0-gguf` | 14.4 + 1.2 GB |
+| `g26` | Gemma 4 26B-A4B QAT (Google, Q4_0) + image projector; drafter `mtp-gemma-4-26B-A4B-it.gguf` from Unsloth's Gemma 4 26B-A4B QAT GGUF repository, copied next to the model (optional: ~25 tok/s with it) | `hf download google/gemma-4-26B-A4B-it-qat-q4_0-gguf` | 14.4 + 1.2 GB |
 | `35b` | Qwen3.6 35B-A3B UD-IQ4_XS (Unsloth's MTP repository: MTP block + image projector) | `hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-IQ4_XS.gguf mmproj-BF16.gguf` | 18.2 GB + projector |
 | `35b-mtp` | Qwen3.6 35B-A3B UD-Q3_K_M of the same repository | `hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-Q3_K_M.gguf mmproj-BF16.gguf` | |
 | (`35b`) | Qwen3.6 35B-A3B, 2-bit GSQ, no MTP (what `setup.cmd -Models 35b` downloads) | see step 7 (download 12.6 GB, then convert) | 11.7 GB |
@@ -326,12 +335,21 @@ test uses port 8091 and needs the GPU memory.
 .\bin\serverz.exe --list-models    # the models it can load (Hugging Face cache, %LOCALAPPDATA%\arcinfer\models), as JSON
 ```
 
-- Web UI: http://127.0.0.1:8080/
+- Web UI: http://127.0.0.1:8080/ (chat with images, audio and files; **Web**: the model searches the web and reads
+  pages; **Talk**: a spoken conversation with Gemma 4 E4B / 12B; context use and compaction). Details:
+  [USAGE.md](USAGE.md#4-web-ui-and-other-apps).
 - OpenAI API: `POST /v1/chat/completions` (streaming, `reasoning_content`, tool calls streamed while they are
   generated, string arguments and array / object arguments alike (Pi's `edit` puts its whole change in an array),
-  `usage`),
-  `GET /v1/models` (every model of `--list-models`, the loaded one first), plus `GET /health`, `GET /props`,
-  `POST /tokenize`, `GET` / `DELETE /sessions` (session cache size / clear).
+  `usage`; the last streamed chunk carries `usage` and llama-server's `timings` together),
+  `GET /v1/models` (every model of `--list-models`, the loaded one first; the served context as `context_length`,
+  llama-server's `meta.n_ctx` and `max_model_len`), plus `GET /health`, `GET /props`, `POST /tokenize`, `GET` /
+  `DELETE /sessions` (session cache size / clear).
+- Web tools (the web UI's, usable by any client): `POST /v1/tools/web_search` `{"query": ...}` (Brave Search, Bing
+  when Brave gives nothing) and `POST /v1/tools/web_fetch` `{"url": ..., "offset": 0}` (a page as plain text, in
+  windows of 12K characters); public http(s) addresses only (every host and redirect is resolved first: nothing on
+  this machine or the local network). `--no-web-tools` turns them off.
+- Llama.cpp clients such as Unsloth Studio connect as to a llama-server: they read the context size and the token
+  statistics from the fields above.
 - Sampling and output (chat): `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`, `frequency_penalty`,
   `repeat_penalty` / `repeat_last_n`, `logit_bias`, `seed`, `stop`, `max_tokens`; `logprobs` / `top_logprobs`;
   `n` > 1 (without streaming); `response_format` `json_object` / `json_schema` (sampling is constrained, so the answer
@@ -410,9 +428,10 @@ test uses port 8091 and needs the GPU memory.
   logs the raw text of every tool call.
 - During a long prompt, streaming responses carry `: prefill N/M` progress comments (also shown in the web UI).
 - Qwen3.8 Flash Next (arcinferzero only): pass the first part (`...-IQ3_S-00001-of-00002.gguf`) with `-m`; part 2
-  must sit next to it. Generation ~6-7 tok/s; prompts 166 tok/s (4K) to 123 (125K); context up to 262,144 with
-  `--ctx`. KL vs the CPU reference: 0.0014 on a short chat prompt, 0.020 on a 3,566-token prompt with QSA; accuracy
-  at longer prompts is not measured. No MTP block, no image input. Details:
+  must sit next to it. Generation ~6-7 tok/s; prompts 160-190 tok/s (4K) to 123 (125K); context up to 262,144 with
+  `--ctx`. KL vs the CPU reference: 0.0014 on a short chat prompt, 0.020 on a 3,566-token prompt with QSA, 0.048 on
+  363 tokens of README text; accuracy at longer prompts is not measured. No MTP block, no image input; its DFlash2
+  drafter is refused for now (QUEUE F21.16). Where its time goes and what was tried: QUEUE F21.13 / F21.15. Details:
   [docs/before-after.md](docs/before-after.md#where-it-stands-2026-10-20).
 
 ## Using Pi
@@ -427,13 +446,15 @@ every option.
   that one (5–40 s) with its own context, and the next `pi-arc` starts with it. The list is rescanned on every
   `pi-arc` and `arc-server start` / `restart`: a model deleted from the Hugging Face cache disappears from it.
 - **Context:** each model gets the largest context that fits the GPU memory currently set (Intel Graphics
-  Software), with ~1 GiB left for Windows and other apps, at most its max context length (the GGUF's
-  `context_length`). The GPU memory the driver offers changes with what else runs, so the numbers move; the launcher
-  window shows how each one is counted. Examples (arcinferzero, 21.45 GiB GPU budget): Qwen3.6 35B-A3B 131,072 with
-  images, MTP and DFlash2 (experts streamed from the SSD; the automatic context reserves 128K, then sizes the expert
-  cache: ~76-81 % of the experts cached; 262,144 with `--ctx 262144`, 71-77 % cached); Qwen3.8 Flash Next 131,072
-  (~20 % cached); Qwen3.5 4B / 9B and Gemma 4 12B 262,144; Gemma 4 E4B 131,072; Qwen3.8 27B 69,632 with images, MTP
-  and DFlash2 (`27b-df` 94,208, `27b-mtp` / `27b-nodf` 110,592, `27b-vision` 143,360, `27b-std` 188,416). `pi-arc --ctx N` sets a context, `pi-arc --ctx auto` goes back to the automatic one (restarting a server
+  Software) minus 1.2 GiB for the driver, at most its max context length (the GGUF's `context_length`). The GPU
+  memory the driver offers changes with what else runs, so the numbers move; the launcher window shows how each one
+  is counted. Examples (arcinferzero, 20.4 GiB GPU share, 2026-10-23): Qwen3.6 35B-A3B 131,072 with images, MTP and
+  DFlash2 (experts streamed from the SSD; the automatic context reserves 128K, then sizes the expert cache: ~76-81 %
+  of the experts cached; 262,144 with `--ctx 262144` or the `-std` variant, 71-77 % cached); Qwen3.8 Flash Next
+  131,072 (~20-25 % cached); Gemma 4 26B-A4B 90,112 with images and its drafter (118,784 `-mtp`, 102,400 `-vision`,
+  131,072 `-std`; the expert cache keeps at least 0.6 of the free memory); Qwen3.5 4B / 9B and Gemma 4 12B 262,144;
+  Gemma 4 E4B 131,072; Qwen3.8 27B 65,536 with images, MTP and DFlash2 (`27b-df` 90,112, `27b-mtp` / `27b-nodf`
+  110,592, `27b-vision` 143,360, `27b-std` 188,416). `pi-arc --ctx N` sets a context, `pi-arc --ctx auto` goes back to the automatic one (restarting a server
   that runs a fixed context). `--chunk 1024` frees 1.1 GiB on the 27B for more context (118,784 at 18.3 GiB;
   prompts of ~11K tokens ~4 % slower, from ~34K on no difference). Pi's `maxTokens` is the whole window: Pi clamps
   each request to the room left (window − prompt − 4096).
@@ -520,7 +541,10 @@ into groups of 8 layers.
   an int8 "W8" form (int8 values, int8 scale per 16 or 32 values, float scale per 256). SIMD16 sub-groups compute
   16 columns x 16 tokens with constant-index lane broadcasts, work-groups share weight tiles across 8 token tiles
   and are swizzled so weight slices are reused from L3; long reductions (K > 8192) are split so the activation
-  slab stays in L3. The fused SwiGLU (silu(gate)·up) is applied in the epilogue of the up-projection GEMM.
+  slab stays in L3. The fused SwiGLU (silu(gate)·up) is applied in the epilogue of the up-projection GEMM. On GPUs
+  with XMX and 16-lane DPAS (Xe2 / Xe3) the same GEMM takes its int8 dot products from DPAS instructions (8 tokens
+  x 16 columns x 32 values each); integer sums are exact, so the results are the DP4a kernel's bit for bit, and the
+  engine checks that on random data of every weight layout at start before it uses them (`ARC_NO_XMX=1`: off).
 - **Just-in-time weight decoding.** Every GGUF quant type is decoded into W8 on the GPU: IQ/K types without
   block minimums losslessly; types with minimums (Q2_K/Q4_K/Q5_K) are requantized to signed int8 with a per-16/32
   scale (adds ~1/10 of their own quantization noise; +0.05% perplexity on Qwen3.5-4B), which lets them use the
@@ -535,22 +559,27 @@ into groups of 8 layers.
   epilogue, and for single-token passes the residual add, the sandwich norm and the next input's norm and int8
   quantization are one kernel.
 - **Gated DeltaNet** recurrence: each SIMD8 lane keeps a full 128-float state column in registers; q/k are
-  block-read and broadcast, so no reductions are needed.
+  block-read and broadcast, so no reductions are needed. GPUs without 8-lane sub-groups (Xe2 / Xe3) run it with 16
+  lanes (their registers are twice as wide), the same arithmetic in the same order (`ARC_NO_SG8=1` forces it).
 - **Mixture of experts** (`zero/kernels/moe.cl`): the router GEMM gives the top-8 experts per token (softmax,
   renormalized) and the sigmoid gate of the shared expert; the (token, expert) pairs are grouped by expert with a
   counting sort, and tiles of 16 pairs of one expert run DP4a GEMMs straight on the 2-bit codes (decoded to int8
   in registers, SwiGLU in the epilogue, routing weight on the down projection). A single token skips the sort.
-- **Attention** is int8 end to end: the KV cache holds int8 K and V (stored in 16-key blocks); scores are DP4a,
-  the online softmax is f32 (log2 domain, rescaling only when the running max grows), and P·V is DP4a too, with
-  P·vscale quantized to 8 bits per 16-key tile (SageAttention-style). Qwen uses one scale per q/K/V row; Gemma 4
-  one per 64 dims (its V rows have a few large dims that a row scale lets swamp the rest: measured against an f32
-  reference). In prefill, K/V tiles are shared through local memory by all GQA heads of several tokens; for
-  Gemma 4 12B's global layers (head size 512, 16 q heads per kv head) the sub-groups also split the head dimensions
-  and sum partial scores through local memory (`attn_ps`), which avoids register spills (1.25–1.4x faster). Decoding
-  splits the keys over many work-groups (flash-decoding) and merges the partial results; for Gemma 4 each
-  work-group also splits the head dimensions over its sub-groups (`attn_dsplit`), so every K/V byte is read once
-  for all heads and all rows of a verification pass (head size 512 at 14K context: 0.74 → 0.31 ms per layer).
-  RoPE angles are computed once per pass.
+- **Attention, Qwen** is int8 end to end: the KV cache holds int8 K and V (stored in 16-key blocks, one scale per
+  row); scores are DP4a, the online softmax is f32 (log2 domain, rescaling only when the running max grows), and
+  P·V is DP4a too, with P·vscale quantized to 8 bits per 16-key tile (SageAttention-style). In prefill, K/V tiles
+  are shared through local memory by all GQA heads of several tokens; decoding splits the keys over many
+  work-groups (flash-decoding) and merges the partial results. Flash Next adds QSA: an indexer scores blocks of keys
+  and each query attends to its top blocks only.
+- **Attention, Gemma 4** is float for accuracy (int8 attention cost it KL ~0.02 on its own): f32 queries and K
+  rows, f16 V rows. Prompt chunks run `attn_fa_gh`: a work-group holds one kv head's q heads for 1-4 query rows (as
+  many as fit 64 output floats per lane), so each key and value row is read once for all of them, and its 4 or 8
+  sub-groups split the head dimensions (26B, 13,921-token prompt: attention 48 -> ~28 s). Generation and
+  verification use flash-decoding (`attn_fa_g -DFA_SPLIT`, keys in up to 64 splits). An int8 copy of K / V stays
+  only for the layers the assistant drafter reads. RoPE angles are computed once per pass.
+- **Gemma 4's two int8 passes** (26B, 12B): each matmul input is quantized to int8 and its rounding residual to a
+  second int8 row; both go through the same weights and are added (single tokens and small batches read the
+  weights once for both). KL 0.0985 -> 0.0042 on the 26B; E4B is accurate enough on one pass.
 - **Prompt cache.** The server holds one conversation (KV cache, DeltaNet states and the tokens they stand for)
   and processes only what a request adds to the prefix it shares. Attention K/V are stored by position, so moving
   back is free, but the DeltaNet states can only be restored where a snapshot was taken: at the end of the system
@@ -563,6 +592,8 @@ into groups of 8 layers.
   only the first use of a kernel variant pays the driver's compile time.
 - Prompts longer than 16,384 tokens go through the layer-major prefill in segments of 16,384, which keeps the
   residual-stream buffer small and lets the long contexts above fit.
+- At start the server also runs a 512-token warm-up prompt, so the first request does not pay the first use of
+  the large-chunk kernels (35B with its drafters: first 1,749-token request 8.6 -> 4.2 s).
 - Tokenizer (byte-level BPE with the Qwen pre-tokenizer), chat templates (ChatML + `<think>` + XML tool calls for
   Qwen, the GGUF's Jinja template through minja for Gemma 4) and sampling are implemented natively; the tokenizer
   output is identical to llama.cpp's.
@@ -578,18 +609,19 @@ zero/       the engine: engine.h (forward passes on Level Zero), clrt.h (OpenCL-
             expert_store.h (MoE experts on the SSD, GPU cache), serverz.cpp / runz.cpp, vision_gemma4v.h /
             vision_qwen3vl.h / audio_gemma4a.h (encoders), kernels/ (gemm.cl DP4a GEMM, decode.cl JIT decode + GEMV,
             ops.cl norms / DeltaNet / attention / quantization, moe.cl expert routing and GEMMs), grf_probe.cpp
-tools/      server.cpp (the HTTP API, built by zero/serverz.cpp), ref_forward.cpp (f32 CPU reference: Qwen3.5,
-            Qwen3.5-MoE, Gemma 4), convert_gsq.py (ISTA GSQ checkpoint -> GGUF), tok_test.cpp, chat_render.cpp,
-            gguf_dump.cpp, clinfo.cpp
+tools/      server.cpp (the HTTP API, built by zero/serverz.cpp), web_tools.h (web search / page fetch),
+            ref_forward.cpp (f32 CPU reference: Qwen3.5, Qwen3.5-MoE, Gemma 4, Flash Next), convert_gsq.py (ISTA GSQ
+            checkpoint -> GGUF), tok_test.cpp, chat_render.cpp, gguf_dump.cpp, clinfo.cpp
 bench/      micro-benchmarks (gemv_bench, attn_dec_bench, attn_bench, bw_bench, peak_bench, ...), run_bench.ps1
             (comparison with llama.cpp), prompt_bench.py, review_data.py (review data)
 scripts/    arc-server.ps1 (server in the background), arc-launcher.ps1 (launcher window, arc-launcher.cmd),
             pi-arc.ps1 (Pi launcher), install-pi.ps1 (commands and Pi's model list), pi-models.ps1 (writes that list)
 tests/      run_tests.ps1 and its reference data
-webui/      index.html
+webui/      index.html (chat, web search tools, Talk voice mode)
 docs/       before-after.md (every change, before / after, accuracy), review.md (results), speed-progress.md
-            (speed by date), lessons-intel-arc-igpu.md,
-            archive/ (arcinferzero-log.md, review_notes.md, flash-next-spec.md: older logs and notes)
+            (speed by date), lessons-intel-arc-igpu.md, f21-q2-speed.md (Gemma 4 accurate-mode plan),
+            flash-next-spec.md, archive/ (arcinferzero-log.md, review_notes.md: older logs and notes)
+QUEUE.md    open work, measurements and the decisions waiting for the user
 setup.cmd   setup.ps1: checks, builds, downloads models, connects Pi;  build.ps1: builds one or more tools
 ```
 
@@ -609,8 +641,10 @@ setup.cmd   setup.ps1: checks, builds, downloads models, connects Pi;  build.ps1
   (`ARC_FAIL_PASS=N`): the requests of that pass get an error (a streamed one an error event), the server stays up,
   and the next answers are the same as before the failure.
 - Mean KL of the next-token distributions vs the f32 reference: Qwen3.5-4B 0.0021; Qwen3.6-35B-A3B 0.0008 with the
-  GSQ file, 0.004-0.008 with UD-IQ4_XS (generation path); Gemma 4 12B 0.021 with Google's QAT file (0.029 with the
-  older Q4_K_M file). Gemma 4 is about 7x more sensitive to int8 rounding: int8 activations alone give ~0.009.
+  GSQ file, 0.004-0.008 with UD-IQ4_XS (generation path); Gemma 4 (480-token code prompt) 26B 0.0042, 12B 0.0002,
+  E4B 0.00075; Flash Next 0.048 (363 tokens). Gemma 4 is about 7x more sensitive to int8 rounding than Qwen, hence
+  its float attention and two passes. `tools/ref_forward` can also simulate each engine rounding on its own
+  (`REF_Q`, `REF_Q2`, `REF_ATTQ`, `REF_WQ8`) to find which one costs the KL.
 - Consistency: logits are compared bit for bit before and after every speed change (`runz --dump-logits`); the
   SSD expert streaming was run with small caches, simulated GPU out-of-memory (`ARC_FAKE_OOM`) and 40 prompts in a
   row, 56 of 56 runs identical; speculative decoding must give the text of plain decoding. The record:

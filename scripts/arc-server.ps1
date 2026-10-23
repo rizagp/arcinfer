@@ -72,8 +72,8 @@ $sessDir = Join-Path $stateDir "zero\sessions"
 
 # The models come from `serverz.exe --list-models` (Hugging Face cache + %LOCALAPPDATA%\arcinfer\models): name, file,
 # alias (= the model id of the API and Pi), shortcut, the context --ctx auto chose for the current GPU memory. The
-# context is auto unless -Ctx is given: the largest that fits the GPU memory currently set next to ~1 GiB for the
-# desktop and other apps, at most the trained one (Intel Graphics Software can change the GPU memory; it is then
+# context is auto unless -Ctx is given: the largest that fits the GPU memory currently set less 1.2 GiB for the
+# driver, at most the trained one (Intel Graphics Software can change the GPU memory; it is then
 # computed again). Smaller prompt chunks (-Chunk 1024) free ~1.1 GiB on the 27B for more context.
 $lastFile = Join-Path $stateDir "last-model.txt"  # the model started last (pi-arc starts it again by default)
 
@@ -191,7 +191,7 @@ Options for start / restart:
                                  -nodf / -df (models with a DFlash2 drafter): the MTP block only / DFlash2 only.
                                  Without it: a numbered list of the models in the Hugging Face cache.
   -Ctx <N|auto>                  context in tokens, or auto = the largest that fits the GPU memory currently
-                                 set, leaving ~1 GiB for Windows and other apps (computed on the first start
+                                 set, less 1.2 GiB for the driver (computed on the first start
                                  of a model, remembered, recomputed when the GPU memory changes). Not given:
                                  a running server keeps its context, a new one starts with auto. -Ctx auto
                                  also restarts a server that runs a fixed context.

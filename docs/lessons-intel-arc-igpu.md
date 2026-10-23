@@ -1,7 +1,8 @@
 # LLM inference on an Intel Arc iGPU: what made it fast, and what did not
 
 Lessons from building arcinfer, a from-scratch inference engine for the integrated Arc GPU of a Meteor Lake laptop,
-from the first working forward pass (early October 2026) to the Level Zero engine of 18 October 2026. Every number
+from the first working forward pass (early October 2026) to the Level Zero engine of 18 October 2026 (section 10:
+later lessons, to 23 October). Every number
 below was measured on one machine; your hardware, driver and models will differ, so treat them as starting points,
 not promises. Sources: [CHANGELOG.md](../CHANGELOG.md), [review.md](review.md), [review_notes.md](archive/review_notes.md),
 [speed-progress.md](speed-progress.md), [arcinferzero-log.md](archive/arcinferzero-log.md), [QUEUE.md](../QUEUE.md),
@@ -365,3 +366,39 @@ predicating the loads gave 905 -> 843 ms, bit-identical. Check bit identity afte
   calls; a call that is already well formed is sampled exactly as before (1–2 of ~1,100 tokens corrected).
 - Stream tool-call arguments as they are generated (a 2,368-token `write` showed nothing for 6 minutes), and never
   split a UTF-8 character across stream pieces or JSON strings.
+
+## 10. Later lessons (22-23 October 2026)
+
+- **Accuracy has a budget too, and it can be split.** Gemma 4 was ~7x more sensitive to int8 rounding than Qwen.
+  Two int8 passes per matmul input (the value, then its rounding residual) plus float attention took the 26B from
+  KL 0.0985 to 0.0042 at about the same generation speed (single tokens read the weights once for both passes);
+  E4B needed only the float attention (0.00075) and keeps one pass, 1.5x faster prompts. Decide per model against
+  a stated limit (here KL < 0.015) instead of one rule for all.
+- **Find what costs the KL before fixing it.** The f32 CPU reference can round each part the way the engine does
+  (`REF_Q`, `REF_Q2`, `REF_ATTQ`, `REF_WQ8` in `tools/ref_forward`). On Flash Next the sources did not add up: the
+  BF16 hyper-connection weights stored as Q8_0 cost 0.035 alone, the matmul inputs 0.037 alone, both together still
+  ~0.035. A model whose error saturates like that only gets below the limit when every part is precise.
+- **Attention is a bandwidth problem before it is a compute problem.** Gemma's float attention at head size 512
+  ran at ~12 % of the f32 peak because every query row read all K / V rows again. Splitting each head over 8
+  sub-groups (4 output values per lane) and giving a work-group as many query rows as fit 64 output floats per lane
+  (each K / V row read once for all of them) gave the 26B +17 %, the E4B +27 % and the 12B +40 % on 14K prompts, bit
+  for bit; for the head-256 sliding layers the same kernel with 4 rows beat the 32-row tile kernel (4.2 -> 2.3 s). 16
+  sub-groups or more rows than the register budget allows were slower every time: measure the register budget, not
+  the theory.
+- **A kernel's first use costs seconds per process even from the kernel cache.** The server warmed up with one
+  token, so the first long prompt paid the large-chunk kernels (35B: 8.6 s instead of 3.5 s); a 512-token warm-up
+  prompt at start moved that out of the first request.
+- **Bigger prompt chunks are not free with streamed experts.** A larger chunk needs larger buffers, which come out
+  of the expert cache: on Flash Next chunk 8192 made the prompt 15 % faster and generation 12 % slower.
+- **Fusing two passes into one kernel can lose to register pressure.** Both passes of the MoE GEMM in one launch
+  (weights decoded once) were bit-identical but spilled 2.5 KB and gained 1 %.
+- **Newer Intel GPUs drop 8-lane sub-groups.** Xe2 / Xe3 (Lunar Lake, Battlemage, Panther Lake) refuse kernels with
+  `intel_reqd_sub_group_size(8)` ("required subgroup size 8 ... unsupported"); read
+  `CL_DEVICE_SUB_GROUP_SIZES_INTEL` at start and build such kernels with 16 lanes there. Their 64-byte registers
+  hold at 16 lanes what Xe-LPG's 32-byte registers hold at 8. They also have XMX: DPAS on int8 gives the same exact
+  integer sums as DP4a, so an XMX GEMM can be checked bit for bit against the DP4a one at start; `ocloc` compiles
+  for those targets on a machine without them (`-device ptl`, `bmg`, `lnl`).
+- **A web UI talking to the engine needs little server help.** Web search and page reading are two plain HTTP
+  endpoints (WinHTTP; every host and redirect resolved and checked for private addresses first); the tool loop, the
+  voice conversation (loudness-based end-of-speech, sentence-by-sentence speech synthesis, barge-in) and searches
+  that run in the background while the model talks all live in the page.

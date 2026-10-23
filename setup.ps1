@@ -83,7 +83,7 @@ if ($ramGb -lt 15) { Note "RAM $ramGb GB: enough for the 4B / E4B models only (3
 $gpus = @(Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match "Intel" })
 if (-not $gpus) { Bad "No Intel GPU found. arcinfer needs an Intel Core Ultra with Arc integrated graphics." }
 foreach ($g in $gpus) { Ok "GPU: $($g.Name), driver $($g.DriverVersion)" }
-if (-not ($gpus | Where-Object { $_.Name -match "Arc" })) { Note "only Intel Arc (Xe-LPG) integrated graphics is tested" }
+if (-not ($gpus | Where-Object { $_.Name -match "Arc" })) { Note "only Intel Arc integrated graphics (Xe-LPG tested; Xe2 / Xe3 reported to work) is supported" }
 
 # Visual Studio C++ compiler (the same search as build.ps1)
 $vcvars = $null
