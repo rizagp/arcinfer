@@ -205,6 +205,9 @@ else {
 # hyper-connection kernels of zero/kernels/ops.cl (Flash Next) vs a CPU computation on random data (uses the GPU)
 if ($SkipGpu) { Skip "hyper-connection kernels (zero)" "-SkipGpu" }
 else { Unit "hyper-connection kernels (zero)" .\bin\test_hc.exe @() "ALL OK" }
+# float attention kernels (Gemma 4; head 128 for Flint) vs a CPU computation in double (uses the GPU)
+if ($SkipGpu) { Skip "float attention kernels (zero)" "-SkipGpu" }
+elseif (Test-Path .\bin\test_fa.exe) { Unit "float attention kernels (zero)" .\bin\test_fa.exe @() "test_fa: all passed" }
 
 if ($SkipGpu) {
   Pop-Location

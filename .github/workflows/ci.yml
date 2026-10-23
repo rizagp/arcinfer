@@ -18,7 +18,8 @@ jobs:
         run: |
           .\build.ps1 tools\clinfo.cpp zero\serverz.cpp zero\runz.cpp tools\ref_forward.cpp `
             tests\test_http.cpp tests\test_api_compat.cpp tests\test_web_tools.cpp tests\test_xcache_pools.cpp `
-            tests\test_json.cpp tests\test_sampler.cpp tests\test_gguf_pack.cpp tests\test_quant_rows.cpp
+            tests\test_json.cpp tests\test_sampler.cpp tests\test_gguf_pack.cpp tests\test_quant_rows.cpp `
+            tests\test_hc.cpp tests\test_fa.cpp
       - name: Unit tests
         shell: powershell
         run: |

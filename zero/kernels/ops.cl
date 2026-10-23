@@ -1600,14 +1600,27 @@ __kernel void attn_prep_g(__global const float* qkv, int ldq, int nh, int nkv, i
 // 1/sqrt(d) (Gemma 4). Query position p0 + m sees the keys lo .. hi: lo = p - win + 1 (win > 0, sliding) or 0,
 // hi = p, or nc_hi inside a non-causal span [nc_lo, nc_hi] (an image). Each row is computed alone (its result does
 // not depend on the other rows of the launch): verification rows equal single tokens. One sub-group per (GQ q heads
-// of one kv head, row); keys in blocks of 16, lane = key for the scores, lane = 16 dims per 256 for P.V.
+// of one kv head, row); keys in blocks of 16, lane = key for the scores, lane = 16 dims per 256 for P.V
+// (head 128: 8 dims per lane).
 // grid (16, nh / GQ, M), local (16, 1, 1).
 // -DFA_ROWS=R (prompt chunks): a work-group of R consecutive rows, one sub-group each as above, loads every block of
 // 16 keys and values once into local memory for all of them (each row read them all from global memory before:
 // 4K-token prompt 14.7 s of attention); a row still takes exactly its own blocks with the same arithmetic, so the
 // results are bit for bit those of R = 1. grid (16, nh / GQ, ceil(M / R) * R), local (16, 1, R).
 #ifdef FA_G
-#define FDC (HD / 256)  // 256-dim chunks of a row
+#if HD >= 256
+#define FDC (HD / 256)  // 256-dim chunks of a row, 16 dims per lane each
+#define FVW 16
+#define FVT float16
+#define FVLOAD_H vload_half16
+#define FVSTORE vstore16
+#else  // (head 128, Flint: one chunk, 8 dims per lane)
+#define FDC 1
+#define FVW 8
+#define FVT float8
+#define FVLOAD_H vload_half8
+#define FVSTORE vstore8
+#endif
 // -DFA_SPLIT (generation / verification, <= 8 rows): flash-decoding. A row's key blocks are cut into splits of at
 // least FA_BPS blocks, at most FA_SMAX of them, a function of that row's own range only (so a row gives the same
 // result alone and in a verification launch); each split runs the loop below over its blocks and writes its
@@ -1654,7 +1667,7 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
   __global const float* qp = qf + ((size_t)mr * nh + hg * GQ) * HD;
   __global const KC_T* kb = kc + (size_t)g * cap * HD;
   __global const half* vb = vc + (size_t)g * cap * HD;
-  float16 o[GQ][FDC];
+  FVT o[GQ][FDC];
   float mx[GQ], lp[GQ];
 #pragma unroll
   for (int r = 0; r < GQ; ++r) {
@@ -1731,15 +1744,15 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
       const int pj = t0 + j;
       if (pj < lo || pj > hi) continue;  // (the same for every lane)
 #if FA_ROWS > 1
-      __local const half* vrow = (__local const half*)sv + j * HD + 16 * lane;
+      __local const half* vrow = (__local const half*)sv + j * HD + FVW * lane;
 #else
-      __global const half* vrow = vb + (size_t)(t0s + j) * HD + 16 * lane;
+      __global const half* vrow = vb + (size_t)(t0s + j) * HD + FVW * lane;
 #endif
 #pragma unroll
       for (int c = 0; c < FDC; ++c) {
-        const float16 vv = vload_half16(0, vrow + 256 * c);
+        const FVT vv = FVLOAD_H(0, vrow + 16 * FVW * c);
 #pragma unroll
-        for (int r = 0; r < GQ; ++r) o[r][c] = fma((float16)sub_group_broadcast(s[r], j), vv, o[r][c]);
+        for (int r = 0; r < GQ; ++r) o[r][c] = fma((FVT)sub_group_broadcast(s[r], j), vv, o[r][c]);
       }
     }
   }
@@ -1750,7 +1763,7 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
 #ifdef FA_SPLIT  // (this split's unnormalized output, then its sum and max)
     __global float* pp = part + (((size_t)m * nh + hg * GQ + r) * FA_SMAX + sp) * (HD + 2);
 #pragma unroll
-    for (int c = 0; c < FDC; ++c) vstore16(o[r][c], 0, pp + 256 * c + 16 * lane);
+    for (int c = 0; c < FDC; ++c) FVSTORE(o[r][c], 0, pp + 16 * FVW * c + FVW * lane);
     if (lane == 0) {
       pp[HD] = L;
       pp[HD + 1] = mx[r];
@@ -1758,7 +1771,7 @@ __kernel void attn_fa_g(__global const float* qf, __global const KC_T* kc, __glo
 #else
 #pragma unroll
     for (int c = 0; c < FDC; ++c)
-      vstore16(o[r][c] / L, 0, out + ((size_t)m * nh + hg * GQ + r) * HD + 256 * c + 16 * lane);
+      FVSTORE(o[r][c] / L, 0, out + ((size_t)m * nh + hg * GQ + r) * HD + 16 * FVW * c + FVW * lane);
 #endif
   }
 }
@@ -1792,6 +1805,10 @@ __kernel void attn_fa_gc(__global const float* part, int nh, int pos0, int M_val
   out[((size_t)m * nh + h) * HD + d] = num / den;
 }
 #undef FDC
+#undef FVW
+#undef FVT
+#undef FVLOAD_H
+#undef FVSTORE
 #endif  // FA_G
 
 // attn_fa_g for prompt chunks of the wide-head layers (-DFA_GH, two-pass mode; Gemma 4's global layers, head 512, 8
