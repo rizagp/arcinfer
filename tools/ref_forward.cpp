@@ -246,8 +246,10 @@ static float gelu_tanh(float x) { return 0.5f * x * (1.0f + std::tanh(0.79788456
 // attention scale 1, sliding window, shared KV layers, GeGLU FFN, layer output scale. Leaves the residual stream in x.
 // REF_ATTQ: q, k and v rows rounded to int8 with a per-row absmax scale, as arcinfer's attention stores them.
 // REF_ATTQB = block size of the scales (default: the whole row).
+// REF_ATTQ_HD = a head size: only the layers with that head size are rounded (Gemma 4: 512 global, 256 sliding).
 static void fq_row(float* v, int n, bool is_v = false) {
   if (!getenv("REF_ATTQ")) return;
+  if (getenv("REF_ATTQ_HD") && atoi(getenv("REF_ATTQ_HD")) != n) return;
   const bool row = is_v ? getenv("REF_ATTQV_ROW") != nullptr : getenv("REF_ATTQQK_ROW") != nullptr;
   const int B = getenv("REF_ATTQB") && !row ? atoi(getenv("REF_ATTQB")) : n;
   round_int8(v, (size_t)n, B, getenv("REF_ATTQ2") ? 2 : 1);  // (REF_ATTQ2=1: two int8 passes)

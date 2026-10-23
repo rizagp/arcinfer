@@ -309,6 +309,7 @@ class Server {
     int gw = 0, gh = 0;  // merged-token grid (Qwen M-RoPE); 0 for Gemma and audio
   };
   std::map<uint64_t, MediaEmb> img_cache_;  // media embeddings keyed by the file bytes
+  size_t img_cache_bytes_ = 0;               // (their floats: the cache is emptied past 512 MB or 64 entries)
   std::string think_close_ = "</think>";
   SamplingParams defaults_;
   int im_start_ = -1;
@@ -1256,7 +1257,11 @@ class Server {
                 e = std::make_shared<std::vector<float>>(audio_->encode(s16, n));
                 fprintf(stderr, "audio %.1f s -> %d tokens, decoded and encoded in %.0f ms\n", s16.size() / 16000.0, n, ms_since(t0));
               }
-              if (img_cache_.size() > 64) img_cache_.clear();
+              if (img_cache_.size() > 64 || img_cache_bytes_ + e->size() * 4 > (512u << 20)) {
+                img_cache_.clear();
+                img_cache_bytes_ = 0;
+              }
+              img_cache_bytes_ += e->size() * 4;
               it = img_cache_.emplace(h, MediaEmb{e, gw, gh}).first;
             }
             const int width = is_img ? (qvision_ ? qvision_->n_out : vision_->out_dim()) : audio_->out_dim();

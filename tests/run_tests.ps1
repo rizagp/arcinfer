@@ -175,6 +175,7 @@ Unit "HTTP parser (malformed requests)" .\bin\test_http.exe @() "test_http: all 
 Unit "API compatibility" .\bin\test_api_compat.exe @() "all passed"
 Unit "web tools (HTML to text, result parsing, address filter)" .\bin\test_web_tools.exe @() "test_web_tools: all passed"
 Unit "expert cache pools" .\bin\test_xcache_pools.exe @() "ALL OK"
+if (Test-Path .\bin\test_json.exe) { Unit "JSON parser (numbers, escapes, repeated keys)" .\bin\test_json.exe @() "test_json: all passed" }
 if (Test-Path .\bin\test_sampler.exe) { Unit "sampler" .\bin\test_sampler.exe @() "ALL OK" }
 Unit "tool call streaming" .\bin\tool_stream_test.exe @("3000") "ALL OK"
 

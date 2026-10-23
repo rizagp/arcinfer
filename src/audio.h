@@ -174,6 +174,10 @@ inline std::vector<float> decode_16k(const std::vector<uint8_t>& bytes) {
   int rate = 0;
   if (!parse_wav(bytes, s, rate)) s = decode_mf(bytes, rate);
   if (s.empty()) throw std::runtime_error("audio: no samples");
+  // (a hostile or broken file: an odd sample rate makes the resampling window huge, an hours-long clip takes
+  //  minutes of CPU and more context than any model has)
+  if (rate < 1000 || rate > 384000) throw std::runtime_error("audio: unsupported sample rate " + std::to_string(rate));
+  if (s.size() / (size_t)rate > 600) throw std::runtime_error("audio: longer than 10 minutes");
   return resample(s, rate, 16000);
 }
 

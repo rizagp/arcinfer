@@ -5,6 +5,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <algorithm>
+#include <chrono>
 #include <atomic>
 #include <cctype>
 #include <charconv>
@@ -239,13 +240,31 @@ class HttpServer {
     std::string buf;
     char tmp[65536];
     while (true) {
-      // read headers
+      // read headers. An idle keep-alive connection may wait 600 s for its next request; once a request has begun,
+      // each read gets 30 s and the headers 60 s in all (a client that trickles them in, slowloris, cannot hold one
+      // of the 64 connections for long)
       size_t he;
+      setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tmo, sizeof tmo);
+      auto t_head = std::chrono::steady_clock::now();
+      bool begun = !buf.empty();
+      if (begun) {
+        DWORD rt = 30000;
+        setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rt, sizeof rt);
+      }
       while ((he = buf.find("\r\n\r\n")) == std::string::npos) {
         const int n = recv(c, tmp, sizeof tmp, 0);
         if (n <= 0) { closesocket(c); return; }
         buf.append(tmp, n);
         if (buf.size() > kMaxHead) { closesocket(c); return; }
+        if (!begun) {
+          begun = true;
+          t_head = std::chrono::steady_clock::now();
+          DWORD rt = 30000;
+          setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rt, sizeof rt);
+        } else if (std::chrono::steady_clock::now() - t_head > std::chrono::seconds(60)) {
+          closesocket(c);
+          return;
+        }
       }
       HttpRequest rq;
       const std::string head = buf.substr(0, he);

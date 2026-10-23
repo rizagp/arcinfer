@@ -6,6 +6,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -36,7 +37,9 @@ class Json {
 
   bool as_bool(bool def = false) const { return t_ == Bool ? b_ : def; }
   double as_number(double def = 0) const { return t_ == Number ? n_ : def; }
-  int64_t as_int(int64_t def = 0) const { return t_ == Number ? (int64_t)n_ : def; }
+  int64_t as_int(int64_t def = 0) const {  // (out of range / not finite: def, never an undefined conversion)
+    return t_ == Number && std::isfinite(n_) && std::fabs(n_) < 9.2e18 ? (int64_t)n_ : def;
+  }
   const std::string& as_string() const { static const std::string empty; return t_ == String ? s_ : empty; }
   std::string str(const std::string& def = "") const { return t_ == String ? s_ : def; }
 
@@ -118,7 +121,8 @@ class Json {
       case Bool: out += b_ ? "true" : "false"; break;
       case Number: {
         char buf[32];
-        if (std::isfinite(n_) && n_ == std::floor(n_) && std::fabs(n_) < 1e15) snprintf(buf, sizeof buf, "%lld", (long long)n_);
+        if (!std::isfinite(n_)) snprintf(buf, sizeof buf, "null");  // (JSON has no nan / inf)
+        else if (n_ == std::floor(n_) && std::fabs(n_) < 1e15) snprintf(buf, sizeof buf, "%lld", (long long)n_);
         else snprintf(buf, sizeof buf, "%.17g", n_);
         out += buf;
         break;
@@ -170,7 +174,17 @@ class Json {
         case 'b': o.push_back('\b'); break;
         case 'f': o.push_back('\f'); break;
         case 'u': {
-          auto hex4 = [&](size_t p) { return (uint32_t)std::stoul(s.substr(p, 4), nullptr, 16); };
+          auto hex4 = [&](size_t p) {  // (exactly four hex digits, or the string is invalid)
+            if (p + 4 > s.size()) throw std::runtime_error("json: bad \\u escape");
+            uint32_t v = 0;
+            for (size_t q = p; q < p + 4; ++q) {
+              const char h = s[q];
+              const int d = h >= '0' && h <= '9' ? h - '0' : h >= 'a' && h <= 'f' ? h - 'a' + 10 : h >= 'A' && h <= 'F' ? h - 'A' + 10 : -1;
+              if (d < 0) throw std::runtime_error("json: bad \\u escape");
+              v = v * 16 + (uint32_t)d;
+            }
+            return v;
+          };
           uint32_t cp = hex4(i);
           i += 4;
           if (cp >= 0xD800 && cp < 0xDC00 && i + 6 <= s.size() && s[i] == '\\' && s[i + 1] == 'u') {
@@ -197,6 +211,7 @@ class Json {
     const char c = s[i];
     if (c == '{') {
       Json o = object();
+      std::unordered_map<std::string, size_t> at;  // (key -> entry: a repeated key replaces it in linear time)
       ++i;
       skip_ws(s, i);
       if (i < s.size() && s[i] == '}') { ++i; return o; }
@@ -206,7 +221,10 @@ class Json {
         skip_ws(s, i);
         if (i >= s.size() || s[i] != ':') throw std::runtime_error("json: expected ':'");
         ++i;
-        o.o_.push_back({k, parse_value(s, i, depth + 1)});
+        Json v = parse_value(s, i, depth + 1);  // (a repeated key: the last value wins, as in JavaScript / Python)
+        const auto [it, fresh] = at.emplace(k, o.o_.size());
+        if (fresh) o.o_.push_back({std::move(k), std::move(v)});
+        else o.o_[it->second].second = std::move(v);
         skip_ws(s, i);
         if (i < s.size() && s[i] == ',') { ++i; continue; }
         if (i < s.size() && s[i] == '}') { ++i; return o; }
@@ -233,8 +251,13 @@ class Json {
     size_t j = i;
     while (j < s.size() && (isdigit((unsigned char)s[j]) || s[j] == '-' || s[j] == '+' || s[j] == '.' || s[j] == 'e' || s[j] == 'E')) ++j;
     if (j == i) throw std::runtime_error("json: unexpected character");
-    Json n(std::stod(s.substr(i, j - i)));
+    // (the whole run must be one number: "1.0.0" or "1e" are errors, not 1)
+    const std::string t = s.substr(i, j - i);
+    size_t used = 0;
+    double v = 0;
+    try { v = std::stod(t, &used); } catch (const std::out_of_range&) { used = 0; } catch (const std::invalid_argument&) { used = 0; }
+    if (used != t.size() || !std::isfinite(v)) throw std::runtime_error("json: bad number");
     i = j;
-    return n;
+    return Json(v);
   }
 };
